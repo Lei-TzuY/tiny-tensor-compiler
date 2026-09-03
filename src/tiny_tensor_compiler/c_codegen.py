@@ -97,13 +97,15 @@ def _emit_kernel(
         c_type = _c_type(output_type.dtype)
         zero = _zero_literal(output_type.dtype)
         lines.append(f"{indent}{c_type} value = ({c_type}){operand};")
-        if output_type.dtype in {DType.FLOAT32, DType.FLOAT64}:
-            lines.append(
-                f"{indent}{output_ref} = isnan(value) ? value : "
-                f"(value <= {zero} ? {zero} : value);"
-            )
-        else:
-            lines.append(f"{indent}{output_ref} = value < {zero} ? {zero} : value;")
+        lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
+    elif op.opcode in {"relu_add", "relu_mul"}:
+        lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
+        rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
+        c_type = _c_type(output_type.dtype)
+        zero = _zero_literal(output_type.dtype)
+        operator = "+" if op.opcode == "relu_add" else "*"
+        lines.append(f"{indent}{c_type} value = (({c_type}){lhs} {operator} ({c_type}){rhs});")
+        lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
@@ -113,6 +115,15 @@ def _emit_kernel(
     lines.append("    }")
     lines.append("")
     return lines
+
+
+def _emit_relu_assignment(output_ref: str, dtype: DType, zero: str, indent: str) -> list[str]:
+    if dtype in {DType.FLOAT32, DType.FLOAT64}:
+        return [
+            f"{indent}{output_ref} = isnan(value) ? value : "
+            f"(value <= {zero} ? {zero} : value);"
+        ]
+    return [f"{indent}{output_ref} = value < {zero} ? {zero} : value;"]
 
 
 def _emit_return(op: LoopReturn, type_: TensorType) -> list[str]:
