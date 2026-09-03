@@ -7,7 +7,7 @@ import numpy as np
 
 from .inference import infer_binary, infer_relu
 from .ir import TensorType
-from .lowering import BufferAlloc, BufferKernel, BufferReturn, CPUProgram, plan_memory
+from .lowering import BufferAlloc, BufferReturn, CPUProgram, plan_memory
 
 
 @dataclass(frozen=True)
