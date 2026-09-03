@@ -91,7 +91,13 @@ def _emit_kernel(
         c_type = _c_type(output_type.dtype)
         zero = _zero_literal(output_type.dtype)
         lines.append(f"{indent}{c_type} value = ({c_type}){operand};")
-        lines.append(f"{indent}{output_ref} = value < {zero} ? {zero} : value;")
+        if output_type.dtype in {DType.FLOAT32, DType.FLOAT64}:
+            lines.append(
+                f"{indent}{output_ref} = isnan(value) ? value : "
+                f"(value <= {zero} ? {zero} : value);"
+            )
+        else:
+            lines.append(f"{indent}{output_ref} = value < {zero} ? {zero} : value;")
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
