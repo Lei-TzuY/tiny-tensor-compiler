@@ -11,6 +11,7 @@ from tiny_tensor_compiler import (
     execute_loop,
     execute_native,
     execute_reference,
+    fuse_elementwise,
     lower_to_cpu,
     lower_to_loops,
 )
@@ -49,6 +50,25 @@ def test_native_execution_matches_reference_and_loop_for_broadcast_relu(dtype):
     np.testing.assert_array_equal(native, reference)
     assert native.dtype == reference.dtype
     assert native.shape == reference.shape
+
+
+@pytest.mark.parametrize("opcode", ["add", "mul"])
+def test_native_fused_broadcast_binary_relu_matches_reference(opcode):
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    lhs = builder.tensor([[-3.0], [2.0]], dtype="float32")
+    rhs = builder.tensor([[1.0, 2.0, 4.0]], dtype="float32")
+    binary = lhs + rhs if opcode == "add" else lhs * rhs
+    module = builder.finish(binary.relu())
+    loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
+
+    assert any(kernel.opcode == f"relu_{opcode}" for kernel in loops.kernels)
+    native = execute_native(loops)
+    interpreted = execute_loop(loops)
+    reference = execute_reference(module)
+
+    np.testing.assert_array_equal(native, interpreted)
+    np.testing.assert_array_equal(native, reference)
 
 
 def test_native_integer_overflow_matches_numpy_wrap_semantics():
