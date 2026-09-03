@@ -7,6 +7,7 @@ import pytest
 import tiny_tensor_compiler.native as native_module
 from tiny_tensor_compiler import (
     GraphBuilder,
+    VerificationError,
     execute_cpu,
     execute_loop,
     execute_native,
@@ -15,7 +16,9 @@ from tiny_tensor_compiler import (
     generate_c,
     lower_to_cpu,
     lower_to_loops,
+    verify,
 )
+from tiny_tensor_compiler.ir import DType, Function, Module, TensorType
 
 
 def _default_compiler_or_skip() -> None:
@@ -66,6 +69,19 @@ def test_external_input_runtime_requires_exact_count_shape_and_dtype():
         execute_reference(module, inputs=[np.array([[1, 2]], dtype=np.int32)])
     with pytest.raises(ValueError, match="input 0 dtype"):
         execute_reference(module, inputs=[np.array([1, 2], dtype=np.int64)])
+
+
+def test_verifier_rejects_non_dense_external_input_index():
+    function = Function()
+    input_op = function.add_op(
+        "input",
+        result_types=[TensorType((1,), DType.INT32)],
+        attrs={"index": 1},
+    )
+    function.add_op("return", operands=[input_op.results[0]])
+
+    with pytest.raises(VerificationError, match="next dense input index 0"):
+        verify(Module(function))
 
 
 def test_generated_c_extends_output_pointer_abi_with_typed_input_pointers():
