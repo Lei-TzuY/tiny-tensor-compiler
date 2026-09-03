@@ -31,18 +31,10 @@ def execute_native(program: LoopProgram, compiler: str | None = None) -> np.ndar
         library_path = directory_path / _library_name()
         source_path.write_text(generate_c(program), encoding="utf-8")
 
-        compile_command = [
-            *command,
-            "-std=c11",
-            "-O2",
-            "-fwrapv",
-            *_shared_library_flags(),
-            str(source_path),
-            "-o",
-            str(library_path),
-        ]
+        compile_command = _build_compile_command(command, source_path.name, library_path.name)
         completed = subprocess.run(
             compile_command,
+            cwd=directory_path,
             capture_output=True,
             text=True,
             check=False,
@@ -69,13 +61,42 @@ def execute_native(program: LoopProgram, compiler: str | None = None) -> np.ndar
 
 
 def _compiler_command(compiler: str | None) -> list[str]:
-    configured = compiler if compiler is not None else os.environ.get("CC", "cc")
+    default = "cl" if os.name == "nt" else "cc"
+    configured = compiler if compiler is not None else os.environ.get("CC", default)
     command = shlex.split(configured)
     if not command:
         raise NativeCompilationError("C compiler command is empty")
     if shutil.which(command[0]) is None:
         raise NativeCompilationError(f"C compiler executable not found: {command[0]}")
     return command
+
+
+def _build_compile_command(command: list[str], source_name: str, library_name: str) -> list[str]:
+    if _is_msvc(command):
+        return [
+            *command,
+            "/nologo",
+            "/std:c11",
+            "/O2",
+            "/LD",
+            source_name,
+            f"/Fe:{library_name}",
+        ]
+    return [
+        *command,
+        "-std=c11",
+        "-O2",
+        "-fwrapv",
+        *_shared_library_flags(),
+        source_name,
+        "-o",
+        library_name,
+    ]
+
+
+def _is_msvc(command: list[str]) -> bool:
+    executable = Path(command[0]).name.casefold()
+    return executable in {"cl", "cl.exe", "clang-cl", "clang-cl.exe"}
 
 
 def _return_type(program: LoopProgram):
@@ -86,16 +107,20 @@ def _return_type(program: LoopProgram):
 
 
 def _library_name() -> str:
+    if os.name == "nt":
+        return "program.dll"
     if sys.platform == "darwin":
         return "program.dylib"
     if os.name == "posix":
         return "program.so"
-    raise NativeCompilationError("native C execution currently requires a POSIX-like platform")
+    raise NativeCompilationError(f"unsupported native platform: {os.name}")
 
 
 def _shared_library_flags() -> list[str]:
+    if os.name == "nt":
+        return ["-shared"]
     if sys.platform == "darwin":
         return ["-dynamiclib", "-fPIC"]
     if os.name == "posix":
         return ["-shared", "-fPIC"]
-    raise NativeCompilationError("native C execution currently requires a POSIX-like platform")
+    raise NativeCompilationError(f"unsupported native platform: {os.name}")
