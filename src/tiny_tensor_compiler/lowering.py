@@ -33,11 +33,69 @@ BufferOperation = BufferAlloc | BufferKernel | BufferReturn
 
 
 @dataclass(frozen=True)
+class BufferAssignment:
+    virtual: int
+    physical: int
+    type: TensorType
+
+
+@dataclass(frozen=True)
+class MemoryPlan:
+    assignments: tuple[BufferAssignment, ...]
+
+    def __post_init__(self) -> None:
+        virtuals: set[int] = set()
+        physical_types: dict[int, TensorType] = {}
+        for assignment in self.assignments:
+            if assignment.virtual in virtuals:
+                raise ValueError(f"virtual buffer b{assignment.virtual} is assigned more than once")
+            if assignment.physical < 0:
+                raise ValueError(f"invalid negative physical buffer p{assignment.physical}")
+            previous_type = physical_types.get(assignment.physical)
+            if previous_type is not None and previous_type != assignment.type:
+                raise ValueError(
+                    f"physical buffer p{assignment.physical} is assigned incompatible tensor types"
+                )
+            virtuals.add(assignment.virtual)
+            physical_types[assignment.physical] = assignment.type
+
+        if physical_types and set(physical_types) != set(range(len(physical_types))):
+            raise ValueError("physical buffer ids must be dense starting at p0")
+
+    @property
+    def physical_count(self) -> int:
+        return len({assignment.physical for assignment in self.assignments})
+
+    @property
+    def physical_types(self) -> tuple[TensorType, ...]:
+        types: dict[int, TensorType] = {}
+        for assignment in self.assignments:
+            types.setdefault(assignment.physical, assignment.type)
+        return tuple(types[slot] for slot in range(len(types)))
+
+    def physical_for(self, virtual: int) -> int:
+        for assignment in self.assignments:
+            if assignment.virtual == virtual:
+                return assignment.physical
+        raise KeyError(f"virtual buffer b{virtual} has no physical assignment")
+
+    def dump(self) -> str:
+        return "\n".join(
+            f"b{assignment.virtual} -> p{assignment.physical} : {assignment.type}"
+            for assignment in self.assignments
+        )
+
+
+@dataclass(frozen=True)
 class CPUProgram:
     operations: tuple[BufferOperation, ...]
 
     def __post_init__(self) -> None:
         _verify_buffer_ir(self.operations)
+
+    @property
+    def allocations(self) -> tuple[BufferAlloc, ...]:
+        return tuple(op for op in self.operations if isinstance(op, BufferAlloc))
 
     @property
     def instructions(self) -> tuple[BufferKernel, ...]:
@@ -101,6 +159,47 @@ def lower_to_cpu(module: Module) -> CPUProgram:
         )
 
     return CPUProgram(tuple(operations))
+
+
+def plan_memory(program: CPUProgram) -> MemoryPlan:
+    """Greedily reuse same-typed physical slots after virtual-buffer lifetimes end."""
+    allocation_positions: dict[int, int] = {}
+    types: dict[int, TensorType] = {}
+    last_uses: dict[int, int] = {}
+
+    for index, op in enumerate(program.operations):
+        if isinstance(op, BufferAlloc):
+            allocation_positions[op.buffer] = index
+            types[op.buffer] = op.type
+        elif isinstance(op, BufferKernel):
+            last_uses[op.output] = max(last_uses.get(op.output, -1), index)
+            for buffer in op.inputs:
+                last_uses[buffer] = max(last_uses.get(buffer, -1), index)
+        else:
+            last_uses[op.buffer] = max(last_uses.get(op.buffer, -1), index)
+
+    physical_state: list[tuple[TensorType, int]] = []
+    assignments: list[BufferAssignment] = []
+
+    for buffer, start in allocation_positions.items():
+        buffer_type = types[buffer]
+        end = max(start, last_uses.get(buffer, start))
+        physical: int | None = None
+
+        for slot, (slot_type, previous_end) in enumerate(physical_state):
+            if slot_type == buffer_type and previous_end < start:
+                physical = slot
+                break
+
+        if physical is None:
+            physical = len(physical_state)
+            physical_state.append((buffer_type, end))
+        else:
+            physical_state[physical] = (buffer_type, end)
+
+        assignments.append(BufferAssignment(buffer, physical, buffer_type))
+
+    return MemoryPlan(tuple(assignments))
 
 
 def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
