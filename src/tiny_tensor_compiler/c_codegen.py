@@ -11,6 +11,14 @@ from .ir import DType, TensorType
 from .loop_ir import IndexMap, LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
 
 
+_BINARY_CHAIN_OPERATORS = {
+    "chain_add_add": ("+", "+"),
+    "chain_add_mul": ("+", "*"),
+    "chain_mul_add": ("*", "+"),
+    "chain_mul_mul": ("*", "*"),
+}
+
+
 def generate_c(program: LoopProgram) -> str:
     """Generate deterministic C11 source for a verified explicit loop program."""
     types = {op.buffer: op.type for op in program.allocations}
@@ -124,6 +132,18 @@ def _emit_kernel(
         operator = "+" if op.opcode == "relu_add" else "*"
         lines.append(f"{indent}{c_type} value = (({c_type}){lhs} {operator} ({c_type}){rhs});")
         lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
+    elif op.opcode in _BINARY_CHAIN_OPERATORS:
+        lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
+        rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
+        tail = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
+        c_type = _c_type(output_type.dtype)
+        inner_operator, outer_operator = _BINARY_CHAIN_OPERATORS[op.opcode]
+        lines.append(
+            f"{indent}{c_type} inner = (({c_type}){lhs} {inner_operator} ({c_type}){rhs});"
+        )
+        lines.append(
+            f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
+        )
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
