@@ -28,24 +28,16 @@ class NativeCompilationError(RuntimeError):
 
 
 class _NativeArtifact:
-    def __init__(
-        self,
-        directory: Path,
-        library: ctypes.CDLL,
-        *,
-        remove_directory_on_close: bool = True,
-    ) -> None:
+    def __init__(self, directory: Path, library: ctypes.CDLL) -> None:
         self.directory = directory
         self.library = library
-        self.remove_directory_on_close = remove_directory_on_close
         self.closed = False
 
     def close(self) -> None:
         if self.closed:
             return
         _release_library(self.library)
-        if self.remove_directory_on_close:
-            shutil.rmtree(self.directory)
+        shutil.rmtree(self.directory)
         self.closed = True
 
 
@@ -92,7 +84,7 @@ def execute_native(
 
 
 def clear_native_cache() -> None:
-    """Release process-cached libraries and remove only process-owned build directories."""
+    """Release process-cached libraries and remove their process-owned directories."""
     with _NATIVE_CACHE_LOCK:
         artifacts = list(_NATIVE_CACHE.values())
         _NATIVE_CACHE.clear()
@@ -143,7 +135,7 @@ def _get_or_compile_persistent_artifact(
     command: list[str],
     library_path: Path,
 ) -> _NativeArtifact:
-    cached = _load_existing_persistent_artifact(library_path)
+    cached = _stage_existing_persistent_artifact(library_path)
     if cached is not None:
         return cached
 
@@ -155,23 +147,17 @@ def _get_or_compile_persistent_artifact(
         try:
             os.replace(compiled_library, library_path)
         except OSError as error:
-            concurrent = _load_existing_persistent_artifact(library_path)
+            concurrent = _stage_existing_persistent_artifact(library_path)
             if concurrent is not None:
                 return concurrent
             raise NativeCompilationError(
                 f"failed to publish persistent native artifact: {error}"
             ) from error
 
-        try:
-            library = _load_library(library_path)
-        except NativeCompilationError:
-            _remove_file(library_path)
-            raise
-        return _NativeArtifact(
-            library_path.parent,
-            library,
-            remove_directory_on_close=False,
-        )
+        staged = _stage_existing_persistent_artifact(library_path)
+        if staged is None:
+            raise NativeCompilationError("newly compiled persistent native artifact could not be loaded")
+        return staged
     finally:
         shutil.rmtree(build_directory, ignore_errors=True)
 
@@ -203,19 +189,25 @@ def _load_library(library_path: Path) -> ctypes.CDLL:
         raise NativeCompilationError(f"failed to load native shared library: {error}") from error
 
 
-def _load_existing_persistent_artifact(library_path: Path) -> _NativeArtifact | None:
+def _stage_existing_persistent_artifact(library_path: Path) -> _NativeArtifact | None:
     if not library_path.is_file():
         return None
+
+    staging_directory = Path(tempfile.mkdtemp(prefix="tiny_tensor_compiler_cached_"))
+    staged_library = staging_directory / _library_name()
     try:
-        library = ctypes.CDLL(str(library_path))
-    except OSError:
+        shutil.copy2(library_path, staged_library)
+    except OSError as error:
+        shutil.rmtree(staging_directory, ignore_errors=True)
+        raise NativeCompilationError(f"failed to stage persistent native artifact: {error}") from error
+
+    try:
+        library = _load_library(staged_library)
+    except NativeCompilationError:
+        shutil.rmtree(staging_directory, ignore_errors=True)
         _remove_file(library_path)
         return None
-    return _NativeArtifact(
-        library_path.parent,
-        library,
-        remove_directory_on_close=False,
-    )
+    return _NativeArtifact(staging_directory, library)
 
 
 def _persistent_library_path(
