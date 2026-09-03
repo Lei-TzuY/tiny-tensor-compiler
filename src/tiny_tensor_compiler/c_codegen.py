@@ -10,7 +10,6 @@ import numpy as np
 from .ir import DType, TensorType
 from .loop_ir import IndexMap, LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
 
-
 _BINARY_CHAIN_OPERATORS = {
     "chain_add_add": ("+", "+"),
     "chain_add_mul": ("+", "*"),
