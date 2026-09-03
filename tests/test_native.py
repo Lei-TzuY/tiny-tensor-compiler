@@ -1,3 +1,4 @@
+import os
 import shutil
 
 import numpy as np
@@ -14,27 +15,26 @@ from tiny_tensor_compiler import (
 )
 
 
-def _compiler_or_skip() -> str:
-    compiler = shutil.which("cc")
-    if compiler is None:
-        pytest.skip("no C compiler available")
-    return compiler
+def _default_compiler_or_skip() -> None:
+    executable = "cl" if os.name == "nt" else "cc"
+    if shutil.which(executable) is None:
+        pytest.skip(f"no platform default C compiler available: {executable}")
 
 
-def _native_for(module, compiler: str):
+def _native_for(module):
+    _default_compiler_or_skip()
     loops = lower_to_loops(lower_to_cpu(module))
-    return execute_native(loops, compiler=compiler), execute_loop(loops)
+    return execute_native(loops), execute_loop(loops)
 
 
 @pytest.mark.parametrize("dtype", ["int32", "float32"])
 def test_native_execution_matches_reference_and_loop_for_broadcast_relu(dtype):
-    compiler = _compiler_or_skip()
     builder = GraphBuilder()
     lhs = builder.tensor([[-3], [2]], dtype=dtype)
     rhs = builder.tensor([[1, 2, 4]], dtype=dtype)
     module = builder.finish((lhs + rhs).relu())
 
-    native, loop = _native_for(module, compiler)
+    native, loop = _native_for(module)
     reference = execute_reference(module)
 
     np.testing.assert_array_equal(native, loop)
@@ -44,13 +44,12 @@ def test_native_execution_matches_reference_and_loop_for_broadcast_relu(dtype):
 
 
 def test_native_integer_overflow_matches_numpy_wrap_semantics():
-    compiler = _compiler_or_skip()
     builder = GraphBuilder()
     maximum = builder.tensor([2_147_483_647], dtype="int32")
     one = builder.tensor([1], dtype="int32")
     module = builder.finish(maximum + one)
 
-    native, loop = _native_for(module, compiler)
+    native, loop = _native_for(module)
 
     np.testing.assert_array_equal(native, loop)
     np.testing.assert_array_equal(native, execute_reference(module))
@@ -58,12 +57,11 @@ def test_native_integer_overflow_matches_numpy_wrap_semantics():
 
 
 def test_native_float_relu_matches_numpy_signed_zero_semantics():
-    compiler = _compiler_or_skip()
     builder = GraphBuilder()
     value = builder.tensor(-0.0, dtype="float32")
     module = builder.finish(value.relu())
 
-    native, loop = _native_for(module, compiler)
+    native, loop = _native_for(module)
 
     np.testing.assert_array_equal(native, loop)
     assert native.shape == ()
@@ -71,12 +69,11 @@ def test_native_float_relu_matches_numpy_signed_zero_semantics():
 
 
 def test_native_execution_preserves_zero_extent_result():
-    compiler = _compiler_or_skip()
     builder = GraphBuilder()
     value = builder.tensor([], dtype="int32")
     module = builder.finish(value.relu())
 
-    native, loop = _native_for(module, compiler)
+    native, loop = _native_for(module)
 
     np.testing.assert_array_equal(native, loop)
     assert native.shape == (0,)
