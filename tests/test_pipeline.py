@@ -2,6 +2,7 @@ import numpy as np
 
 from tiny_tensor_compiler import (
     GraphBuilder,
+    algebraic_simplify,
     constant_fold,
     execute_cpu,
     execute_reference,
@@ -64,6 +65,45 @@ def test_constant_folding_preserves_semantics():
 
     np.testing.assert_array_equal(after, before)
     assert all(op.opcode not in {"add", "mul", "relu"} for op in module.function.ops)
+
+
+def test_algebraic_simplification_removes_integer_neutral_elements():
+    builder = GraphBuilder()
+    x = builder.tensor([1, -2, 3], dtype="int32")
+    result = 1 * (((0 + x) * 1) + 0)
+    module = builder.finish(result)
+    before = execute_reference(module)
+
+    assert algebraic_simplify(module) == 4
+    verify(module)
+    np.testing.assert_array_equal(execute_cpu(lower_to_cpu(module)), before)
+    assert all(op.opcode not in {"add", "mul"} for op in module.function.ops)
+
+
+def test_algebraic_simplification_preserves_promotion_and_broadcasting():
+    builder = GraphBuilder()
+    x = builder.tensor([[1], [2]], dtype="int32")
+    promoted_zero = builder.tensor([[0, 0, 0]], dtype="int64")
+    module = builder.finish(x + promoted_zero)
+    before_dump = module.dump()
+
+    assert algebraic_simplify(module) == 0
+    verify(module)
+    assert module.dump() == before_dump
+    np.testing.assert_array_equal(
+        execute_reference(module), np.array([[1, 1, 1], [2, 2, 2]], dtype=np.int64)
+    )
+
+
+def test_algebraic_simplification_is_conservative_for_floats():
+    builder = GraphBuilder()
+    x = builder.tensor([-0.0, 2.0], dtype="float32")
+    module = builder.finish((x + 0.0) * 1.0)
+    before_dump = module.dump()
+
+    assert algebraic_simplify(module) == 0
+    verify(module)
+    assert module.dump() == before_dump
 
 
 def test_randomized_reference_and_lowered_cpu_agree():
