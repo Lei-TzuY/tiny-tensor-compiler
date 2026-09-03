@@ -3,7 +3,15 @@ from .backends.cpu import execute_loop
 from .c_codegen import generate_c
 from .frontend import GraphBuilder, Tensor
 from .inference import TypeInferenceError
-from .loop_ir import IndexMap, LoopAlloc, LoopKernel, LoopProgram, LoopReturn, lower_to_loops
+from .loop_ir import (
+    IndexMap,
+    LoopAlloc,
+    LoopKernel,
+    LoopProgram,
+    LoopReturn,
+    fuse_elementwise,
+    lower_to_loops,
+)
 from .lowering import (
     BufferAlloc,
     BufferAssignment,
@@ -52,6 +60,7 @@ __all__ = [
     "execute_loop",
     "execute_native",
     "execute_reference",
+    "fuse_elementwise",
     "generate_c",
     "lower_to_cpu",
     "lower_to_loops",
