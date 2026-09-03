@@ -20,7 +20,13 @@ def generate_c(program: LoopProgram) -> str:
         "#include <math.h>",
         "#include <stdint.h>",
         "",
-        f"void tiny_tensor_run({_c_type(return_type.dtype)} *out) {{",
+        "#if defined(_WIN32)",
+        "#define TINY_TENSOR_EXPORT __declspec(dllexport)",
+        "#else",
+        "#define TINY_TENSOR_EXPORT",
+        "#endif",
+        "",
+        f"TINY_TENSOR_EXPORT void tiny_tensor_run({_c_type(return_type.dtype)} *out) {{",
     ]
 
     for alloc in program.allocations:
