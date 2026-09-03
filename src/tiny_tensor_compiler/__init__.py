@@ -1,5 +1,6 @@
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
+from .c_codegen import generate_c
 from .frontend import GraphBuilder, Tensor
 from .inference import TypeInferenceError
 from .loop_ir import IndexMap, LoopAlloc, LoopKernel, LoopProgram, LoopReturn, lower_to_loops
@@ -47,6 +48,7 @@ __all__ = [
     "execute_cpu",
     "execute_loop",
     "execute_reference",
+    "generate_c",
     "lower_to_cpu",
     "lower_to_loops",
     "plan_memory",
