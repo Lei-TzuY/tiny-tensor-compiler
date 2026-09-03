@@ -6,6 +6,7 @@ from .inference import TypeInferenceError
 from .loop_ir import (
     IndexMap,
     LoopAlloc,
+    LoopInput,
     LoopKernel,
     LoopProgram,
     LoopReturn,
@@ -15,6 +16,7 @@ from .loop_ir import (
 from .lowering import (
     BufferAlloc,
     BufferAssignment,
+    BufferInput,
     BufferKernel,
     BufferReturn,
     CPUProgram,
@@ -36,12 +38,14 @@ from .verifier import VerificationError, verify
 __all__ = [
     "BufferAlloc",
     "BufferAssignment",
+    "BufferInput",
     "BufferKernel",
     "BufferReturn",
     "CPUProgram",
     "GraphBuilder",
     "IndexMap",
     "LoopAlloc",
+    "LoopInput",
     "LoopKernel",
     "LoopProgram",
     "LoopReturn",
