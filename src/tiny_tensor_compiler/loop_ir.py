@@ -6,8 +6,15 @@ from typing import Any
 import numpy as np
 
 from .inference import infer_binary, infer_relu
-from .ir import TensorType
+from .ir import DType, TensorType
 from .lowering import BufferAlloc, BufferInput, BufferReturn, CPUProgram, plan_memory
+
+
+_BINARY_CHAIN_OPCODES = frozenset(
+    f"chain_{inner}_{outer}"
+    for inner in ("add", "mul")
+    for outer in ("add", "mul")
+)
 
 
 @dataclass(frozen=True)
@@ -155,8 +162,9 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
 
 
 def fuse_elementwise(program: LoopProgram) -> LoopProgram:
-    """Fuse safe adjacent binary/ReLU kernels and greedily absorb ReLU tails."""
+    """Fuse conservative adjacent elementwise kernels without changing numeric semantics."""
     operations = program.operations
+    types = {alloc.buffer: alloc.type for alloc in program.allocations}
     fused: list[LoopOperation] = []
     index = 0
     fusible_producers = {"add", "mul", "relu", "relu_add", "relu_mul"}
@@ -174,6 +182,19 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
             consumer = operations[next_index]
             if not isinstance(consumer, LoopKernel):
                 break
+
+            binary_chain = _fuse_integer_binary_consumer(
+                operations,
+                next_index,
+                current,
+                consumer,
+                types,
+            )
+            if binary_chain is not None:
+                current = binary_chain
+                next_index += 1
+                break
+
             if not _can_fuse_relu_consumer(operations, next_index, current, consumer):
                 break
 
@@ -193,6 +214,72 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
         index = next_index
 
     return LoopProgram(tuple(fused))
+
+
+def _fuse_integer_binary_consumer(
+    operations: tuple[LoopOperation, ...],
+    consumer_index: int,
+    producer: LoopKernel,
+    consumer: LoopKernel,
+    types: dict[int, TensorType],
+) -> LoopKernel | None:
+    if producer.opcode not in {"add", "mul"} or consumer.opcode not in {"add", "mul"}:
+        return None
+    if producer.iteration_shape != consumer.iteration_shape:
+        return None
+
+    producer_positions = tuple(
+        index for index, buffer in enumerate(consumer.inputs) if buffer == producer.output
+    )
+    if len(producer_positions) != 1:
+        return None
+    producer_position = producer_positions[0]
+    identity = IndexMap(tuple(range(len(consumer.iteration_shape))))
+    if consumer.input_maps[producer_position] != identity:
+        return None
+
+    if _consumer_has_fusible_relu(operations, consumer_index, consumer):
+        return None
+    if not _producer_value_has_no_later_use(operations, consumer_index + 1, producer.output):
+        return None
+
+    other_position = 1 - producer_position
+    fused_inputs = (*producer.inputs, consumer.inputs[other_position])
+    if consumer.output in fused_inputs:
+        return None
+
+    output_type = types[consumer.output]
+    if output_type.dtype not in {DType.INT32, DType.INT64}:
+        return None
+    if types[producer.output] != output_type:
+        return None
+    if any(types[buffer].dtype != output_type.dtype for buffer in fused_inputs):
+        return None
+
+    return LoopKernel(
+        opcode=f"chain_{producer.opcode}_{consumer.opcode}",
+        output=consumer.output,
+        inputs=fused_inputs,
+        iteration_shape=consumer.iteration_shape,
+        input_maps=(*producer.input_maps, consumer.input_maps[other_position]),
+    )
+
+
+def _consumer_has_fusible_relu(
+    operations: tuple[LoopOperation, ...],
+    consumer_index: int,
+    consumer: LoopKernel,
+) -> bool:
+    relu_index = consumer_index + 1
+    if relu_index >= len(operations):
+        return False
+    relu = operations[relu_index]
+    return isinstance(relu, LoopKernel) and _can_fuse_relu_consumer(
+        operations,
+        relu_index,
+        consumer,
+        relu,
+    )
 
 
 def _can_fuse_relu_consumer(
@@ -333,6 +420,28 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if expected != output_type:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
                 _verify_index_maps(op, allocated)
+            elif op.opcode in _BINARY_CHAIN_OPCODES:
+                if len(op.inputs) != 3 or len(op.input_maps) != 3 or op.literal is not None:
+                    raise ValueError(
+                        f"{op.opcode} loop requires three inputs and three index maps"
+                    )
+                if output_type.dtype not in {DType.INT32, DType.INT64}:
+                    raise ValueError("integer binary-chain loop requires an integer output dtype")
+                if any(allocated[buffer].dtype != output_type.dtype for buffer in op.inputs):
+                    raise ValueError("integer binary-chain loop requires one exact integer dtype")
+
+                inner_opcode, outer_opcode = _binary_chain_parts(op.opcode)
+                inner_type = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
+                if inner_type != output_type:
+                    raise ValueError(
+                        f"{op.opcode} loop intermediate type must match its output type"
+                    )
+                expected = infer_binary(inner_type, allocated[op.inputs[2]])
+                if expected != output_type:
+                    raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
+                if inner_opcode not in {"add", "mul"} or outer_opcode not in {"add", "mul"}:
+                    raise ValueError(f"unsupported integer binary-chain loop: {op.opcode}")
+                _verify_index_maps(op, allocated)
             else:
                 raise ValueError(f"unsupported loop kernel: {op.opcode}")
 
@@ -351,6 +460,13 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
         raise ValueError("loop IR must end with a return")
     if allocated and set(allocated) != set(range(len(allocated))):
         raise ValueError("physical loop buffer ids must be dense starting at p0")
+
+
+def _binary_chain_parts(opcode: str) -> tuple[str, str]:
+    if opcode not in _BINARY_CHAIN_OPCODES:
+        raise ValueError(f"unsupported integer binary-chain loop: {opcode}")
+    _, inner_opcode, outer_opcode = opcode.split("_")
+    return inner_opcode, outer_opcode
 
 
 def _verify_index_maps(op: LoopKernel, allocated: dict[int, TensorType]) -> None:
