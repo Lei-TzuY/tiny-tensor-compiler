@@ -14,7 +14,7 @@ from .lowering import (
     lower_to_cpu,
     plan_memory,
 )
-from .native import NativeCompilationError, execute_native
+from .native import NativeCompilationError, clear_native_cache, execute_native
 from .passes import (
     algebraic_simplify,
     canonicalize,
@@ -44,6 +44,7 @@ __all__ = [
     "VerificationError",
     "algebraic_simplify",
     "canonicalize",
+    "clear_native_cache",
     "common_subexpression_eliminate",
     "constant_fold",
     "dead_code_eliminate",
