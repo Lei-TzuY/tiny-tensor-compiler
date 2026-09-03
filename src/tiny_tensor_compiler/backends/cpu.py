@@ -18,7 +18,7 @@ def execute(program: CPUProgram) -> np.ndarray:
             return np.array(buffers[op.buffer], copy=True)
 
         if not isinstance(op, BufferKernel):
-            raise RuntimeError("unsupported CPU buffer operation")
+            raise TypeError("unsupported CPU buffer operation")
 
         output = buffers[op.output]
         if op.opcode == "const":
