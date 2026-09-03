@@ -16,7 +16,6 @@ from ..loop_ir import (
 )
 from ..lowering import CPUProgram
 
-
 _BINARY_CHAIN_FUNCTIONS = {
     "chain_add_add": (np.add, np.add),
     "chain_add_mul": (np.add, np.multiply),
