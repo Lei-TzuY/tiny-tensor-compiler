@@ -17,6 +17,12 @@ class BufferAlloc:
 
 
 @dataclass(frozen=True)
+class BufferInput:
+    output: int
+    index: int
+
+
+@dataclass(frozen=True)
 class BufferKernel:
     opcode: str
     output: int
@@ -29,7 +35,7 @@ class BufferReturn:
     buffer: int
 
 
-BufferOperation = BufferAlloc | BufferKernel | BufferReturn
+BufferOperation = BufferAlloc | BufferInput | BufferKernel | BufferReturn
 
 
 @dataclass(frozen=True)
@@ -98,6 +104,10 @@ class CPUProgram:
         return tuple(op for op in self.operations if isinstance(op, BufferAlloc))
 
     @property
+    def inputs(self) -> tuple[BufferInput, ...]:
+        return tuple(op for op in self.operations if isinstance(op, BufferInput))
+
+    @property
     def instructions(self) -> tuple[BufferKernel, ...]:
         """Compatibility view containing only executable kernel operations."""
         return tuple(op for op in self.operations if isinstance(op, BufferKernel))
@@ -115,6 +125,8 @@ class CPUProgram:
         for op in self.operations:
             if isinstance(op, BufferAlloc):
                 lines.append(f"alloc b{op.buffer} : {op.type}")
+            elif isinstance(op, BufferInput):
+                lines.append(f"b{op.output} = input {op.index}")
             elif isinstance(op, BufferKernel):
                 if op.opcode == "const":
                     if op.literal is None:
@@ -145,6 +157,10 @@ def lower_to_cpu(module: Module) -> CPUProgram:
         buffers[result] = buffer
         operations.append(BufferAlloc(buffer, result.type))
 
+        if op.opcode == "input":
+            operations.append(BufferInput(output=buffer, index=op.attrs["index"]))
+            continue
+
         literal = None
         if op.opcode == "const":
             literal = np.array(op.attrs["value"], copy=True)
@@ -171,6 +187,8 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         if isinstance(op, BufferAlloc):
             allocation_positions[op.buffer] = index
             types[op.buffer] = op.type
+        elif isinstance(op, BufferInput):
+            last_uses[op.output] = max(last_uses.get(op.output, -1), index)
         elif isinstance(op, BufferKernel):
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
             for buffer in op.inputs:
@@ -205,6 +223,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
 def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
     allocated: dict[int, TensorType] = {}
     written: set[int] = set()
+    next_input_index = 0
     saw_return = False
 
     for index, op in enumerate(operations):
@@ -217,6 +236,19 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             if op.buffer in allocated:
                 raise ValueError(f"buffer b{op.buffer} is allocated more than once")
             allocated[op.buffer] = op.type
+            continue
+
+        if isinstance(op, BufferInput):
+            if op.output not in allocated:
+                raise ValueError(f"buffer b{op.output} is not allocated")
+            if op.output in written:
+                raise ValueError(f"buffer b{op.output} is written more than once")
+            if op.index != next_input_index:
+                raise ValueError(
+                    f"input index {op.index} is not the next dense input index {next_input_index}"
+                )
+            next_input_index += 1
+            written.add(op.output)
             continue
 
         if isinstance(op, BufferKernel):
