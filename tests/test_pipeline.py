@@ -4,6 +4,7 @@ from tiny_tensor_compiler import (
     GraphBuilder,
     algebraic_simplify,
     constant_fold,
+    dead_code_eliminate,
     execute_cpu,
     execute_reference,
     lower_to_cpu,
@@ -104,6 +105,42 @@ def test_algebraic_simplification_is_conservative_for_floats():
     assert algebraic_simplify(module) == 0
     verify(module)
     assert module.dump() == before_dump
+
+
+def test_dead_code_elimination_removes_cascading_unused_chain():
+    builder = GraphBuilder()
+    live = builder.tensor([1, 2, 3], dtype="int32")
+    dead = builder.tensor([10, 20, 30], dtype="int32")
+    _unused = (dead * 2 + 1).relu()
+    module = builder.finish(live)
+    before = execute_reference(module)
+
+    assert dead_code_eliminate(module) == 6
+    verify(module)
+    np.testing.assert_array_equal(execute_cpu(lower_to_cpu(module)), before)
+    assert [op.opcode for op in module.function.ops] == ["const", "return"]
+
+
+def test_dead_code_elimination_preserves_live_chain():
+    module = build_example()
+    before_dump = module.dump()
+    before = execute_reference(module)
+
+    assert dead_code_eliminate(module) == 0
+    verify(module)
+    assert module.dump() == before_dump
+    np.testing.assert_array_equal(execute_cpu(lower_to_cpu(module)), before)
+
+
+def test_dead_code_elimination_cleans_simplification_residue():
+    builder = GraphBuilder()
+    x = builder.tensor([1, 2, 3], dtype="int32")
+    module = builder.finish(x + 0)
+
+    assert algebraic_simplify(module) == 1
+    assert dead_code_eliminate(module) == 1
+    verify(module)
+    assert [op.opcode for op in module.function.ops] == ["const", "return"]
 
 
 def test_randomized_reference_and_lowered_cpu_agree():
