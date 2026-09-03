@@ -7,7 +7,7 @@ import numpy as np
 
 from .inference import infer_binary, infer_relu
 from .ir import TensorType
-from .lowering import BufferAlloc, BufferReturn, CPUProgram, plan_memory
+from .lowering import BufferAlloc, BufferInput, BufferReturn, CPUProgram, plan_memory
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,12 @@ class LoopAlloc:
 
 
 @dataclass(frozen=True)
+class LoopInput:
+    output: int
+    index: int
+
+
+@dataclass(frozen=True)
 class LoopKernel:
     opcode: str
     output: int
@@ -46,7 +52,7 @@ class LoopReturn:
     buffer: int
 
 
-LoopOperation = LoopAlloc | LoopKernel | LoopReturn
+LoopOperation = LoopAlloc | LoopInput | LoopKernel | LoopReturn
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,15 @@ class LoopProgram:
     @property
     def allocations(self) -> tuple[LoopAlloc, ...]:
         return tuple(op for op in self.operations if isinstance(op, LoopAlloc))
+
+    @property
+    def inputs(self) -> tuple[LoopInput, ...]:
+        return tuple(op for op in self.operations if isinstance(op, LoopInput))
+
+    @property
+    def input_types(self) -> tuple[TensorType, ...]:
+        types = {alloc.buffer: alloc.type for alloc in self.allocations}
+        return tuple(types[op.output] for op in self.inputs)
 
     @property
     def kernels(self) -> tuple[LoopKernel, ...]:
@@ -76,6 +91,9 @@ class LoopProgram:
         for op in self.operations:
             if isinstance(op, LoopAlloc):
                 lines.append(f"alloc p{op.buffer} : {op.type}")
+                continue
+            if isinstance(op, LoopInput):
+                lines.append(f"p{op.output} = input {op.index}")
                 continue
             if isinstance(op, LoopReturn):
                 lines.append(f"return p{op.buffer}")
@@ -100,7 +118,7 @@ class LoopProgram:
 
 
 def lower_to_loops(program: CPUProgram) -> LoopProgram:
-    """Lower verified virtual-buffer kernels to explicit loops over planned physical buffers."""
+    """Lower verified virtual-buffer operations to explicit physical-buffer loops."""
     plan = plan_memory(program)
     virtual_types = {alloc.buffer: alloc.type for alloc in program.allocations}
     operations: list[LoopOperation] = [
@@ -109,6 +127,9 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
 
     for op in program.operations:
         if isinstance(op, BufferAlloc):
+            continue
+        if isinstance(op, BufferInput):
+            operations.append(LoopInput(plan.physical_for(op.output), op.index))
             continue
         if isinstance(op, BufferReturn):
             operations.append(LoopReturn(plan.physical_for(op.buffer)))
@@ -191,7 +212,10 @@ def _producer_value_has_no_later_use(
     buffer: int,
 ) -> bool:
     for op in operations[start_index:]:
-        if isinstance(op, LoopKernel):
+        if isinstance(op, LoopInput):
+            if op.output == buffer:
+                return True
+        elif isinstance(op, LoopKernel):
             if op.output == buffer:
                 return True
             if buffer in op.inputs:
@@ -222,6 +246,7 @@ def _broadcast_index_map(input_shape: tuple[int, ...], output_shape: tuple[int, 
 def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
     allocated: dict[int, TensorType] = {}
     written: set[int] = set()
+    next_input_index = 0
     saw_kernel = False
     saw_return = False
 
@@ -231,12 +256,24 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
 
         if isinstance(op, LoopAlloc):
             if saw_kernel:
-                raise ValueError("physical buffer allocation appears after loop kernels begin")
+                raise ValueError("physical buffer allocation appears after loop execution begins")
             if op.buffer < 0:
                 raise ValueError(f"invalid negative physical buffer p{op.buffer}")
             if op.buffer in allocated:
                 raise ValueError(f"physical buffer p{op.buffer} is allocated more than once")
             allocated[op.buffer] = op.type
+            continue
+
+        if isinstance(op, LoopInput):
+            saw_kernel = True
+            if op.output not in allocated:
+                raise ValueError(f"loop input destination p{op.output} is not allocated")
+            if op.index != next_input_index:
+                raise ValueError(
+                    f"input index {op.index} is not the next dense input index {next_input_index}"
+                )
+            next_input_index += 1
+            written.add(op.output)
             continue
 
         if isinstance(op, LoopKernel):
