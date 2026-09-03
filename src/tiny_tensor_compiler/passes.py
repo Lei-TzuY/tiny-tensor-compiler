@@ -6,6 +6,7 @@ from .ir import DType, Module, Operation, Value
 from .verifier import verify
 
 _PURE_OPCODES = frozenset({"const", "add", "mul", "relu"})
+_CSE_OPCODES = frozenset({"add", "mul", "relu"})
 
 
 def constant_fold(module: Module) -> int:
@@ -86,6 +87,36 @@ def dead_code_eliminate(module: Module) -> int:
 
         if not changed:
             break
+
+    verify(module)
+    return removed
+
+
+def common_subexpression_eliminate(module: Module) -> int:
+    """Merge repeated exact pure expressions and return the number removed."""
+    verify(module)
+    function = module.function
+    seen: dict[tuple[object, ...], Operation] = {}
+    removed = 0
+
+    for op in list(function.ops):
+        if op.opcode not in _CSE_OPCODES or op.attrs or not op.results:
+            continue
+
+        key = (
+            op.opcode,
+            tuple(op.operands),
+            tuple(result.type for result in op.results),
+        )
+        canonical = seen.get(key)
+        if canonical is None:
+            seen[key] = op
+            continue
+
+        for duplicate_result, canonical_result in zip(op.results, canonical.results):
+            duplicate_result.replace_all_uses_with(canonical_result)
+        function.erase_op(op)
+        removed += 1
 
     verify(module)
     return removed
