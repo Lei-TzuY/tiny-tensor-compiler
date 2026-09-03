@@ -8,13 +8,18 @@ from typing import Any
 import numpy as np
 
 from .ir import DType, TensorType
-from .loop_ir import IndexMap, LoopAlloc, LoopKernel, LoopProgram, LoopReturn
+from .loop_ir import IndexMap, LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
 
 
 def generate_c(program: LoopProgram) -> str:
     """Generate deterministic C11 source for a verified explicit loop program."""
     types = {op.buffer: op.type for op in program.allocations}
     return_type = types[program.return_slot]
+    parameters = [f"{_c_type(return_type.dtype)} *out"]
+    parameters.extend(
+        f"const {_c_type(input_type.dtype)} *input{index}"
+        for index, input_type in enumerate(program.input_types)
+    )
 
     lines = [
         "#include <math.h>",
@@ -26,7 +31,7 @@ def generate_c(program: LoopProgram) -> str:
         "#define TINY_TENSOR_EXPORT",
         "#endif",
         "",
-        f"TINY_TENSOR_EXPORT void tiny_tensor_run({_c_type(return_type.dtype)} *out) {{",
+        f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{",
     ]
 
     for alloc in program.allocations:
@@ -38,6 +43,9 @@ def generate_c(program: LoopProgram) -> str:
     for op in program.operations:
         if isinstance(op, LoopAlloc):
             continue
+        if isinstance(op, LoopInput):
+            lines.extend(_emit_input(op, types[op.output]))
+            continue
         if isinstance(op, LoopReturn):
             lines.extend(_emit_return(op, types[op.buffer]))
             continue
@@ -46,6 +54,16 @@ def generate_c(program: LoopProgram) -> str:
 
     lines.append("}")
     return "\n".join(lines) + "\n"
+
+
+def _emit_input(op: LoopInput, type_: TensorType) -> list[str]:
+    count = _element_count(type_)
+    return [
+        f"    for (int64_t n = 0; n < {count}; ++n) {{",
+        f"        p{op.output}[n] = input{op.index}[n];",
+        "    }",
+        "",
+    ]
 
 
 def _emit_kernel(
