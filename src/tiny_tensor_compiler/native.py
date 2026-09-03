@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import hashlib
+import json
 import os
+import platform
 import shlex
 import shutil
 import subprocess
@@ -25,20 +28,29 @@ class NativeCompilationError(RuntimeError):
 
 
 class _NativeArtifact:
-    def __init__(self, directory: Path, library: ctypes.CDLL) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        library: ctypes.CDLL,
+        *,
+        remove_directory_on_close: bool = True,
+    ) -> None:
         self.directory = directory
         self.library = library
+        self.remove_directory_on_close = remove_directory_on_close
         self.closed = False
 
     def close(self) -> None:
         if self.closed:
             return
         _release_library(self.library)
-        shutil.rmtree(self.directory)
+        if self.remove_directory_on_close:
+            shutil.rmtree(self.directory)
         self.closed = True
 
 
-_NATIVE_CACHE: dict[tuple[tuple[str, ...], str], _NativeArtifact] = {}
+_PERSISTENT_CACHE_SCHEMA = "native-v1"
+_NATIVE_CACHE: dict[tuple[tuple[str, ...], str, str | None], _NativeArtifact] = {}
 _NATIVE_CACHE_LOCK = threading.RLock()
 
 
@@ -46,16 +58,18 @@ def execute_native(
     program: LoopProgram,
     compiler: str | None = None,
     inputs: Sequence[Any] = (),
+    cache_dir: str | os.PathLike[str] | None = None,
 ) -> np.ndarray:
     """Compile or reuse generated C and execute it on the native CPU."""
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     command = _compiler_command(compiler)
     source = generate_c(program)
+    persistent_library = _persistent_library_path(cache_dir, source, command)
     return_type = _return_type(program)
     output = np.empty(return_type.shape, dtype=return_type.dtype.to_numpy())
 
     with _NATIVE_CACHE_LOCK:
-        artifact = _get_or_compile_artifact(source, command)
+        artifact = _get_or_compile_artifact(source, command, persistent_library)
         output_pointer_type = _pointer_type(return_type.dtype.to_numpy())
         input_pointer_types = tuple(
             _pointer_type(input_type.dtype.to_numpy()) for input_type in program.input_types
@@ -78,7 +92,7 @@ def execute_native(
 
 
 def clear_native_cache() -> None:
-    """Release all cached native libraries and remove their build directories."""
+    """Release process-cached libraries and remove only process-owned build directories."""
     with _NATIVE_CACHE_LOCK:
         artifacts = list(_NATIVE_CACHE.values())
         _NATIVE_CACHE.clear()
@@ -93,45 +107,175 @@ def clear_native_cache() -> None:
             raise NativeCompilationError(f"failed to clear native artifact cache: {first_error}") from first_error
 
 
-def _get_or_compile_artifact(source: str, command: list[str]) -> _NativeArtifact:
-    key = (tuple(command), source)
+def _get_or_compile_artifact(
+    source: str,
+    command: list[str],
+    persistent_library: Path | None,
+) -> _NativeArtifact:
+    persistent_identity = str(persistent_library) if persistent_library is not None else None
+    key = (tuple(command), source, persistent_identity)
     artifact = _NATIVE_CACHE.get(key)
-    if artifact is None:
+    if artifact is not None:
+        return artifact
+
+    if persistent_library is None:
         artifact = _compile_artifact(source, command)
-        _NATIVE_CACHE[key] = artifact
+    else:
+        artifact = _get_or_compile_persistent_artifact(source, command, persistent_library)
+    _NATIVE_CACHE[key] = artifact
     return artifact
 
 
 def _compile_artifact(source: str, command: list[str]) -> _NativeArtifact:
     directory_path = Path(tempfile.mkdtemp(prefix="tiny_tensor_compiler_"))
-    source_path = directory_path / "program.c"
-    library_path = directory_path / _library_name()
-
     try:
-        source_path.write_text(source, encoding="utf-8")
-        compile_command = _build_compile_command(command, source_path.name, library_path.name)
-        completed = subprocess.run(
-            compile_command,
-            cwd=directory_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            details = completed.stderr.strip() or completed.stdout.strip() or "no compiler output"
-            raise NativeCompilationError(
-                f"native C compilation failed with exit code {completed.returncode}: {details}"
-            )
-
-        try:
-            library = ctypes.CDLL(str(library_path))
-        except OSError as error:
-            raise NativeCompilationError(f"failed to load native shared library: {error}") from error
+        library_path = _compile_source(source, command, directory_path)
+        library = _load_library(library_path)
     except Exception:
         shutil.rmtree(directory_path, ignore_errors=True)
         raise
 
     return _NativeArtifact(directory_path, library)
+
+
+def _get_or_compile_persistent_artifact(
+    source: str,
+    command: list[str],
+    library_path: Path,
+) -> _NativeArtifact:
+    cached = _load_existing_persistent_artifact(library_path)
+    if cached is not None:
+        return cached
+
+    schema_root = library_path.parent.parent
+    build_directory = Path(tempfile.mkdtemp(prefix=".build-", dir=schema_root))
+    try:
+        compiled_library = _compile_source(source, command, build_directory)
+        library_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(compiled_library, library_path)
+        except OSError as error:
+            concurrent = _load_existing_persistent_artifact(library_path)
+            if concurrent is not None:
+                return concurrent
+            raise NativeCompilationError(
+                f"failed to publish persistent native artifact: {error}"
+            ) from error
+
+        try:
+            library = _load_library(library_path)
+        except NativeCompilationError:
+            _remove_file(library_path)
+            raise
+        return _NativeArtifact(
+            library_path.parent,
+            library,
+            remove_directory_on_close=False,
+        )
+    finally:
+        shutil.rmtree(build_directory, ignore_errors=True)
+
+
+def _compile_source(source: str, command: list[str], directory_path: Path) -> Path:
+    source_path = directory_path / "program.c"
+    library_path = directory_path / _library_name()
+    source_path.write_text(source, encoding="utf-8")
+    compile_command = _build_compile_command(command, source_path.name, library_path.name)
+    completed = subprocess.run(
+        compile_command,
+        cwd=directory_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        details = completed.stderr.strip() or completed.stdout.strip() or "no compiler output"
+        raise NativeCompilationError(
+            f"native C compilation failed with exit code {completed.returncode}: {details}"
+        )
+    return library_path
+
+
+def _load_library(library_path: Path) -> ctypes.CDLL:
+    try:
+        return ctypes.CDLL(str(library_path))
+    except OSError as error:
+        raise NativeCompilationError(f"failed to load native shared library: {error}") from error
+
+
+def _load_existing_persistent_artifact(library_path: Path) -> _NativeArtifact | None:
+    if not library_path.is_file():
+        return None
+    try:
+        library = ctypes.CDLL(str(library_path))
+    except OSError:
+        _remove_file(library_path)
+        return None
+    return _NativeArtifact(
+        library_path.parent,
+        library,
+        remove_directory_on_close=False,
+    )
+
+
+def _persistent_library_path(
+    cache_dir: str | os.PathLike[str] | None,
+    source: str,
+    command: list[str],
+) -> Path | None:
+    if cache_dir is None:
+        return None
+
+    try:
+        cache_root = Path(cache_dir).expanduser().resolve()
+        schema_root = cache_root / _PERSISTENT_CACHE_SCHEMA
+        schema_root.mkdir(parents=True, exist_ok=True)
+    except (OSError, RuntimeError) as error:
+        raise NativeCompilationError(f"failed to prepare persistent native cache: {error}") from error
+
+    digest = _persistent_cache_digest(source, command)
+    return schema_root / digest / _library_name()
+
+
+def _persistent_cache_digest(source: str, command: list[str]) -> str:
+    compiler_path = shutil.which(command[0])
+    if compiler_path is None:
+        raise NativeCompilationError(f"C compiler executable not found: {command[0]}")
+
+    try:
+        resolved_compiler = Path(compiler_path).resolve()
+        compiler_stat = resolved_compiler.stat()
+    except OSError as error:
+        raise NativeCompilationError(f"failed to fingerprint C compiler: {error}") from error
+
+    payload = {
+        "schema": _PERSISTENT_CACHE_SCHEMA,
+        "source": source,
+        "command": command,
+        "compiler": {
+            "path": str(resolved_compiler),
+            "size": compiler_stat.st_size,
+            "mtime_ns": compiler_stat.st_mtime_ns,
+        },
+        "target": {
+            "os_name": os.name,
+            "sys_platform": sys.platform,
+            "machine": platform.machine(),
+            "pointer_bits": ctypes.sizeof(ctypes.c_void_p) * 8,
+            "library_name": _library_name(),
+        },
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _remove_file(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise NativeCompilationError(f"failed to remove stale persistent native artifact: {error}") from error
 
 
 def _compiler_command(compiler: str | None) -> list[str]:
