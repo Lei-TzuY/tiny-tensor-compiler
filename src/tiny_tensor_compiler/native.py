@@ -9,11 +9,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from .c_codegen import generate_c
+from .input_validation import prepare_runtime_inputs
 from .loop_ir import LoopProgram
 
 
@@ -39,8 +42,13 @@ _NATIVE_CACHE: dict[tuple[tuple[str, ...], str], _NativeArtifact] = {}
 _NATIVE_CACHE_LOCK = threading.RLock()
 
 
-def execute_native(program: LoopProgram, compiler: str | None = None) -> np.ndarray:
+def execute_native(
+    program: LoopProgram,
+    compiler: str | None = None,
+    inputs: Sequence[Any] = (),
+) -> np.ndarray:
     """Compile or reuse generated C and execute it on the native CPU."""
+    runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     command = _compiler_command(compiler)
     source = generate_c(program)
     return_type = _return_type(program)
@@ -48,12 +56,23 @@ def execute_native(program: LoopProgram, compiler: str | None = None) -> np.ndar
 
     with _NATIVE_CACHE_LOCK:
         artifact = _get_or_compile_artifact(source, command)
-        scalar_type = np.ctypeslib.as_ctypes_type(np.dtype(return_type.dtype.to_numpy()))
-        pointer_type = ctypes.POINTER(scalar_type)
+        output_pointer_type = _pointer_type(return_type.dtype.to_numpy())
+        input_pointer_types = tuple(
+            _pointer_type(input_type.dtype.to_numpy()) for input_type in program.input_types
+        )
         runner = artifact.library.tiny_tensor_run
-        runner.argtypes = [pointer_type]
+        runner.argtypes = [output_pointer_type, *input_pointer_types]
         runner.restype = None
-        runner(output.ctypes.data_as(pointer_type))
+        arguments = [output.ctypes.data_as(output_pointer_type)]
+        arguments.extend(
+            array.ctypes.data_as(pointer_type)
+            for array, pointer_type in zip(
+                runtime_inputs,
+                input_pointer_types,
+                strict=True,
+            )
+        )
+        runner(*arguments)
 
     return output
 
@@ -152,6 +171,11 @@ def _build_compile_command(command: list[str], source_name: str, library_name: s
 def _is_msvc(command: list[str]) -> bool:
     executable = Path(command[0]).name.casefold()
     return executable in {"cl", "cl.exe", "clang-cl", "clang-cl.exe"}
+
+
+def _pointer_type(dtype: np.dtype[Any]):
+    scalar_type = np.ctypeslib.as_ctypes_type(np.dtype(dtype))
+    return ctypes.POINTER(scalar_type)
 
 
 def _release_library(library: ctypes.CDLL) -> None:
