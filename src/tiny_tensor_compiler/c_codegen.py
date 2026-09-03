@@ -17,6 +17,16 @@ _BINARY_CHAIN_OPERATORS = {
     "chain_mul_mul": ("*", "*"),
 }
 _RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_OPERATORS)
+_BINARY_TREE_OPERATORS = {
+    f"tree_{left}_{right}_{root}": (
+        "+" if left == "add" else "*",
+        "+" if right == "add" else "*",
+        "+" if root == "add" else "*",
+    )
+    for left in ("add", "mul")
+    for right in ("add", "mul")
+    for root in ("add", "mul")
+}
 
 
 def generate_c(program: LoopProgram) -> str:
@@ -153,6 +163,24 @@ def _emit_kernel(
             lines.append(
                 f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
             )
+    elif op.opcode in _BINARY_TREE_OPERATORS:
+        left_lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
+        left_rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
+        right_lhs = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
+        right_rhs = _input_ref(op.inputs[3], op.input_maps[3], types[op.inputs[3]])
+        c_type = _c_type(output_type.dtype)
+        left_operator, right_operator, root_operator = _BINARY_TREE_OPERATORS[op.opcode]
+        lines.append(
+            f"{indent}{c_type} left = "
+            f"(({c_type}){left_lhs} {left_operator} ({c_type}){left_rhs});"
+        )
+        lines.append(
+            f"{indent}{c_type} right = "
+            f"(({c_type}){right_lhs} {right_operator} ({c_type}){right_rhs});"
+        )
+        lines.append(
+            f"{indent}{output_ref} = (({c_type})left {root_operator} ({c_type})right);"
+        )
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
