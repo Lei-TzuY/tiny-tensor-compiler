@@ -5,7 +5,13 @@ import numpy as np
 import pytest
 
 import tiny_tensor_compiler.native as native_module
-from tiny_tensor_compiler import GraphBuilder, NativeCompilationError, execute_native, lower_to_cpu, lower_to_loops
+from tiny_tensor_compiler import (
+    GraphBuilder,
+    NativeCompilationError,
+    execute_native,
+    lower_to_cpu,
+    lower_to_loops,
+)
 
 
 @pytest.fixture(autouse=True)
