@@ -3,6 +3,7 @@ import numpy as np
 from tiny_tensor_compiler import (
     GraphBuilder,
     algebraic_simplify,
+    canonicalize,
     common_subexpression_eliminate,
     constant_fold,
     dead_code_eliminate,
@@ -170,6 +171,44 @@ def test_common_subexpression_elimination_preserves_operand_order():
     before_dump = module.dump()
 
     assert common_subexpression_eliminate(module) == 0
+    verify(module)
+    assert module.dump() == before_dump
+
+
+def test_canonicalization_orders_integer_commutative_ops_and_enables_cse():
+    builder = GraphBuilder()
+    x = builder.tensor([1, 2, 3], dtype="int32")
+    y = builder.tensor([4, 5, 6], dtype="int32")
+    add_forward = x + y
+    add_reverse = y + x
+    mul_forward = x * y
+    mul_reverse = y * x
+    module = builder.finish((add_forward + add_reverse) + (mul_forward + mul_reverse))
+    before = execute_reference(module)
+
+    assert canonicalize(module) == 2
+    assert canonicalize(module) == 0
+    verify(module)
+
+    binary_ops = [op for op in module.function.ops if op.opcode in {"add", "mul"}]
+    assert binary_ops[0].operands == [x.value, y.value]
+    assert binary_ops[1].operands == [x.value, y.value]
+    assert binary_ops[2].operands == [x.value, y.value]
+    assert binary_ops[3].operands == [x.value, y.value]
+
+    assert common_subexpression_eliminate(module) == 2
+    verify(module)
+    np.testing.assert_array_equal(execute_cpu(lower_to_cpu(module)), before)
+
+
+def test_canonicalization_is_conservative_for_float_commutative_ops():
+    builder = GraphBuilder()
+    x = builder.tensor([1.0, 2.0], dtype="float32")
+    y = builder.tensor([3.0, 4.0], dtype="float32")
+    module = builder.finish((y + x) * (x + y))
+    before_dump = module.dump()
+
+    assert canonicalize(module) == 0
     verify(module)
     assert module.dump() == before_dump
 
