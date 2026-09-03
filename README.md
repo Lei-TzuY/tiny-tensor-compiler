@@ -8,6 +8,7 @@ Python tensor expressions
 -> verifier
 -> constant folding / algebraic simplification / dead-code elimination / canonicalization / CSE
 -> explicit virtual-buffer CPU IR
+-> liveness-based physical memory planning
 -> NumPy-backed CPU kernels
 ```
 
@@ -16,7 +17,7 @@ The NumPy CPU executor is intentionally the first backend, not the final destina
 ## Working example
 
 ```python
-from tiny_tensor_compiler import GraphBuilder, execute_cpu, lower_to_cpu, verify
+from tiny_tensor_compiler import GraphBuilder, execute_cpu, lower_to_cpu, plan_memory, verify
 
 builder = GraphBuilder()
 x = builder.tensor([1, 2, 3])
@@ -27,6 +28,7 @@ verify(module)
 print(module.dump())
 program = lower_to_cpu(module)
 print(program.dump())
+print(plan_memory(program).dump())
 print(execute_cpu(program))
 ```
 
@@ -44,7 +46,7 @@ func @main() {
 }
 ```
 
-Lowering now produces an explicit virtual-buffer IR rather than implicitly allocating arrays while kernels execute:
+Lowering produces an explicit virtual-buffer IR rather than implicitly allocating arrays while kernels execute:
 
 ```text
 alloc b0 : tensor<3xi64>
@@ -62,6 +64,17 @@ b5 = relu b4
 return b5
 ```
 
+A separate deterministic memory planner maps those virtual buffers onto physical slots. Reuse is allowed only after the previous virtual buffer's last use and only when the complete `TensorType` matches. A buffer still read by the current kernel therefore cannot alias that kernel's output.
+
+For a same-typed linear ReLU chain, virtual buffers can alternate safely between two physical slots:
+
+```text
+b0 -> p0 : tensor<3xi32>
+b1 -> p1 : tensor<3xi32>
+b2 -> p0 : tensor<3xi32>
+b3 -> p1 : tensor<3xi32>
+```
+
 ## Implemented now
 
 - SSA-like `Value` objects with producer metadata and explicit use-def edges
@@ -76,7 +89,8 @@ return b5
 - conservative common-subexpression elimination for repeated exact `add`, `mul`, and `relu` expressions
 - deterministic lowering to explicit `BufferAlloc`, `BufferKernel`, and `BufferReturn` operations
 - buffer-IR structural/type verification for allocation, read-before-write, kernel arity, inferred output types, and return validity
-- CPU execution that allocates typed output buffers first and then writes NumPy kernel results into them
+- liveness-based virtual-to-physical memory planning with exact-type reuse and deterministic lowest-slot selection
+- CPU execution over planned physical NumPy buffers rather than one allocation per virtual tensor result
 - direct tensor-IR reference execution and separately lowered CPU execution
 - malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, linting, and CI
 
@@ -90,7 +104,7 @@ Canonicalization currently reorders only integer `add` and `mul` operands. Earli
 
 Common-subexpression elimination is deliberately exact rather than algebraic. It only merges attribute-free `add`, `mul`, and `relu` operations with the same opcode, operand identities in the same order, and identical result types. It does not deduplicate constants or independently apply commutativity.
 
-The current buffer IR uses one virtual buffer per tensor result on purpose. Physical buffer reuse is a separate memory-planning step so liveness and aliasing decisions can be tested independently rather than hidden inside lowering.
+Virtual buffers remain single-write. Physical reuse is computed separately from virtual-buffer liveness, which keeps aliasing decisions explicit and testable. The planner does not perform in-place kernels: a physical slot is reusable only when its previous virtual buffer's last use is strictly before the new virtual allocation.
 
 ## Development
 
@@ -103,4 +117,4 @@ python examples/basic.py
 
 ## Near-term compiler roadmap
 
-The next improvements should stay independently testable: basic liveness-based memory planning over virtual buffers, then explicit loop/kernel IR. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
+The next improvements should stay independently testable: explicit loop/kernel IR over the planned buffers, then generated C/native CPU code. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
