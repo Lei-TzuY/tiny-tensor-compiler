@@ -3,6 +3,7 @@ import numpy as np
 from tiny_tensor_compiler import (
     GraphBuilder,
     algebraic_simplify,
+    common_subexpression_eliminate,
     constant_fold,
     dead_code_eliminate,
     execute_cpu,
@@ -141,6 +142,36 @@ def test_dead_code_elimination_cleans_simplification_residue():
     assert dead_code_eliminate(module) == 1
     verify(module)
     assert [op.opcode for op in module.function.ops] == ["const", "return"]
+
+
+def test_common_subexpression_elimination_merges_identical_pure_ops():
+    builder = GraphBuilder()
+    x = builder.tensor([1.0, -2.0, 3.0], dtype="float32")
+    lhs = x.relu()
+    rhs = x.relu()
+    module = builder.finish(lhs + rhs)
+    before = execute_reference(module)
+
+    assert common_subexpression_eliminate(module) == 1
+    verify(module)
+    np.testing.assert_array_equal(execute_cpu(lower_to_cpu(module)), before)
+    assert [op.opcode for op in module.function.ops].count("relu") == 1
+    add_op = next(op for op in module.function.ops if op.opcode == "add")
+    assert add_op.operands[0] is add_op.operands[1]
+
+
+def test_common_subexpression_elimination_preserves_operand_order():
+    builder = GraphBuilder()
+    x = builder.tensor([1, 2, 3], dtype="int32")
+    y = builder.tensor([4, 5, 6], dtype="int32")
+    lhs = x + y
+    rhs = y + x
+    module = builder.finish(lhs + rhs)
+    before_dump = module.dump()
+
+    assert common_subexpression_eliminate(module) == 0
+    verify(module)
+    assert module.dump() == before_dump
 
 
 def test_randomized_reference_and_lowered_cpu_agree():
