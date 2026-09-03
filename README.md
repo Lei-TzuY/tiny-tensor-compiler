@@ -13,6 +13,7 @@ Python tensor expressions + static typed external inputs
 -> conservative verifier-backed elementwise fusion
 -> deterministic generated C11 source
 -> process-local / optional persistent native shared-library cache
+-> reusable compiled native executable handles
 -> NumPy-backed scalar CPU interpretation/reference
 ```
 
@@ -25,7 +26,7 @@ import numpy as np
 
 from tiny_tensor_compiler import (
     GraphBuilder,
-    execute_native,
+    compile_native,
     fuse_elementwise,
     lower_to_cpu,
     lower_to_loops,
@@ -39,12 +40,14 @@ module = builder.finish(z)
 
 verify(module)
 loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
-result = execute_native(
-    loops,
+executable = compile_native(loops)
+result = executable(
     inputs=[np.array([-2.0, 0.0, 3.0], dtype=np.float32)],
 )
 print(result)
 ```
+
+`compile_native()` eagerly compiles or loads the native artifact and returns a reusable `NativeExecutable`. Repeated calls with new runtime input values reuse the same native code. The executable freezes the compiler command and cache identity chosen at compile time; if `clear_native_cache()` later releases process-owned shared libraries, the handle remains valid and safely reacquires or recompiles the same artifact on its next invocation.
 
 External inputs are explicit in tensor IR and numbered densely by declaration order:
 
@@ -82,7 +85,7 @@ A separate deterministic memory planner maps virtual buffers onto physical slots
 
 The next lowering layer makes elementwise iteration and broadcasting explicit. For example, adding tensors with shapes `(2, 1)` and `(1, 3)` produces a `(2, 3)` loop whose reads are indexed as `lhs[i0, 0]` and `rhs[0, i1]`. Scalar broadcasts use an empty input index map, and ReLU uses identity indexing. CPU execution interprets these loop kernels one output index at a time rather than delegating broadcasting to vectorized NumPy operations.
 
-The same verified loop IR can be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and external inputs become typed `const` pointers appended after the existing output pointer. For example, a graph returning `f32` with `f32` and `i32` inputs exposes an ABI shaped like `tiny_tensor_run(float *out, const float *input0, const int32_t *input1)`. Generated source exposes `tiny_tensor_run` through a portable export macro that expands to `__declspec(dllexport)` on Windows. `execute_native()` uses `cc`-style GCC/Clang flags on POSIX-like systems and MSVC `cl /std:c11 /O2 /LD` on Windows, then invokes the resulting shared library through `ctypes`. GCC-style native compilation uses `-fwrapv` so signed integer add/multiply behavior matches NumPy's fixed-width wrapping semantics. Floating-point ReLU source explicitly preserves NaN propagation and NumPy's `-0.0 -> +0.0` behavior.
+The same verified loop IR can be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and external inputs become typed `const` pointers appended after the existing output pointer. For example, a graph returning `f32` with `f32` and `i32` inputs exposes an ABI shaped like `tiny_tensor_run(float *out, const float *input0, const int32_t *input1)`. Generated source exposes `tiny_tensor_run` through a portable export macro that expands to `__declspec(dllexport)` on Windows. `execute_native()` and `compile_native()` use `cc`-style GCC/Clang flags on POSIX-like systems and MSVC `cl /std:c11 /O2 /LD` on Windows, then invoke the resulting shared library through `ctypes`. GCC-style native compilation uses `-fwrapv` so signed integer add/multiply behavior matches NumPy's fixed-width wrapping semantics. Floating-point ReLU source explicitly preserves NaN propagation and NumPy's `-0.0 -> +0.0` behavior.
 
 ## Implemented now
 
@@ -112,11 +115,12 @@ The same verified loop IR can be emitted as deterministic C11 source. Physical b
 - opt-in persistent native artifact reuse through `execute_native(..., cache_dir=...)` with compiler/target fingerprinting and atomic publication
 - process-owned staging copies for persistent libraries so cached `.dll` / `.so` / `.dylib` files are not directly loaded or locked
 - stale or corrupt persistent artifacts are discarded and rebuilt rather than poisoning later executions
+- reusable `NativeExecutable` handles from eager `compile_native()` with frozen compiler/cache configuration and safe reuse after process-cache clears
 - explicit `clear_native_cache()` resource release plus automatic process-exit cleanup without deleting user-owned persistent cache files
 - GCC/Clang-compatible native compilation on POSIX-like systems and MSVC `cl` compilation/loading on Windows
 - CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
-- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, fusion/overflow regressions, external-input ABI/cache regressions, persistent-cache regressions, linting, and CI
+- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, fusion/overflow regressions, external-input ABI/cache regressions, persistent-cache regressions, reusable-native-executable regressions, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
 
@@ -136,7 +140,7 @@ Loop IR is also deliberately conservative. Physical buffers are allocated before
 
 Elementwise fusion is explicit rather than automatic in `lower_to_loops()`. A binary `add` or `mul` may fuse with an immediately following ReLU, producing the existing verified `relu_add` / `relu_mul` form. That fused kernel, or a standalone ReLU, can then greedily absorb additional adjacent ReLU consumers. Every absorption still requires equal iteration shapes, identity ReLU indexing, no later live use of the producer's physical value, and a final output slot that does not alias any original producer input. Binary broadcast maps are retained exactly, so a repeated ReLU tail does not weaken broadcasting or memory-planning invariants. ReLU idempotence is relied on only under the existing runtime semantics, including NaN propagation and `-0.0 -> +0.0`. The pass remains conservative: it does not fuse a second binary operation, reorder kernels, cross non-adjacent operations, or build general expression DAGs.
 
-Native execution separates deterministic code generation, process-local loaded-artifact reuse, and optional persistent storage. Without `cache_dir`, behavior remains process-local: an exact `(compiler command, generated C source)` match reuses the already loaded shared library, and `clear_native_cache()` or process exit releases it and removes its temporary build directory. Passing `cache_dir` enables a versioned content-addressed disk cache. Its digest includes the generated source, full compiler command, resolved compiler executable path/size/mtime, operating system, platform, machine architecture, pointer width, and library format. A library is published into that cache only after successful compilation using an atomic same-filesystem `os.replace()`, so failed compilations do not create cache hits. Persistent library bytes are copied into a process-owned temporary staging directory before `ctypes` loads them; this keeps the persistent file itself immutable and avoids Windows DLL locking. If a persisted library cannot be loaded, it is treated as stale or corrupt, removed, and rebuilt. `clear_native_cache()` unloads and removes process staging directories but deliberately leaves the user-owned persistent cache intact for later processes. Different graphs, compiler commands, compiler executable fingerprints, or targets therefore compile independently, while runtime input values do not affect the artifact key.
+Native execution separates deterministic code generation, process-local loaded-artifact reuse, optional persistent storage, and reusable executable handles. Without `cache_dir`, behavior remains process-local: an exact `(compiler command, generated C source)` match reuses the already loaded shared library, and `clear_native_cache()` or process exit releases it and removes its temporary build directory. Passing `cache_dir` enables a versioned content-addressed disk cache. Its digest includes the generated source, full compiler command, resolved compiler executable path/size/mtime, operating system, platform, machine architecture, pointer width, and library format. A library is published into that cache only after successful compilation using an atomic same-filesystem `os.replace()`, so failed compilations do not create cache hits. Persistent library bytes are copied into a process-owned temporary staging directory before `ctypes` loads them; this keeps the persistent file itself immutable and avoids Windows DLL locking. If a persisted library cannot be loaded, it is treated as stale or corrupt, removed, and rebuilt. `clear_native_cache()` unloads and removes process staging directories but deliberately leaves the user-owned persistent cache intact for later processes. `compile_native()` additionally freezes its selected compiler command and persistent artifact identity into a `NativeExecutable`; the handle never owns a raw DLL/SO lifetime independently of the cache, so clearing process-owned native resources cannot leave it with a dangling loaded-library pointer. Different graphs, compiler commands, compiler executable fingerprints, or targets therefore compile independently, while runtime input values do not affect the artifact key.
 
 ## Development
 
@@ -147,8 +151,8 @@ pytest
 python examples/basic.py
 ```
 
-A native C compiler is required to exercise `execute_native()`: a `cc`-compatible GCC/Clang toolchain on POSIX-like systems, or an MSVC developer environment exposing `cl` on Windows. CI executes the full suite on Ubuntu and Windows for Python 3.11 and 3.13.
+A native C compiler is required to exercise `execute_native()` or `compile_native()`: a `cc`-compatible GCC/Clang toolchain on POSIX-like systems, or an MSVC developer environment exposing `cl` on Windows. CI executes the full suite on Ubuntu and Windows for Python 3.11 and 3.13.
 
 ## Near-term compiler roadmap
 
-The runtime-input boundary, safe ReLU-tail chain fusion, and optional persistent native artifact cache are now explicit. Follow-up milestones can independently explore more general multi-operation fusion DAGs, SIMD/parallel loop scheduling, richer execution APIs, or eventually CUDA. Dynamic shapes, zero-copy external-buffer aliasing, and multiple-output ABI design remain separate correctness problems rather than implicit extensions of this cache milestone.
+The runtime-input boundary, safe ReLU-tail chain fusion, optional persistent native artifact cache, and reusable compiled-executable handle are now explicit. Follow-up milestones can independently explore more general multi-operation fusion DAGs, SIMD/parallel loop scheduling, higher-level execution ergonomics, or eventually CUDA. Dynamic shapes, zero-copy external-buffer aliasing, and multiple-output ABI design remain separate correctness problems rather than implicit extensions of this execution milestone.
