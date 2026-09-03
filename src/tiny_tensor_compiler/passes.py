@@ -7,6 +7,7 @@ from .verifier import verify
 
 _PURE_OPCODES = frozenset({"const", "add", "mul", "relu"})
 _CSE_OPCODES = frozenset({"add", "mul", "relu"})
+_CANONICAL_COMMUTATIVE_OPCODES = frozenset({"add", "mul"})
 
 
 def constant_fold(module: Module) -> int:
@@ -120,6 +121,40 @@ def common_subexpression_eliminate(module: Module) -> int:
 
     verify(module)
     return removed
+
+
+def canonicalize(module: Module) -> int:
+    """Order integer commutative operands by current SSA definition order."""
+    verify(module)
+    function = module.function
+    definition_rank: dict[Value, int] = {}
+    next_rank = 0
+    for op in function.ops:
+        for result in op.results:
+            definition_rank[result] = next_rank
+            next_rank += 1
+
+    changed = 0
+    for op in function.ops:
+        if op.opcode not in _CANONICAL_COMMUTATIVE_OPCODES:
+            continue
+        if len(op.operands) != 2 or len(op.results) != 1:
+            continue
+        if op.results[0].type.dtype not in {DType.INT32, DType.INT64}:
+            continue
+
+        lhs, rhs = op.operands
+        lhs_rank = definition_rank.get(lhs)
+        rhs_rank = definition_rank.get(rhs)
+        if lhs_rank is None or rhs_rank is None or lhs_rank <= rhs_rank:
+            continue
+
+        op.replace_operand(0, rhs)
+        op.replace_operand(1, lhs)
+        changed += 1
+
+    verify(module)
+    return changed
 
 
 def _neutral_replacement(op: Operation) -> Value | None:
