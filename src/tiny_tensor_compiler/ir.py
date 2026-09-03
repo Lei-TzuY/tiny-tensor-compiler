@@ -181,7 +181,11 @@ class Module:
                 value_names[result] = name
                 result_names.append(name)
 
-            if op.opcode == "const":
+            if op.opcode == "input":
+                lines.append(
+                    f"  {result_names[0]} = input {op.attrs['index']} : {op.results[0].type}"
+                )
+            elif op.opcode == "const":
                 literal = _format_literal(op.attrs["value"])
                 lines.append(
                     f"  {result_names[0]} = const {literal} : {op.results[0].type}"
