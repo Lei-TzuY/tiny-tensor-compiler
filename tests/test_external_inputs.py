@@ -93,9 +93,9 @@ def test_generated_c_extends_output_pointer_abi_with_typed_input_pointers():
 
     source = generate_c(loops)
 
-    assert "TINY_TENSOR_EXPORT void tiny_tensor_run(float *out, const float *input0, const int32_t *input1)" in source
-    assert "p0[i0] = input0[i0];" in source
-    assert "p1[i0] = input1[i0];" in source
+    assert "TINY_TENSOR_EXPORT void tiny_tensor_run(double *out, const float *input0, const int32_t *input1)" in source
+    assert "p0[n] = input0[n];" in source
+    assert "p1[n] = input1[n];" in source
 
 
 def test_native_compiled_graph_reuses_artifact_for_different_runtime_input_values(monkeypatch):
