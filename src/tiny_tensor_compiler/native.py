@@ -50,12 +50,15 @@ def execute_native(program: LoopProgram, compiler: str | None = None) -> np.ndar
         except OSError as error:
             raise NativeCompilationError(f"failed to load native shared library: {error}") from error
 
-        scalar_type = np.ctypeslib.as_ctypes_type(np.dtype(return_type.dtype.to_numpy()))
-        pointer_type = ctypes.POINTER(scalar_type)
-        runner = library.tiny_tensor_run
-        runner.argtypes = [pointer_type]
-        runner.restype = None
-        runner(output.ctypes.data_as(pointer_type))
+        try:
+            scalar_type = np.ctypeslib.as_ctypes_type(np.dtype(return_type.dtype.to_numpy()))
+            pointer_type = ctypes.POINTER(scalar_type)
+            runner = library.tiny_tensor_run
+            runner.argtypes = [pointer_type]
+            runner.restype = None
+            runner(output.ctypes.data_as(pointer_type))
+        finally:
+            _release_library(library)
 
     return output
 
@@ -97,6 +100,18 @@ def _build_compile_command(command: list[str], source_name: str, library_name: s
 def _is_msvc(command: list[str]) -> bool:
     executable = Path(command[0]).name.casefold()
     return executable in {"cl", "cl.exe", "clang-cl", "clang-cl.exe"}
+
+
+def _release_library(library: ctypes.CDLL) -> None:
+    if os.name != "nt":
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    free_library = kernel32.FreeLibrary
+    free_library.argtypes = [ctypes.c_void_p]
+    free_library.restype = ctypes.c_int
+    if free_library(ctypes.c_void_p(library._handle)) == 0:
+        error = ctypes.get_last_error()
+        raise NativeCompilationError(f"failed to unload native shared library: Windows error {error}")
 
 
 def _return_type(program: LoopProgram):
