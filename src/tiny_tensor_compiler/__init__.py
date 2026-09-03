@@ -14,6 +14,7 @@ from .lowering import (
     lower_to_cpu,
     plan_memory,
 )
+from .native import NativeCompilationError, execute_native
 from .passes import (
     algebraic_simplify,
     canonicalize,
@@ -37,6 +38,7 @@ __all__ = [
     "LoopProgram",
     "LoopReturn",
     "MemoryPlan",
+    "NativeCompilationError",
     "Tensor",
     "TypeInferenceError",
     "VerificationError",
@@ -47,6 +49,7 @@ __all__ = [
     "dead_code_eliminate",
     "execute_cpu",
     "execute_loop",
+    "execute_native",
     "execute_reference",
     "generate_c",
     "lower_to_cpu",
