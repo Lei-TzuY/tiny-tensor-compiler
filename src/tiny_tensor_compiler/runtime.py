@@ -1,18 +1,29 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 
+from .input_validation import prepare_runtime_inputs
 from .ir import Module, Value
 from .verifier import verify
 
 
-def execute_reference(module: Module) -> np.ndarray:
+def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> np.ndarray:
     """Execute verified tensor IR directly; used as a semantic reference backend."""
     verify(module)
+    input_ops = tuple(op for op in module.function.ops if op.opcode == "input")
+    runtime_inputs = prepare_runtime_inputs(
+        tuple(op.results[0].type for op in input_ops),
+        inputs,
+    )
     values: dict[Value, np.ndarray] = {}
 
     for op in module.function.ops:
-        if op.opcode == "const":
+        if op.opcode == "input":
+            values[op.results[0]] = np.array(runtime_inputs[op.attrs["index"]], copy=True)
+        elif op.opcode == "const":
             values[op.results[0]] = np.array(op.attrs["value"], copy=True)
         elif op.opcode in {"add", "mul"}:
             dtype = op.results[0].type.dtype.to_numpy()
