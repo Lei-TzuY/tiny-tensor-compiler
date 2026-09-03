@@ -45,6 +45,11 @@ def execute_loop(program: LoopProgram) -> np.ndarray:
             elif op.opcode == "relu":
                 zero = np.array(0, dtype=output.dtype)
                 output[output_index] = np.maximum(inputs[0], zero)
+            elif op.opcode in {"relu_add", "relu_mul"}:
+                binary = np.add if op.opcode == "relu_add" else np.multiply
+                value = output.dtype.type(binary(inputs[0], inputs[1]))
+                zero = np.array(0, dtype=output.dtype)
+                output[output_index] = np.maximum(value, zero)
             else:
                 raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
 
