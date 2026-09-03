@@ -15,6 +15,12 @@ _BINARY_CHAIN_OPCODES = frozenset(
     for outer in ("add", "mul")
 )
 _RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_OPCODES)
+_BINARY_TREE_OPCODES = frozenset(
+    f"tree_{left}_{right}_{root}"
+    for left in ("add", "mul")
+    for right in ("add", "mul")
+    for root in ("add", "mul")
+)
 
 
 @dataclass(frozen=True)
@@ -178,6 +184,12 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
     }
 
     while index < len(operations):
+        binary_tree = _fuse_integer_binary_tree(operations, index, types)
+        if binary_tree is not None:
+            fused.append(binary_tree)
+            index += 3
+            continue
+
         producer = operations[index]
         if not isinstance(producer, LoopKernel) or producer.opcode not in fusible_producers:
             fused.append(producer)
@@ -222,6 +234,57 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
         index = next_index
 
     return LoopProgram(tuple(fused))
+
+
+def _fuse_integer_binary_tree(
+    operations: tuple[LoopOperation, ...],
+    start_index: int,
+    types: dict[int, TensorType],
+) -> LoopKernel | None:
+    if start_index + 2 >= len(operations):
+        return None
+
+    left = operations[start_index]
+    right = operations[start_index + 1]
+    root = operations[start_index + 2]
+    if not all(isinstance(op, LoopKernel) for op in (left, right, root)):
+        return None
+    if left.opcode not in {"add", "mul"} or right.opcode not in {"add", "mul"}:
+        return None
+    if root.opcode not in {"add", "mul"}:
+        return None
+    if not (left.iteration_shape == right.iteration_shape == root.iteration_shape):
+        return None
+
+    identity = IndexMap(tuple(range(len(root.iteration_shape))))
+    if root.inputs != (left.output, right.output) or root.input_maps != (identity, identity):
+        return None
+    if left.output in right.inputs:
+        return None
+    if not _producer_value_has_no_later_use(operations, start_index + 3, left.output):
+        return None
+    if not _producer_value_has_no_later_use(operations, start_index + 3, right.output):
+        return None
+
+    fused_inputs = (*left.inputs, *right.inputs)
+    if root.output in fused_inputs:
+        return None
+
+    output_type = types[root.output]
+    if output_type.dtype not in {DType.INT32, DType.INT64}:
+        return None
+    if types[left.output] != output_type or types[right.output] != output_type:
+        return None
+    if any(types[buffer].dtype != output_type.dtype for buffer in fused_inputs):
+        return None
+
+    return LoopKernel(
+        opcode=f"tree_{left.opcode}_{right.opcode}_{root.opcode}",
+        output=root.output,
+        inputs=fused_inputs,
+        iteration_shape=root.iteration_shape,
+        input_maps=(*left.input_maps, *right.input_maps),
+    )
 
 
 def _fuse_integer_binary_consumer(
@@ -453,6 +516,32 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if inner_opcode not in {"add", "mul"} or outer_opcode not in {"add", "mul"}:
                     raise ValueError(f"unsupported integer binary-chain loop: {op.opcode}")
                 _verify_index_maps(op, allocated)
+            elif op.opcode in _BINARY_TREE_OPCODES:
+                if len(op.inputs) != 4 or len(op.input_maps) != 4 or op.literal is not None:
+                    raise ValueError(
+                        f"{op.opcode} loop requires four inputs and four index maps"
+                    )
+                if output_type.dtype not in {DType.INT32, DType.INT64}:
+                    raise ValueError("integer binary-tree loop requires an integer output dtype")
+                if any(allocated[buffer].dtype != output_type.dtype for buffer in op.inputs):
+                    raise ValueError("integer binary-tree loop requires one exact integer dtype")
+
+                left_opcode, right_opcode, root_opcode = _binary_tree_parts(op.opcode)
+                left_type = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
+                right_type = infer_binary(allocated[op.inputs[2]], allocated[op.inputs[3]])
+                if left_type != output_type or right_type != output_type:
+                    raise ValueError(
+                        f"{op.opcode} loop intermediate types must match its output type"
+                    )
+                expected = infer_binary(left_type, right_type)
+                if expected != output_type:
+                    raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
+                if any(
+                    opcode not in {"add", "mul"}
+                    for opcode in (left_opcode, right_opcode, root_opcode)
+                ):
+                    raise ValueError(f"unsupported integer binary-tree loop: {op.opcode}")
+                _verify_index_maps(op, allocated)
             else:
                 raise ValueError(f"unsupported loop kernel: {op.opcode}")
 
@@ -480,6 +569,13 @@ def _binary_chain_parts(opcode: str) -> tuple[str, str]:
         raise ValueError(f"unsupported integer binary-chain loop: {opcode}")
     _, inner_opcode, outer_opcode = opcode.split("_")
     return inner_opcode, outer_opcode
+
+
+def _binary_tree_parts(opcode: str) -> tuple[str, str, str]:
+    if opcode not in _BINARY_TREE_OPCODES:
+        raise ValueError(f"unsupported integer binary-tree loop: {opcode}")
+    _, left_opcode, right_opcode, root_opcode = opcode.split("_")
+    return left_opcode, right_opcode, root_opcode
 
 
 def _verify_index_maps(op: LoopKernel, allocated: dict[int, TensorType]) -> None:
