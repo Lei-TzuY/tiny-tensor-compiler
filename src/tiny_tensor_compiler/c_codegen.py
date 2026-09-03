@@ -120,8 +120,10 @@ def _emit_kernel(
 def _emit_relu_assignment(output_ref: str, dtype: DType, zero: str, indent: str) -> list[str]:
     if dtype in {DType.FLOAT32, DType.FLOAT64}:
         return [
-            f"{indent}{output_ref} = isnan(value) ? value : "
-            f"(value <= {zero} ? {zero} : value);"
+            (
+                f"{indent}{output_ref} = isnan(value) ? value : "
+                f"(value <= {zero} ? {zero} : value);"
+            )
         ]
     return [f"{indent}{output_ref} = value < {zero} ? {zero} : value;"]
 
