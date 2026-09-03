@@ -117,13 +117,29 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
+    linearized = _can_linearize_kernel(op, types)
     indent = "        "
-    for axis, bound in enumerate(op.iteration_shape):
-        lines.append(f"{indent}for (int64_t i{axis} = 0; i{axis} < {bound}; ++i{axis}) {{")
+    if linearized:
+        lines.append(
+            f"{indent}for (int64_t n = 0; n < {_element_count(output_type)}; ++n) {{"
+        )
         indent += "    "
+        output_offset = "n"
+        loop_depth = 1
+    else:
+        for axis, bound in enumerate(op.iteration_shape):
+            lines.append(f"{indent}for (int64_t i{axis} = 0; i{axis} < {bound}; ++i{axis}) {{")
+            indent += "    "
+        output_offset = _flat_offset(tuple(range(len(op.iteration_shape))), op.iteration_shape)
+        loop_depth = len(op.iteration_shape)
 
-    output_offset = _flat_offset(tuple(range(len(op.iteration_shape))), op.iteration_shape)
     output_ref = f"p{op.output}[{output_offset}]"
+
+    def input_ref(position: int) -> str:
+        buffer = op.inputs[position]
+        if linearized:
+            return f"p{buffer}[n]"
+        return _input_ref(buffer, op.input_maps[position], types[buffer])
 
     if op.opcode == "const":
         if op.literal is None:
@@ -136,29 +152,29 @@ def _emit_kernel(
             rhs = f"{literal_name}[{output_offset}]"
         lines.append(f"{indent}{output_ref} = {rhs};")
     elif op.opcode in {"add", "mul"}:
-        lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
-        rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
+        lhs = input_ref(0)
+        rhs = input_ref(1)
         c_type = _c_type(output_type.dtype)
         operator = "+" if op.opcode == "add" else "*"
         lines.append(f"{indent}{output_ref} = (({c_type}){lhs} {operator} ({c_type}){rhs});")
     elif op.opcode == "relu":
-        operand = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
+        operand = input_ref(0)
         c_type = _c_type(output_type.dtype)
         zero = _zero_literal(output_type.dtype)
         lines.append(f"{indent}{c_type} value = ({c_type}){operand};")
         lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
     elif op.opcode in {"relu_add", "relu_mul"}:
-        lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
-        rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
+        lhs = input_ref(0)
+        rhs = input_ref(1)
         c_type = _c_type(output_type.dtype)
         zero = _zero_literal(output_type.dtype)
         operator = "+" if op.opcode == "relu_add" else "*"
         lines.append(f"{indent}{c_type} value = (({c_type}){lhs} {operator} ({c_type}){rhs});")
         lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
     elif op.opcode in _BINARY_CHAIN_OPERATORS or op.opcode in _RELU_BINARY_CHAIN_OPCODES:
-        lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
-        rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
-        tail = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
+        lhs = input_ref(0)
+        rhs = input_ref(1)
+        tail = input_ref(2)
         c_type = _c_type(output_type.dtype)
         relu_chain = op.opcode in _RELU_BINARY_CHAIN_OPCODES
         chain_opcode = op.opcode.removeprefix("relu_")
@@ -177,10 +193,10 @@ def _emit_kernel(
                 f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
             )
     elif op.opcode in _BINARY_TREE_OPERATORS or op.opcode in _RELU_BINARY_TREE_OPCODES:
-        left_lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
-        left_rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
-        right_lhs = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
-        right_rhs = _input_ref(op.inputs[3], op.input_maps[3], types[op.inputs[3]])
+        left_lhs = input_ref(0)
+        left_rhs = input_ref(1)
+        right_lhs = input_ref(2)
+        right_rhs = input_ref(3)
         c_type = _c_type(output_type.dtype)
         relu_tree = op.opcode in _RELU_BINARY_TREE_OPCODES
         tree_opcode = op.opcode.removeprefix("relu_")
@@ -204,11 +220,11 @@ def _emit_kernel(
                 f"{indent}{output_ref} = (({c_type})left {root_operator} ({c_type})right);"
             )
     elif op.opcode in _CHAIN_TREE_OPERATORS:
-        first_lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
-        first_rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
-        left_tail = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
-        right_lhs = _input_ref(op.inputs[3], op.input_maps[3], types[op.inputs[3]])
-        right_rhs = _input_ref(op.inputs[4], op.input_maps[4], types[op.inputs[4]])
+        first_lhs = input_ref(0)
+        first_rhs = input_ref(1)
+        left_tail = input_ref(2)
+        right_lhs = input_ref(3)
+        right_rhs = input_ref(4)
         c_type = _c_type(output_type.dtype)
         inner_operator, left_operator, right_operator, root_operator = _CHAIN_TREE_OPERATORS[
             op.opcode
@@ -231,12 +247,23 @@ def _emit_kernel(
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
-    for _ in op.iteration_shape:
+    for _ in range(loop_depth):
         indent = indent[:-4]
         lines.append(f"{indent}}}")
     lines.append("    }")
     lines.append("")
     return lines
+
+
+def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
+    if not op.iteration_shape or _element_count(types[op.output]) == 0:
+        return False
+
+    identity = tuple(range(len(op.iteration_shape)))
+    return all(
+        types[buffer].shape == op.iteration_shape and index_map.axes == identity
+        for buffer, index_map in zip(op.inputs, op.input_maps, strict=True)
+    )
 
 
 def _emit_relu_assignment(output_ref: str, dtype: DType, zero: str, indent: str) -> list[str]:
