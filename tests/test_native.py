@@ -4,6 +4,7 @@ import shutil
 import numpy as np
 import pytest
 
+import tiny_tensor_compiler.native as native_module
 from tiny_tensor_compiler import (
     GraphBuilder,
     NativeCompilationError,
@@ -13,6 +14,13 @@ from tiny_tensor_compiler import (
     lower_to_cpu,
     lower_to_loops,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_native_artifact_cache():
+    native_module.clear_native_cache()
+    yield
+    native_module.clear_native_cache()
 
 
 def _default_compiler_or_skip() -> None:
@@ -87,3 +95,100 @@ def test_native_execution_reports_missing_compiler():
 
     with pytest.raises(NativeCompilationError, match="compiler executable not found"):
         execute_native(loops, compiler="tiny-tensor-compiler-missing-cc")
+
+
+def test_native_execution_reuses_compiled_artifact(monkeypatch):
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    module = builder.finish(builder.tensor([1, 2, 3], dtype="int32").relu())
+    loops = lower_to_loops(lower_to_cpu(module))
+
+    compile_calls = 0
+    original_run = native_module.subprocess.run
+
+    def counting_run(*args, **kwargs):
+        nonlocal compile_calls
+        compile_calls += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(native_module.subprocess, "run", counting_run)
+
+    first = execute_native(loops)
+    second = execute_native(loops)
+
+    assert compile_calls == 1
+    np.testing.assert_array_equal(first, second)
+
+
+def test_native_cache_keeps_distinct_programs_separate(monkeypatch):
+    _default_compiler_or_skip()
+    first_builder = GraphBuilder()
+    first_loops = lower_to_loops(
+        lower_to_cpu(first_builder.finish(first_builder.tensor([1, 2], dtype="int32").relu()))
+    )
+    second_builder = GraphBuilder()
+    second_loops = lower_to_loops(
+        lower_to_cpu(second_builder.finish(second_builder.tensor([3, 4], dtype="int32").relu()))
+    )
+
+    compile_calls = 0
+    original_run = native_module.subprocess.run
+
+    def counting_run(*args, **kwargs):
+        nonlocal compile_calls
+        compile_calls += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(native_module.subprocess, "run", counting_run)
+
+    first = execute_native(first_loops)
+    second = execute_native(second_loops)
+
+    assert compile_calls == 2
+    np.testing.assert_array_equal(first, np.array([1, 2], dtype=np.int32))
+    np.testing.assert_array_equal(second, np.array([3, 4], dtype=np.int32))
+
+
+def test_native_cache_does_not_store_compilation_failures(monkeypatch):
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    loops = lower_to_loops(lower_to_cpu(builder.finish(builder.tensor([1], dtype="int32"))))
+
+    compile_calls = 0
+
+    def failing_run(*args, **kwargs):
+        nonlocal compile_calls
+        compile_calls += 1
+        return native_module.subprocess.CompletedProcess(
+            args=args[0], returncode=1, stdout="", stderr="synthetic failure"
+        )
+
+    monkeypatch.setattr(native_module.subprocess, "run", failing_run)
+
+    for _ in range(2):
+        with pytest.raises(NativeCompilationError, match="synthetic failure"):
+            execute_native(loops)
+
+    assert compile_calls == 2
+
+
+def test_clear_native_cache_forces_recompile(monkeypatch):
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    loops = lower_to_loops(lower_to_cpu(builder.finish(builder.tensor([7], dtype="int32"))))
+
+    compile_calls = 0
+    original_run = native_module.subprocess.run
+
+    def counting_run(*args, **kwargs):
+        nonlocal compile_calls
+        compile_calls += 1
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(native_module.subprocess, "run", counting_run)
+
+    execute_native(loops)
+    native_module.clear_native_cache()
+    execute_native(loops)
+
+    assert compile_calls == 2
