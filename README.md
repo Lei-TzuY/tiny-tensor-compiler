@@ -10,6 +10,7 @@ Python tensor expressions
 -> explicit virtual-buffer CPU IR
 -> liveness-based physical memory planning
 -> explicit loop/kernel IR with broadcast index maps
+-> conservative verifier-backed elementwise fusion
 -> deterministic generated C11 source
 -> cached native CPU shared-library execution
 -> NumPy-backed scalar CPU interpretation/reference
@@ -24,6 +25,7 @@ from tiny_tensor_compiler import (
     GraphBuilder,
     execute_cpu,
     execute_native,
+    fuse_elementwise,
     generate_c,
     lower_to_cpu,
     lower_to_loops,
@@ -43,9 +45,11 @@ print(program.dump())
 print(plan_memory(program).dump())
 loops = lower_to_loops(program)
 print(loops.dump())
-print(generate_c(loops))
+fused = fuse_elementwise(loops)
+print(fused.dump())
+print(generate_c(fused))
 print(execute_cpu(program))
-print(execute_native(loops))
+print(execute_native(fused))
 ```
 
 The tensor IR is explicit and deterministic:
@@ -113,14 +117,15 @@ The same verified loop IR can be emitted as deterministic C11 source. Physical b
 - explicit `LoopAlloc`, `LoopKernel`, and `LoopReturn` IR over planned physical buffers
 - explicit broadcast index maps for elementwise `add`, `mul`, and `relu` loops
 - loop-IR verification for allocation order, read-before-write, non-in-place outputs, iteration shape, index maps, kernel types, and return validity
-- deterministic C11 source generation from explicit loop IR with fixed-width dtypes, nested loops, row-major indexing, scalar broadcasting, typed constants, and portable DLL export
+- explicit `fuse_elementwise()` pass for safe adjacent `add`/`mul` followed by ReLU, represented as verified `relu_add` / `relu_mul` loop kernels
+- deterministic C11 source generation from explicit loop IR with fixed-width dtypes, nested loops, row-major indexing, scalar broadcasting, typed constants, fused kernels, and portable DLL export
 - native CPU compilation/execution through `.so`, `.dylib`, or `.dll` libraries and a stable `tiny_tensor_run` output-pointer ABI
 - process-local native artifact reuse keyed by exact generated C source and compiler command, with failed compilations excluded from the cache
 - explicit `clear_native_cache()` resource release plus automatic process-exit cleanup
 - GCC/Clang-compatible native compilation on POSIX-like systems and MSVC `cl` compilation/loading on Windows
 - CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
-- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, cache regressions, linting, and CI
+- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, fusion/overflow regressions, cache regressions, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
 
@@ -136,7 +141,9 @@ Virtual buffers remain single-write. Physical reuse is computed separately from 
 
 Loop IR is also deliberately conservative. Physical buffers are allocated before loop kernels, kernel outputs may overwrite only slots whose earlier virtual value is already dead, and a kernel output may not alias any input read by that same kernel. Broadcasting is represented by deterministic index maps rather than delegated implicitly to NumPy.
 
-Native execution now separates deterministic code generation from process-local artifact reuse. An exact `(compiler command, generated C source)` match reuses the already loaded shared library; a different source or compiler command compiles independently, and compilation failures are never inserted into the cache. Each cached artifact owns its build directory until `clear_native_cache()` or process exit. Cache clearing releases Windows DLLs before deleting their build directories, preserving the platform lifecycle invariant that loaded DLLs cannot be unlinked like POSIX shared objects. The cache is intentionally process-local: no persistent on-disk cache or external tensor-input ABI is introduced by this stage.
+Elementwise fusion is explicit rather than automatic in `lower_to_loops()`. It currently combines only an adjacent `add` or `mul` producer with its immediately following ReLU when both loops have the same iteration shape, the ReLU consumes the producer through an identity map, the producer value has no other use before its physical slot is overwritten, and the fused output does not alias either producer input. The producer's broadcast maps are retained exactly. Both the interpreter and generated C force the binary intermediate through the fused output dtype before applying ReLU, preserving fixed-width integer overflow behavior and floating-point rounding/NaN/signed-zero semantics.
+
+Native execution separates deterministic code generation from process-local artifact reuse. An exact `(compiler command, generated C source)` match reuses the already loaded shared library; a different source or compiler command compiles independently, and compilation failures are never inserted into the cache. Each cached artifact owns its build directory until `clear_native_cache()` or process exit. Cache clearing releases Windows DLLs before deleting their build directories, preserving the platform lifecycle invariant that loaded DLLs cannot be unlinked like POSIX shared objects. The cache is intentionally process-local: no persistent on-disk cache is introduced by this stage.
 
 ## Development
 
@@ -151,4 +158,4 @@ A native C compiler is required to exercise `execute_native()`: a `cc`-compatibl
 
 ## Near-term compiler roadmap
 
-The next independently testable milestone is conservative elementwise operator fusion over the explicit loop IR, with verifier-backed guarantees that fusion preserves broadcast indexing, physical-buffer lifetime rules, and observable numeric semantics. SIMD, parallel loop scheduling, a persistent on-disk artifact cache, an external tensor-input ABI, and CUDA remain deliberately out of scope until the scalar native CPU path and its process-local cache are well tested.
+The next independently testable milestone is a typed external tensor-input ABI so one compiled graph can execute caller-provided tensor data instead of embedding every input as a constant. That work should add explicit input values without weakening verifier guarantees, keep buffer/loop lowering deterministic, and preserve the current native output-pointer contract while extending it deliberately. Longer fusion chains, SIMD, parallel loop scheduling, a persistent on-disk artifact cache, and CUDA remain out of scope until that runtime-input boundary is explicit and well tested.
