@@ -16,6 +16,7 @@ _BINARY_CHAIN_OPERATORS = {
     "chain_mul_add": ("*", "+"),
     "chain_mul_mul": ("*", "*"),
 }
+_RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_OPERATORS)
 
 
 def generate_c(program: LoopProgram) -> str:
@@ -131,18 +132,27 @@ def _emit_kernel(
         operator = "+" if op.opcode == "relu_add" else "*"
         lines.append(f"{indent}{c_type} value = (({c_type}){lhs} {operator} ({c_type}){rhs});")
         lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
-    elif op.opcode in _BINARY_CHAIN_OPERATORS:
+    elif op.opcode in _BINARY_CHAIN_OPERATORS or op.opcode in _RELU_BINARY_CHAIN_OPCODES:
         lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
         rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
         tail = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
         c_type = _c_type(output_type.dtype)
-        inner_operator, outer_operator = _BINARY_CHAIN_OPERATORS[op.opcode]
+        relu_chain = op.opcode in _RELU_BINARY_CHAIN_OPCODES
+        chain_opcode = op.opcode.removeprefix("relu_")
+        inner_operator, outer_operator = _BINARY_CHAIN_OPERATORS[chain_opcode]
         lines.append(
             f"{indent}{c_type} inner = (({c_type}){lhs} {inner_operator} ({c_type}){rhs});"
         )
-        lines.append(
-            f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
-        )
+        if relu_chain:
+            zero = _zero_literal(output_type.dtype)
+            lines.append(
+                f"{indent}{c_type} value = (({c_type})inner {outer_operator} ({c_type}){tail});"
+            )
+            lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
+        else:
+            lines.append(
+                f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
+            )
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
