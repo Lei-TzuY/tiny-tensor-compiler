@@ -1,6 +1,7 @@
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_codegen import generate_c
+from .compiler import compile_module
 from .frontend import GraphBuilder, Tensor
 from .inference import TypeInferenceError
 from .loop_ir import (
@@ -65,6 +66,7 @@ __all__ = [
     "canonicalize",
     "clear_native_cache",
     "common_subexpression_eliminate",
+    "compile_module",
     "compile_native",
     "constant_fold",
     "dead_code_eliminate",
