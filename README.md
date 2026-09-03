@@ -7,11 +7,11 @@ Python tensor expressions
 -> explicit typed tensor IR
 -> verifier
 -> constant folding / algebraic simplification / dead-code elimination / canonicalization / CSE
--> deterministic CPU lowering
--> NumPy-backed CPU execution
+-> explicit virtual-buffer CPU IR
+-> NumPy-backed CPU kernels
 ```
 
-The NumPy CPU executor is intentionally the first backend, not the final destination. It provides a stable semantic baseline for later loop IR, explicit buffers, generated C, and native code while the compiler architecture is still small enough to verify aggressively.
+The NumPy CPU executor is intentionally the first backend, not the final destination. It provides a stable semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and eventually native code.
 
 ## Working example
 
@@ -25,10 +25,12 @@ module = builder.finish(z)
 
 verify(module)
 print(module.dump())
-print(execute_cpu(lower_to_cpu(module)))
+program = lower_to_cpu(module)
+print(program.dump())
+print(execute_cpu(program))
 ```
 
-The IR is explicit and deterministic:
+The tensor IR is explicit and deterministic:
 
 ```text
 func @main() {
@@ -40,6 +42,24 @@ func @main() {
   %5 = relu %4 : tensor<3xi64>
   return %5
 }
+```
+
+Lowering now produces an explicit virtual-buffer IR rather than implicitly allocating arrays while kernels execute:
+
+```text
+alloc b0 : tensor<3xi64>
+b0 = const [1, 2, 3]
+alloc b1 : tensor<i64>
+b1 = const 2
+alloc b2 : tensor<3xi64>
+b2 = mul b0, b1
+alloc b3 : tensor<i64>
+b3 = const 1
+alloc b4 : tensor<3xi64>
+b4 = add b2, b3
+alloc b5 : tensor<3xi64>
+b5 = relu b4
+return b5
 ```
 
 ## Implemented now
@@ -54,8 +74,10 @@ func @main() {
 - dead-code elimination for unused known-pure operations, including cascading producer cleanup and simplification residue
 - deterministic integer commutative canonicalization for `add` and `mul`, ordered by current SSA definition order
 - conservative common-subexpression elimination for repeated exact `add`, `mul`, and `relu` expressions
-- deterministic lowering to buffer-numbered CPU instructions
-- direct IR reference execution and separately lowered CPU execution
+- deterministic lowering to explicit `BufferAlloc`, `BufferKernel`, and `BufferReturn` operations
+- buffer-IR structural/type verification for allocation, read-before-write, kernel arity, inferred output types, and return validity
+- CPU execution that allocates typed output buffers first and then writes NumPy kernel results into them
+- direct tensor-IR reference execution and separately lowered CPU execution
 - malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
@@ -68,6 +90,8 @@ Canonicalization currently reorders only integer `add` and `mul` operands. Earli
 
 Common-subexpression elimination is deliberately exact rather than algebraic. It only merges attribute-free `add`, `mul`, and `relu` operations with the same opcode, operand identities in the same order, and identical result types. It does not deduplicate constants or independently apply commutativity.
 
+The current buffer IR uses one virtual buffer per tensor result on purpose. Physical buffer reuse is a separate memory-planning step so liveness and aliasing decisions can be tested independently rather than hidden inside lowering.
+
 ## Development
 
 ```bash
@@ -79,4 +103,4 @@ python examples/basic.py
 
 ## Near-term compiler roadmap
 
-The next improvements should stay independently testable: a lower-level loop/buffer IR with basic memory planning. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
+The next improvements should stay independently testable: basic liveness-based memory planning over virtual buffers, then explicit loop/kernel IR. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
