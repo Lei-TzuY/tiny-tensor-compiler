@@ -14,6 +14,7 @@ _BINARY_CHAIN_OPCODES = frozenset(
     for inner in ("add", "mul")
     for outer in ("add", "mul")
 )
+_RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_OPCODES)
 
 
 @dataclass(frozen=True)
@@ -166,7 +167,15 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
     types = {alloc.buffer: alloc.type for alloc in program.allocations}
     fused: list[LoopOperation] = []
     index = 0
-    fusible_producers = {"add", "mul", "relu", "relu_add", "relu_mul"}
+    fusible_producers = {
+        "add",
+        "mul",
+        "relu",
+        "relu_add",
+        "relu_mul",
+        *_BINARY_CHAIN_OPCODES,
+        *_RELU_BINARY_CHAIN_OPCODES,
+    }
 
     while index < len(operations):
         producer = operations[index]
@@ -192,13 +201,15 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
             if binary_chain is not None:
                 current = binary_chain
                 next_index += 1
-                break
+                continue
 
             if not _can_fuse_relu_consumer(operations, next_index, current, consumer):
                 break
 
             opcode = current.opcode
             if opcode in {"add", "mul"}:
+                opcode = f"relu_{opcode}"
+            elif opcode in _BINARY_CHAIN_OPCODES:
                 opcode = f"relu_{opcode}"
             current = LoopKernel(
                 opcode=opcode,
@@ -419,15 +430,17 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if expected != output_type:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
                 _verify_index_maps(op, allocated)
-            elif op.opcode in _BINARY_CHAIN_OPCODES:
+            elif op.opcode in _BINARY_CHAIN_OPCODES | _RELU_BINARY_CHAIN_OPCODES:
                 if len(op.inputs) != 3 or len(op.input_maps) != 3 or op.literal is not None:
                     raise ValueError(
                         f"{op.opcode} loop requires three inputs and three index maps"
                     )
+                relu_chain = op.opcode in _RELU_BINARY_CHAIN_OPCODES
+                chain_name = "integer ReLU binary-chain" if relu_chain else "integer binary-chain"
                 if output_type.dtype not in {DType.INT32, DType.INT64}:
-                    raise ValueError("integer binary-chain loop requires an integer output dtype")
+                    raise ValueError(f"{chain_name} loop requires an integer output dtype")
                 if any(allocated[buffer].dtype != output_type.dtype for buffer in op.inputs):
-                    raise ValueError("integer binary-chain loop requires one exact integer dtype")
+                    raise ValueError(f"{chain_name} loop requires one exact integer dtype")
 
                 inner_opcode, outer_opcode = _binary_chain_parts(op.opcode)
                 inner_type = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
@@ -435,7 +448,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError(
                         f"{op.opcode} loop intermediate type must match its output type"
                     )
-                expected = infer_binary(inner_type, allocated[op.inputs[2]])
+                outer_type = infer_binary(inner_type, allocated[op.inputs[2]])
+                expected = infer_relu(outer_type) if relu_chain else outer_type
                 if expected != output_type:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
                 if inner_opcode not in {"add", "mul"} or outer_opcode not in {"add", "mul"}:
@@ -462,6 +476,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
 
 
 def _binary_chain_parts(opcode: str) -> tuple[str, str]:
+    if opcode in _RELU_BINARY_CHAIN_OPCODES:
+        opcode = opcode.removeprefix("relu_")
     if opcode not in _BINARY_CHAIN_OPCODES:
         raise ValueError(f"unsupported integer binary-chain loop: {opcode}")
     _, inner_opcode, outer_opcode = opcode.split("_")
