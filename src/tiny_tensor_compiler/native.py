@@ -63,11 +63,11 @@ def clear_native_cache() -> None:
     with _NATIVE_CACHE_LOCK:
         artifacts = list(_NATIVE_CACHE.values())
         _NATIVE_CACHE.clear()
-        first_error: Exception | None = None
+        first_error: NativeCompilationError | OSError | None = None
         for artifact in artifacts:
             try:
                 artifact.close()
-            except Exception as error:  # pragma: no cover - defensive cleanup path
+            except (NativeCompilationError, OSError) as error:  # pragma: no cover
                 if first_error is None:
                     first_error = error
         if first_error is not None:
@@ -193,11 +193,4 @@ def _shared_library_flags() -> list[str]:
     raise NativeCompilationError(f"unsupported native platform: {os.name}")
 
 
-def _clear_native_cache_at_exit() -> None:
-    try:
-        clear_native_cache()
-    except Exception:
-        pass
-
-
-atexit.register(_clear_native_cache_at_exit)
+atexit.register(clear_native_cache)
