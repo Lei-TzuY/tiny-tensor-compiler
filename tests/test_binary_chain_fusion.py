@@ -118,7 +118,7 @@ def test_integer_binary_chain_fusion_refuses_final_output_alias_with_inner_input
     ]
 
 
-def test_integer_binary_chain_fusion_does_not_preempt_existing_binary_relu_fusion():
+def test_integer_binary_chain_fusion_keeps_aliasing_relu_separate():
     builder = GraphBuilder()
     lhs = builder.input((2, 1), dtype="int32")
     rhs = builder.input((1, 3), dtype="int32")
@@ -127,7 +127,17 @@ def test_integer_binary_chain_fusion_does_not_preempt_existing_binary_relu_fusio
 
     fused = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
 
-    assert [kernel.opcode for kernel in fused.kernels] == ["add", "relu_mul"]
+    assert [kernel.opcode for kernel in fused.kernels] == ["chain_add_mul", "relu"]
+
+    inputs = [
+        np.array([[1], [2]], dtype=np.int32),
+        np.array([[10, 20, 30]], dtype=np.int32),
+        np.array(3, dtype=np.int32),
+    ]
+    np.testing.assert_array_equal(
+        execute_loop(fused, inputs=inputs),
+        execute_reference(module, inputs=inputs),
+    )
 
 
 def test_binary_chain_loop_ir_rejects_float_dtype():
