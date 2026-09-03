@@ -28,6 +28,18 @@ _BINARY_TREE_OPERATORS = {
     for root in ("add", "mul")
 }
 _RELU_BINARY_TREE_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_TREE_OPERATORS)
+_CHAIN_TREE_OPERATORS = {
+    f"chain_tree_{inner}_{left}_{right}_{root}": (
+        "+" if inner == "add" else "*",
+        "+" if left == "add" else "*",
+        "+" if right == "add" else "*",
+        "+" if root == "add" else "*",
+    )
+    for inner in ("add", "mul")
+    for left in ("add", "mul")
+    for right in ("add", "mul")
+    for root in ("add", "mul")
+}
 
 
 def generate_c(program: LoopProgram) -> str:
@@ -191,6 +203,31 @@ def _emit_kernel(
             lines.append(
                 f"{indent}{output_ref} = (({c_type})left {root_operator} ({c_type})right);"
             )
+    elif op.opcode in _CHAIN_TREE_OPERATORS:
+        first_lhs = _input_ref(op.inputs[0], op.input_maps[0], types[op.inputs[0]])
+        first_rhs = _input_ref(op.inputs[1], op.input_maps[1], types[op.inputs[1]])
+        left_tail = _input_ref(op.inputs[2], op.input_maps[2], types[op.inputs[2]])
+        right_lhs = _input_ref(op.inputs[3], op.input_maps[3], types[op.inputs[3]])
+        right_rhs = _input_ref(op.inputs[4], op.input_maps[4], types[op.inputs[4]])
+        c_type = _c_type(output_type.dtype)
+        inner_operator, left_operator, right_operator, root_operator = _CHAIN_TREE_OPERATORS[
+            op.opcode
+        ]
+        lines.append(
+            f"{indent}{c_type} inner = "
+            f"(({c_type}){first_lhs} {inner_operator} ({c_type}){first_rhs});"
+        )
+        lines.append(
+            f"{indent}{c_type} left = "
+            f"(({c_type})inner {left_operator} ({c_type}){left_tail});"
+        )
+        lines.append(
+            f"{indent}{c_type} right = "
+            f"(({c_type}){right_lhs} {right_operator} ({c_type}){right_rhs});"
+        )
+        lines.append(
+            f"{indent}{output_ref} = (({c_type})left {root_operator} ({c_type})right);"
+        )
     else:
         raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
 
