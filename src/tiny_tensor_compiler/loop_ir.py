@@ -155,42 +155,49 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
 
 
 def fuse_elementwise(program: LoopProgram) -> LoopProgram:
-    """Fuse safe adjacent binary-elementwise plus ReLU loop kernels."""
+    """Fuse safe adjacent binary/ReLU kernels and greedily absorb ReLU tails."""
     operations = program.operations
     fused: list[LoopOperation] = []
     index = 0
+    fusible_producers = {"add", "mul", "relu", "relu_add", "relu_mul"}
 
     while index < len(operations):
         producer = operations[index]
-        if (
-            isinstance(producer, LoopKernel)
-            and producer.opcode in {"add", "mul"}
-            and index + 1 < len(operations)
-            and isinstance(operations[index + 1], LoopKernel)
-        ):
-            consumer = operations[index + 1]
-            if _can_fuse_binary_relu(operations, index, producer, consumer):
-                fused.append(
-                    LoopKernel(
-                        opcode=f"relu_{producer.opcode}",
-                        output=consumer.output,
-                        inputs=producer.inputs,
-                        iteration_shape=consumer.iteration_shape,
-                        input_maps=producer.input_maps,
-                    )
-                )
-                index += 2
-                continue
+        if not isinstance(producer, LoopKernel) or producer.opcode not in fusible_producers:
+            fused.append(producer)
+            index += 1
+            continue
 
-        fused.append(producer)
-        index += 1
+        current = producer
+        next_index = index + 1
+        while next_index < len(operations):
+            consumer = operations[next_index]
+            if not isinstance(consumer, LoopKernel):
+                break
+            if not _can_fuse_relu_consumer(operations, next_index, current, consumer):
+                break
+
+            opcode = current.opcode
+            if opcode in {"add", "mul"}:
+                opcode = f"relu_{opcode}"
+            current = LoopKernel(
+                opcode=opcode,
+                output=consumer.output,
+                inputs=current.inputs,
+                iteration_shape=consumer.iteration_shape,
+                input_maps=current.input_maps,
+            )
+            next_index += 1
+
+        fused.append(current)
+        index = next_index
 
     return LoopProgram(tuple(fused))
 
 
-def _can_fuse_binary_relu(
+def _can_fuse_relu_consumer(
     operations: tuple[LoopOperation, ...],
-    producer_index: int,
+    consumer_index: int,
     producer: LoopKernel,
     consumer: LoopKernel,
 ) -> bool:
@@ -203,7 +210,7 @@ def _can_fuse_binary_relu(
         return False
     if consumer.output in producer.inputs:
         return False
-    return _producer_value_has_no_later_use(operations, producer_index + 2, producer.output)
+    return _producer_value_has_no_later_use(operations, consumer_index + 1, producer.output)
 
 
 def _producer_value_has_no_later_use(
