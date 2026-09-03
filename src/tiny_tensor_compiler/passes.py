@@ -6,6 +6,9 @@ from .ir import DType, Module, Operation, Value
 from .verifier import verify
 
 
+_PURE_OPCODES = frozenset({"const", "add", "mul", "relu"})
+
+
 def constant_fold(module: Module) -> int:
     """Fold constant add/mul/relu operations in place and return the number folded."""
     verify(module)
@@ -62,6 +65,31 @@ def algebraic_simplify(module: Module) -> int:
 
     verify(module)
     return simplified
+
+
+def dead_code_eliminate(module: Module) -> int:
+    """Erase unused known-pure operations and return the number removed."""
+    verify(module)
+    function = module.function
+    removed = 0
+
+    while True:
+        changed = False
+        for op in reversed(list(function.ops)):
+            if op.opcode not in _PURE_OPCODES:
+                continue
+            if not op.results or any(result.uses for result in op.results):
+                continue
+
+            function.erase_op(op)
+            removed += 1
+            changed = True
+
+        if not changed:
+            break
+
+    verify(module)
+    return removed
 
 
 def _neutral_replacement(op: Operation) -> Value | None:
