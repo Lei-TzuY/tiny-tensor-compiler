@@ -22,6 +22,7 @@ _BINARY_CHAIN_FUNCTIONS = {
     "chain_mul_add": (np.multiply, np.add),
     "chain_mul_mul": (np.multiply, np.multiply),
 }
+_RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_FUNCTIONS)
 
 
 def execute(program: CPUProgram, inputs: Sequence[Any] = ()) -> np.ndarray:
@@ -73,10 +74,17 @@ def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> np.ndarray
                 value = output.dtype.type(binary(values[0], values[1]))
                 zero = np.array(0, dtype=output.dtype)
                 output[output_index] = np.maximum(value, zero)
-            elif op.opcode in _BINARY_CHAIN_FUNCTIONS:
-                inner_fn, outer_fn = _BINARY_CHAIN_FUNCTIONS[op.opcode]
+            elif op.opcode in _BINARY_CHAIN_FUNCTIONS or op.opcode in _RELU_BINARY_CHAIN_OPCODES:
+                relu_chain = op.opcode in _RELU_BINARY_CHAIN_OPCODES
+                chain_opcode = op.opcode.removeprefix("relu_")
+                inner_fn, outer_fn = _BINARY_CHAIN_FUNCTIONS[chain_opcode]
                 inner = output.dtype.type(inner_fn(values[0], values[1]))
-                output[output_index] = outer_fn(inner, values[2])
+                outer = output.dtype.type(outer_fn(inner, values[2]))
+                if relu_chain:
+                    zero = np.array(0, dtype=output.dtype)
+                    output[output_index] = np.maximum(outer, zero)
+                else:
+                    output[output_index] = outer
             else:
                 raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
 
