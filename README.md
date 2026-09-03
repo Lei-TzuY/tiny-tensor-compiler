@@ -9,7 +9,8 @@ Python tensor expressions
 -> constant folding / algebraic simplification / dead-code elimination / canonicalization / CSE
 -> explicit virtual-buffer CPU IR
 -> liveness-based physical memory planning
--> NumPy-backed CPU kernels
+-> explicit loop/kernel IR with broadcast index maps
+-> NumPy-backed scalar CPU execution
 ```
 
 The NumPy CPU executor is intentionally the first backend, not the final destination. It provides a stable semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and eventually native code.
@@ -17,7 +18,14 @@ The NumPy CPU executor is intentionally the first backend, not the final destina
 ## Working example
 
 ```python
-from tiny_tensor_compiler import GraphBuilder, execute_cpu, lower_to_cpu, plan_memory, verify
+from tiny_tensor_compiler import (
+    GraphBuilder,
+    execute_cpu,
+    lower_to_cpu,
+    lower_to_loops,
+    plan_memory,
+    verify,
+)
 
 builder = GraphBuilder()
 x = builder.tensor([1, 2, 3])
@@ -29,6 +37,7 @@ print(module.dump())
 program = lower_to_cpu(module)
 print(program.dump())
 print(plan_memory(program).dump())
+print(lower_to_loops(program).dump())
 print(execute_cpu(program))
 ```
 
@@ -75,6 +84,8 @@ b2 -> p0 : tensor<3xi32>
 b3 -> p1 : tensor<3xi32>
 ```
 
+The next lowering layer makes elementwise iteration and broadcasting explicit. For example, adding tensors with shapes `(2, 1)` and `(1, 3)` produces a `(2, 3)` loop whose reads are indexed as `lhs[i0, 0]` and `rhs[0, i1]`. Scalar broadcasts use an empty input index map, and ReLU uses identity indexing. CPU execution now interprets these loop kernels one output index at a time rather than delegating broadcasting to vectorized NumPy operations.
+
 ## Implemented now
 
 - SSA-like `Value` objects with producer metadata and explicit use-def edges
@@ -90,7 +101,10 @@ b3 -> p1 : tensor<3xi32>
 - deterministic lowering to explicit `BufferAlloc`, `BufferKernel`, and `BufferReturn` operations
 - buffer-IR structural/type verification for allocation, read-before-write, kernel arity, inferred output types, and return validity
 - liveness-based virtual-to-physical memory planning with exact-type reuse and deterministic lowest-slot selection
-- CPU execution over planned physical NumPy buffers rather than one allocation per virtual tensor result
+- explicit `LoopAlloc`, `LoopKernel`, and `LoopReturn` IR over planned physical buffers
+- explicit broadcast index maps for elementwise `add`, `mul`, and `relu` loops
+- loop-IR verification for allocation order, read-before-write, non-in-place outputs, iteration shape, index maps, kernel types, and return validity
+- CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
 - malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, linting, and CI
 
@@ -106,6 +120,8 @@ Common-subexpression elimination is deliberately exact rather than algebraic. It
 
 Virtual buffers remain single-write. Physical reuse is computed separately from virtual-buffer liveness, which keeps aliasing decisions explicit and testable. The planner does not perform in-place kernels: a physical slot is reusable only when its previous virtual buffer's last use is strictly before the new virtual allocation.
 
+Loop IR is also deliberately conservative. Physical buffers are allocated before loop kernels, kernel outputs may overwrite only slots whose earlier virtual value is already dead, and a kernel output may not alias any input read by that same kernel. Broadcasting is represented by deterministic index maps rather than delegated implicitly to NumPy.
+
 ## Development
 
 ```bash
@@ -117,4 +133,4 @@ python examples/basic.py
 
 ## Near-term compiler roadmap
 
-The next improvements should stay independently testable: explicit loop/kernel IR over the planned buffers, then generated C/native CPU code. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
+The next improvements should stay independently testable: generated C for the explicit loop IR, then native CPU compilation/execution. Operator fusion should come only after those invariants are stable. SIMD, parallel loop scheduling, and CUDA are deliberately out of scope until the scalar CPU path is compiler-like and well tested.
