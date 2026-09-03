@@ -11,10 +11,11 @@ Python tensor expressions
 -> liveness-based physical memory planning
 -> explicit loop/kernel IR with broadcast index maps
 -> deterministic generated C11 source
--> NumPy-backed scalar CPU execution
+-> native CPU shared-library execution
+-> NumPy-backed scalar CPU interpretation/reference
 ```
 
-The NumPy CPU executor is intentionally the first executable backend, not the final destination. It provides a stable semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and eventually native code.
+The NumPy CPU executor remains the semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and native execution. The native path now compiles the verified generated C into a temporary shared library and invokes its stable output-pointer ABI through `ctypes`.
 
 ## Working example
 
@@ -22,6 +23,7 @@ The NumPy CPU executor is intentionally the first executable backend, not the fi
 from tiny_tensor_compiler import (
     GraphBuilder,
     execute_cpu,
+    execute_native,
     generate_c,
     lower_to_cpu,
     lower_to_loops,
@@ -43,6 +45,7 @@ loops = lower_to_loops(program)
 print(loops.dump())
 print(generate_c(loops))
 print(execute_cpu(program))
+print(execute_native(loops))
 ```
 
 The tensor IR is explicit and deterministic:
@@ -90,7 +93,7 @@ b3 -> p1 : tensor<3xi32>
 
 The next lowering layer makes elementwise iteration and broadcasting explicit. For example, adding tensors with shapes `(2, 1)` and `(1, 3)` produces a `(2, 3)` loop whose reads are indexed as `lhs[i0, 0]` and `rhs[0, i1]`. Scalar broadcasts use an empty input index map, and ReLU uses identity indexing. CPU execution interprets these loop kernels one output index at a time rather than delegating broadcasting to vectorized NumPy operations.
 
-The same verified loop IR can now be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and the returned physical buffer is copied into the generated function's output pointer. CI syntax-checks representative generated source with `cc -std=c11 -fsyntax-only` when a C compiler is available; compiling and executing the generated code is deliberately a separate milestone.
+The same verified loop IR can be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and the returned physical buffer is copied into the generated function's output pointer. `execute_native()` compiles that source with a POSIX-like GCC/Clang-style toolchain into a temporary shared library and invokes `tiny_tensor_run` through `ctypes`. Native compilation uses `-fwrapv` so signed integer add/multiply behavior matches NumPy's fixed-width wrapping semantics. Floating-point ReLU source explicitly preserves NaN propagation and NumPy's `-0.0 -> +0.0` behavior.
 
 ## Implemented now
 
@@ -111,9 +114,10 @@ The same verified loop IR can now be emitted as deterministic C11 source. Physic
 - explicit broadcast index maps for elementwise `add`, `mul`, and `relu` loops
 - loop-IR verification for allocation order, read-before-write, non-in-place outputs, iteration shape, index maps, kernel types, and return validity
 - deterministic C11 source generation from explicit loop IR with fixed-width dtypes, nested loops, row-major indexing, scalar broadcasting, and typed constants
+- native CPU compilation/execution through a temporary shared library and stable `tiny_tensor_run` output-pointer ABI
 - CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
-- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, linting, and CI
+- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, native differential tests, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
 
@@ -129,7 +133,7 @@ Virtual buffers remain single-write. Physical reuse is computed separately from 
 
 Loop IR is also deliberately conservative. Physical buffers are allocated before loop kernels, kernel outputs may overwrite only slots whose earlier virtual value is already dead, and a kernel output may not alias any input read by that same kernel. Broadcasting is represented by deterministic index maps rather than delegated implicitly to NumPy.
 
-Generated C is currently source-only. The emitter mirrors the verified scalar loop structure and does not introduce fusion, SIMD, parallel scheduling, runtime compilation, or dynamic loading. That keeps source generation independently reviewable before native execution is added.
+Native execution is deliberately ephemeral and narrow. It compiles each `LoopProgram` into a temporary shared library, returns a copied NumPy result, and then discards the temporary build directory. The current compiler invocation targets POSIX-like GCC/Clang-compatible toolchains; persistent compilation caches, Windows/MSVC support, operator fusion, SIMD, parallel scheduling, and CUDA remain out of scope.
 
 ## Development
 
@@ -140,6 +144,8 @@ pytest
 python examples/basic.py
 ```
 
+A `cc`-compatible C compiler is required to exercise `execute_native()`; tests skip compiler-dependent execution only when no compiler is available.
+
 ## Near-term compiler roadmap
 
-The next independently testable milestone is native CPU compilation/execution of the generated C, with differential checks against the existing reference and loop interpreters. Operator fusion should come only after those invariants are stable. SIMD, parallel loop scheduling, and CUDA are deliberately out of scope until the scalar native CPU path is well tested.
+The next independently testable milestone is native toolchain portability, starting with Windows/MSVC-compatible compilation and loading without weakening the existing POSIX path. Reusable compiled-artifact caching can follow as a separate slice. Operator fusion should come only after native execution invariants are stable. SIMD, parallel loop scheduling, and CUDA remain deliberately out of scope until the scalar native CPU path is well tested.
