@@ -9,7 +9,6 @@ from .inference import infer_binary, infer_relu
 from .ir import DType, TensorType
 from .lowering import BufferAlloc, BufferInput, BufferReturn, CPUProgram, plan_memory
 
-
 _BINARY_CHAIN_OPCODES = frozenset(
     f"chain_{inner}_{outer}"
     for inner in ("add", "mul")
