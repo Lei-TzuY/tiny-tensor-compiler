@@ -1,6 +1,8 @@
 from .backends.cpu import execute as execute_cpu
+from .backends.cpu import execute_loop
 from .frontend import GraphBuilder, Tensor
 from .inference import TypeInferenceError
+from .loop_ir import IndexMap, LoopAlloc, LoopKernel, LoopProgram, LoopReturn, lower_to_loops
 from .lowering import (
     BufferAlloc,
     BufferAssignment,
@@ -28,6 +30,11 @@ __all__ = [
     "BufferReturn",
     "CPUProgram",
     "GraphBuilder",
+    "IndexMap",
+    "LoopAlloc",
+    "LoopKernel",
+    "LoopProgram",
+    "LoopReturn",
     "MemoryPlan",
     "Tensor",
     "TypeInferenceError",
@@ -38,8 +45,10 @@ __all__ = [
     "constant_fold",
     "dead_code_eliminate",
     "execute_cpu",
+    "execute_loop",
     "execute_reference",
     "lower_to_cpu",
+    "lower_to_loops",
     "plan_memory",
     "verify",
 ]
