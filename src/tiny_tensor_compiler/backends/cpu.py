@@ -17,6 +17,14 @@ from ..loop_ir import (
 from ..lowering import CPUProgram
 
 
+_BINARY_CHAIN_FUNCTIONS = {
+    "chain_add_add": (np.add, np.add),
+    "chain_add_mul": (np.add, np.multiply),
+    "chain_mul_add": (np.multiply, np.add),
+    "chain_mul_mul": (np.multiply, np.multiply),
+}
+
+
 def execute(program: CPUProgram, inputs: Sequence[Any] = ()) -> np.ndarray:
     """Lower verified buffer IR to explicit loops and execute them on the CPU."""
     return execute_loop(lower_to_loops(program), inputs=inputs)
@@ -66,6 +74,10 @@ def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> np.ndarray
                 value = output.dtype.type(binary(values[0], values[1]))
                 zero = np.array(0, dtype=output.dtype)
                 output[output_index] = np.maximum(value, zero)
+            elif op.opcode in _BINARY_CHAIN_FUNCTIONS:
+                inner_fn, outer_fn = _BINARY_CHAIN_FUNCTIONS[op.opcode]
+                inner = output.dtype.type(inner_fn(values[0], values[1]))
+                output[output_index] = outer_fn(inner, values[2])
             else:
                 raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
 
