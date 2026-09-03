@@ -2,28 +2,38 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..lowering import CPUProgram
+from ..lowering import BufferAlloc, BufferKernel, BufferReturn, CPUProgram
 
 
 def execute(program: CPUProgram) -> np.ndarray:
-    """Execute deterministic lowered CPU instructions using NumPy kernels."""
+    """Execute verified buffer IR using NumPy kernels over explicit allocations."""
     buffers: dict[int, np.ndarray] = {}
 
-    for inst in program.instructions:
-        dtype = inst.result_type.dtype.to_numpy()
-        if inst.opcode == "const":
-            if inst.literal is None:
-                raise RuntimeError("const instruction is missing its literal")
-            buffers[inst.output] = np.array(inst.literal, dtype=dtype, copy=True)
-        elif inst.opcode in {"add", "mul"}:
-            lhs = buffers[inst.inputs[0]].astype(dtype, copy=False)
-            rhs = buffers[inst.inputs[1]].astype(dtype, copy=False)
-            fn = np.add if inst.opcode == "add" else np.multiply
-            buffers[inst.output] = np.asarray(fn(lhs, rhs), dtype=dtype)
-        elif inst.opcode == "relu":
-            operand = buffers[inst.inputs[0]].astype(dtype, copy=False)
-            buffers[inst.output] = np.maximum(operand, np.array(0, dtype=dtype))
-        else:
-            raise RuntimeError(f"unsupported CPU instruction: {inst.opcode}")
+    for op in program.operations:
+        if isinstance(op, BufferAlloc):
+            buffers[op.buffer] = np.empty(op.type.shape, dtype=op.type.dtype.to_numpy())
+            continue
 
-    return np.array(buffers[program.return_slot], copy=True)
+        if isinstance(op, BufferReturn):
+            return np.array(buffers[op.buffer], copy=True)
+
+        if not isinstance(op, BufferKernel):
+            raise RuntimeError("unsupported CPU buffer operation")
+
+        output = buffers[op.output]
+        if op.opcode == "const":
+            if op.literal is None:
+                raise RuntimeError("verified const kernel unexpectedly has no literal")
+            output[...] = op.literal
+        elif op.opcode in {"add", "mul"}:
+            lhs = buffers[op.inputs[0]]
+            rhs = buffers[op.inputs[1]]
+            fn = np.add if op.opcode == "add" else np.multiply
+            fn(lhs, rhs, out=output)
+        elif op.opcode == "relu":
+            operand = buffers[op.inputs[0]]
+            np.maximum(operand, np.array(0, dtype=output.dtype), out=output)
+        else:
+            raise RuntimeError(f"unsupported CPU kernel: {op.opcode}")
+
+    raise RuntimeError("verified buffer IR unexpectedly has no return")
