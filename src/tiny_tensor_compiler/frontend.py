@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -37,6 +38,28 @@ class GraphBuilder:
     def __init__(self, name: str = "main") -> None:
         self.function = Function(name)
         self._finished = False
+        self._next_input_index = 0
+
+    def input(
+        self,
+        shape: Iterable[int],
+        dtype: str | np.dtype[Any] | DType,
+    ) -> Tensor:
+        self._ensure_open()
+        try:
+            tensor_dtype = dtype if isinstance(dtype, DType) else DType.from_numpy(np.dtype(dtype))
+            type_ = TensorType(tuple(shape), tensor_dtype)
+        except (TypeError, ValueError) as exc:
+            raise TypeInferenceError(str(exc)) from exc
+
+        index = self._next_input_index
+        self._next_input_index += 1
+        op = self.function.add_op(
+            "input",
+            result_types=[type_],
+            attrs={"index": index},
+        )
+        return Tensor(self, op.results[0])
 
     def tensor(self, data: Any, dtype: str | np.dtype[Any] | DType | None = None) -> Tensor:
         self._ensure_open()
