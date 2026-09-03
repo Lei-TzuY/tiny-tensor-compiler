@@ -71,6 +71,24 @@ def test_native_fused_broadcast_binary_relu_matches_reference(opcode):
     np.testing.assert_array_equal(native, reference)
 
 
+def test_native_fused_int32_add_relu_preserves_overflow_before_relu():
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    lhs = builder.tensor([[2_147_483_647], [5]], dtype="int32")
+    rhs = builder.tensor([[1, 2]], dtype="int32")
+    module = builder.finish((lhs + rhs).relu())
+    loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
+
+    assert any(kernel.opcode == "relu_add" for kernel in loops.kernels)
+    native = execute_native(loops)
+    interpreted = execute_loop(loops)
+    reference = execute_reference(module)
+
+    np.testing.assert_array_equal(native, interpreted)
+    np.testing.assert_array_equal(native, reference)
+    np.testing.assert_array_equal(native, np.array([[0, 0], [6, 7]], dtype=np.int32))
+
+
 def test_native_integer_overflow_matches_numpy_wrap_semantics():
     builder = GraphBuilder()
     maximum = builder.tensor([2_147_483_647], dtype="int32")
