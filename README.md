@@ -6,7 +6,7 @@ A compact, correctness-first tensor compiler. The current milestone implements a
 Python tensor expressions
 -> explicit typed tensor IR
 -> verifier
--> constant folding / algebraic simplification / dead-code elimination
+-> constant folding / algebraic simplification / dead-code elimination / CSE
 -> deterministic CPU lowering
 -> NumPy-backed CPU execution
 ```
@@ -52,6 +52,7 @@ func @main() {
 - constant-folding optimization with post-pass verification
 - conservative algebraic simplification for exact integer `x + 0`, `0 + x`, `x * 1`, and `1 * x` identities when replacement type/shape exactly matches the result
 - dead-code elimination for unused known-pure operations, including cascading producer cleanup and simplification residue
+- conservative common-subexpression elimination for repeated exact `add`, `mul`, and `relu` expressions
 - deterministic lowering to buffer-numbered CPU instructions
 - direct IR reference execution and separately lowered CPU execution
 - malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, linting, and CI
@@ -61,6 +62,8 @@ Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor *
 Algebraic simplification is intentionally conservative: floating-point neutral-element rewrites are not enabled yet because preserving strict IEEE behavior, including signed zero and NaN edge cases, takes priority over reducing operation count.
 
 Dead-code elimination is side-effect conservative. It only removes currently known pure operations (`const`, `add`, `mul`, `relu`) whose results have no uses; terminators such as `return` are never candidates.
+
+Common-subexpression elimination is deliberately exact rather than algebraic. It only merges attribute-free `add`, `mul`, and `relu` operations with the same opcode, operand identities in the same order, and identical result types. It does not deduplicate constants or use commutativity such as treating `x + y` as equivalent to `y + x`.
 
 ## Development
 
@@ -73,4 +76,4 @@ python examples/basic.py
 
 ## Near-term compiler roadmap
 
-The next improvements should stay independently testable: common-subexpression elimination, canonicalization, then a lower-level loop/buffer IR with basic memory planning. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
+The next improvements should stay independently testable: canonicalization, then a lower-level loop/buffer IR with basic memory planning. Operator fusion should come only after those invariants are stable. CUDA is deliberately out of scope until the CPU path is compiler-like and well tested.
