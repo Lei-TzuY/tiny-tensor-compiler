@@ -5,7 +5,6 @@ import numpy as np
 from .ir import DType, Module, Operation, Value
 from .verifier import verify
 
-
 _PURE_OPCODES = frozenset({"const", "add", "mul", "relu"})
 
 
