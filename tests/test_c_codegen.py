@@ -20,7 +20,8 @@ def test_generate_c_is_deterministic_and_encodes_broadcast_offsets():
     second = generate_c(program)
 
     assert first == second
-    assert "void tiny_tensor_run(int32_t *out)" in first
+    assert "#define TINY_TENSOR_EXPORT __declspec(dllexport)" in first
+    assert "TINY_TENSOR_EXPORT void tiny_tensor_run(int32_t *out)" in first
     assert "for (int64_t i0 = 0; i0 < 2; ++i0)" in first
     assert "for (int64_t i1 = 0; i1 < 3; ++i1)" in first
     assert "p0[i0]" in first
