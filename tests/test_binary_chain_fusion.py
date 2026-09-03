@@ -118,26 +118,70 @@ def test_integer_binary_chain_fusion_refuses_final_output_alias_with_inner_input
     ]
 
 
-def test_integer_binary_chain_fusion_keeps_aliasing_relu_separate():
+@pytest.mark.parametrize(
+    ("inner_opcode", "outer_opcode"),
+    [("add", "add"), ("add", "mul"), ("mul", "add"), ("mul", "mul")],
+)
+def test_integer_binary_chain_fusion_absorbs_safe_trailing_relu(
+    inner_opcode,
+    outer_opcode,
+):
     builder = GraphBuilder()
     lhs = builder.input((2, 1), dtype="int32")
     rhs = builder.input((1, 3), dtype="int32")
     tail = builder.input((), dtype="int32")
-    module = builder.finish(((lhs + rhs) * tail).relu())
+    inner = _binary(lhs, rhs, inner_opcode)
+    outer = _binary(inner, tail, outer_opcode)
+    module = builder.finish(outer.relu())
 
-    fused = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
+    original = lower_to_loops(lower_to_cpu(module))
+    fused = fuse_elementwise(original)
 
-    assert [kernel.opcode for kernel in fused.kernels] == ["chain_add_mul", "relu"]
+    assert [kernel.opcode for kernel in fused.kernels] == [
+        f"relu_chain_{inner_opcode}_{outer_opcode}"
+    ]
+    assert tuple(index_map.axes for index_map in fused.kernels[0].input_maps) == (
+        (0, None),
+        (None, 1),
+        (),
+    )
+    assert fuse_elementwise(fused).dump() == fused.dump()
 
     inputs = [
-        np.array([[1], [2]], dtype=np.int32),
-        np.array([[10, 20, 30]], dtype=np.int32),
-        np.array(3, dtype=np.int32),
+        np.array([[-4], [2]], dtype=np.int32),
+        np.array([[1, 5, -3]], dtype=np.int32),
+        np.array(-2, dtype=np.int32),
     ]
     np.testing.assert_array_equal(
         execute_loop(fused, inputs=inputs),
         execute_reference(module, inputs=inputs),
     )
+
+
+def test_relu_binary_chain_loop_ir_rejects_float_dtype():
+    float_type = TensorType((1,), DType.FLOAT32)
+    identity = IndexMap((0,))
+
+    with pytest.raises(ValueError, match="integer ReLU binary-chain"):
+        LoopProgram(
+            (
+                LoopAlloc(0, float_type),
+                LoopAlloc(1, float_type),
+                LoopAlloc(2, float_type),
+                LoopAlloc(3, float_type),
+                LoopInput(0, 0),
+                LoopInput(1, 1),
+                LoopInput(2, 2),
+                LoopKernel(
+                    opcode="relu_chain_add_mul",
+                    output=3,
+                    inputs=(0, 1, 2),
+                    iteration_shape=(1,),
+                    input_maps=(identity, identity, identity),
+                ),
+                LoopReturn(3),
+            )
+        )
 
 
 def test_binary_chain_loop_ir_rejects_float_dtype():
@@ -176,6 +220,27 @@ def test_integer_binary_chain_native_execution_preserves_intermediate_overflow()
     fused = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
 
     assert [kernel.opcode for kernel in fused.kernels] == ["chain_add_mul"]
+
+    inputs = [
+        np.array([[2_000_000_000], [-2_000_000_000]], dtype=np.int32),
+        np.array([[1_000_000_000, -1_000_000_000, 123_456_789]], dtype=np.int32),
+        np.array(3, dtype=np.int32),
+    ]
+    expected = execute_reference(module, inputs=inputs)
+    np.testing.assert_array_equal(execute_loop(fused, inputs=inputs), expected)
+    np.testing.assert_array_equal(execute_native(fused, inputs=inputs), expected)
+
+
+def test_integer_relu_chain_native_execution_preserves_overflow_before_relu():
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    lhs = builder.input((2, 1), dtype="int32")
+    rhs = builder.input((1, 3), dtype="int32")
+    tail = builder.input((), dtype="int32")
+    module = builder.finish(((lhs + rhs) * tail).relu())
+    fused = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
+
+    assert [kernel.opcode for kernel in fused.kernels] == ["relu_chain_add_mul"]
 
     inputs = [
         np.array([[2_000_000_000], [-2_000_000_000]], dtype=np.int32),
