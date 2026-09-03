@@ -23,6 +23,16 @@ _BINARY_CHAIN_FUNCTIONS = {
     "chain_mul_mul": (np.multiply, np.multiply),
 }
 _RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_FUNCTIONS)
+_BINARY_TREE_FUNCTIONS = {
+    f"tree_{left}_{right}_{root}": (
+        np.add if left == "add" else np.multiply,
+        np.add if right == "add" else np.multiply,
+        np.add if root == "add" else np.multiply,
+    )
+    for left in ("add", "mul")
+    for right in ("add", "mul")
+    for root in ("add", "mul")
+}
 
 
 def execute(program: CPUProgram, inputs: Sequence[Any] = ()) -> np.ndarray:
@@ -85,6 +95,11 @@ def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> np.ndarray
                     output[output_index] = np.maximum(outer, zero)
                 else:
                     output[output_index] = outer
+            elif op.opcode in _BINARY_TREE_FUNCTIONS:
+                left_fn, right_fn, root_fn = _BINARY_TREE_FUNCTIONS[op.opcode]
+                left = output.dtype.type(left_fn(values[0], values[1]))
+                right = output.dtype.type(right_fn(values[2], values[3]))
+                output[output_index] = output.dtype.type(root_fn(left, right))
             else:
                 raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
 
