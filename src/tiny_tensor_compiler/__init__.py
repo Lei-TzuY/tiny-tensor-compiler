@@ -24,7 +24,13 @@ from .lowering import (
     lower_to_cpu,
     plan_memory,
 )
-from .native import NativeCompilationError, clear_native_cache, execute_native
+from .native import (
+    NativeCompilationError,
+    NativeExecutable,
+    clear_native_cache,
+    compile_native,
+    execute_native,
+)
 from .passes import (
     algebraic_simplify,
     canonicalize,
@@ -51,6 +57,7 @@ __all__ = [
     "LoopReturn",
     "MemoryPlan",
     "NativeCompilationError",
+    "NativeExecutable",
     "Tensor",
     "TypeInferenceError",
     "VerificationError",
@@ -58,6 +65,7 @@ __all__ = [
     "canonicalize",
     "clear_native_cache",
     "common_subexpression_eliminate",
+    "compile_native",
     "constant_fold",
     "dead_code_eliminate",
     "execute_cpu",
