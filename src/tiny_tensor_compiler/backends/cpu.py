@@ -2,42 +2,50 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..lowering import BufferAlloc, BufferKernel, BufferReturn, CPUProgram, plan_memory
+from ..loop_ir import LoopAlloc, LoopKernel, LoopProgram, LoopReturn, lower_to_loops
+from ..lowering import CPUProgram
 
 
 def execute(program: CPUProgram) -> np.ndarray:
-    """Execute verified buffer IR using a liveness-based physical memory plan."""
-    plan = plan_memory(program)
-    physical_buffers = [
-        np.empty(buffer_type.shape, dtype=buffer_type.dtype.to_numpy())
-        for buffer_type in plan.physical_types
-    ]
-    slots = {assignment.virtual: assignment.physical for assignment in plan.assignments}
+    """Lower verified buffer IR to explicit loops and execute them on the CPU."""
+    return execute_loop(lower_to_loops(program))
+
+
+def execute_loop(program: LoopProgram) -> np.ndarray:
+    """Execute explicit loop IR over planned physical NumPy buffers."""
+    buffers: dict[int, np.ndarray] = {}
 
     for op in program.operations:
-        if isinstance(op, BufferAlloc):
+        if isinstance(op, LoopAlloc):
+            buffers[op.buffer] = np.empty(op.type.shape, dtype=op.type.dtype.to_numpy())
             continue
 
-        if isinstance(op, BufferReturn):
-            return np.array(physical_buffers[slots[op.buffer]], copy=True)
+        if isinstance(op, LoopReturn):
+            return np.array(buffers[op.buffer], copy=True)
 
-        if not isinstance(op, BufferKernel):
-            raise TypeError("unsupported CPU buffer operation")
+        if not isinstance(op, LoopKernel):
+            raise TypeError("unsupported CPU loop operation")
 
-        output = physical_buffers[slots[op.output]]
-        if op.opcode == "const":
-            if op.literal is None:
-                raise RuntimeError("verified const kernel unexpectedly has no literal")
-            output[...] = op.literal
-        elif op.opcode in {"add", "mul"}:
-            lhs = physical_buffers[slots[op.inputs[0]]]
-            rhs = physical_buffers[slots[op.inputs[1]]]
-            fn = np.add if op.opcode == "add" else np.multiply
-            fn(lhs, rhs, out=output)
-        elif op.opcode == "relu":
-            operand = physical_buffers[slots[op.inputs[0]]]
-            np.maximum(operand, np.array(0, dtype=output.dtype), out=output)
-        else:
-            raise RuntimeError(f"unsupported CPU kernel: {op.opcode}")
+        output = buffers[op.output]
+        for output_index in np.ndindex(op.iteration_shape):
+            if op.opcode == "const":
+                if op.literal is None:
+                    raise RuntimeError("verified const loop unexpectedly has no literal")
+                output[output_index] = op.literal[output_index]
+                continue
 
-    raise RuntimeError("verified buffer IR unexpectedly has no return")
+            inputs = tuple(
+                buffers[buffer][index_map.apply(output_index)]
+                for buffer, index_map in zip(op.inputs, op.input_maps, strict=True)
+            )
+            if op.opcode == "add":
+                output[output_index] = np.add(inputs[0], inputs[1])
+            elif op.opcode == "mul":
+                output[output_index] = np.multiply(inputs[0], inputs[1])
+            elif op.opcode == "relu":
+                zero = np.array(0, dtype=output.dtype)
+                output[output_index] = np.maximum(inputs[0], zero)
+            else:
+                raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
+
+    raise RuntimeError("verified loop IR unexpectedly has no return")
