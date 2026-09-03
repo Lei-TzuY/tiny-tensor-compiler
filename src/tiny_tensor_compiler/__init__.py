@@ -4,6 +4,7 @@ from .inference import TypeInferenceError
 from .lowering import CPUProgram, lower_to_cpu
 from .passes import (
     algebraic_simplify,
+    canonicalize,
     common_subexpression_eliminate,
     constant_fold,
     dead_code_eliminate,
@@ -18,6 +19,7 @@ __all__ = [
     "TypeInferenceError",
     "VerificationError",
     "algebraic_simplify",
+    "canonicalize",
     "common_subexpression_eliminate",
     "constant_fold",
     "dead_code_eliminate",
