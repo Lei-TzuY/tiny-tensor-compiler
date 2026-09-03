@@ -12,11 +12,11 @@ Python tensor expressions + static typed external inputs
 -> explicit loop/kernel IR with broadcast index maps
 -> conservative verifier-backed elementwise fusion
 -> deterministic generated C11 source
--> cached native CPU shared-library execution
+-> process-local / optional persistent native shared-library cache
 -> NumPy-backed scalar CPU interpretation/reference
 ```
 
-The NumPy CPU executor remains the semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and native execution. The native path compiles verified generated C into a shared library, caches exact generated-source/compiler-command matches for reuse within the current process, and invokes the stable output-first ABI through `ctypes` on POSIX-like GCC/Clang toolchains and Windows MSVC.
+The NumPy CPU executor remains the semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and native execution. The native path compiles verified generated C into a shared library, reuses exact generated-source/compiler matches within the current process, optionally persists content-addressed artifacts across processes through `cache_dir=`, and invokes the stable output-first ABI through `ctypes` on POSIX-like GCC/Clang toolchains and Windows MSVC.
 
 ## Working example
 
@@ -109,11 +109,14 @@ The same verified loop IR can be emitted as deterministic C11 source. Physical b
 - contiguous row-major normalization before scalar/native execution while leaving caller arrays unmodified
 - native CPU compilation/execution through `.so`, `.dylib`, or `.dll` libraries
 - process-local native artifact reuse keyed by exact generated C source and compiler command, independent of runtime input values
-- explicit `clear_native_cache()` resource release plus automatic process-exit cleanup
+- opt-in persistent native artifact reuse through `execute_native(..., cache_dir=...)` with compiler/target fingerprinting and atomic publication
+- process-owned staging copies for persistent libraries so cached `.dll` / `.so` / `.dylib` files are not directly loaded or locked
+- stale or corrupt persistent artifacts are discarded and rebuilt rather than poisoning later executions
+- explicit `clear_native_cache()` resource release plus automatic process-exit cleanup without deleting user-owned persistent cache files
 - GCC/Clang-compatible native compilation on POSIX-like systems and MSVC `cl` compilation/loading on Windows
 - CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
-- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, fusion/overflow regressions, external-input ABI/cache regressions, linting, and CI
+- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, fusion/overflow regressions, external-input ABI/cache regressions, persistent-cache regressions, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
 
@@ -133,7 +136,7 @@ Loop IR is also deliberately conservative. Physical buffers are allocated before
 
 Elementwise fusion is explicit rather than automatic in `lower_to_loops()`. A binary `add` or `mul` may fuse with an immediately following ReLU, producing the existing verified `relu_add` / `relu_mul` form. That fused kernel, or a standalone ReLU, can then greedily absorb additional adjacent ReLU consumers. Every absorption still requires equal iteration shapes, identity ReLU indexing, no later live use of the producer's physical value, and a final output slot that does not alias any original producer input. Binary broadcast maps are retained exactly, so a repeated ReLU tail does not weaken broadcasting or memory-planning invariants. ReLU idempotence is relied on only under the existing runtime semantics, including NaN propagation and `-0.0 -> +0.0`. The pass remains conservative: it does not fuse a second binary operation, reorder kernels, cross non-adjacent operations, or build general expression DAGs.
 
-Native execution separates deterministic code generation from process-local artifact reuse. An exact `(compiler command, generated C source)` match reuses the already loaded shared library; changing caller-provided tensor values does not change generated source and therefore does not force recompilation. A different graph/source or compiler command compiles independently, and compilation failures are never inserted into the cache. Each cached artifact owns its build directory until `clear_native_cache()` or process exit. Cache clearing releases Windows DLLs before deleting their build directories, preserving the platform lifecycle invariant that loaded DLLs cannot be unlinked like POSIX shared objects. The cache is intentionally process-local: no persistent on-disk cache is introduced by this stage.
+Native execution separates deterministic code generation, process-local loaded-artifact reuse, and optional persistent storage. Without `cache_dir`, behavior remains process-local: an exact `(compiler command, generated C source)` match reuses the already loaded shared library, and `clear_native_cache()` or process exit releases it and removes its temporary build directory. Passing `cache_dir` enables a versioned content-addressed disk cache. Its digest includes the generated source, full compiler command, resolved compiler executable path/size/mtime, operating system, platform, machine architecture, pointer width, and library format. A library is published into that cache only after successful compilation using an atomic same-filesystem `os.replace()`, so failed compilations do not create cache hits. Persistent library bytes are copied into a process-owned temporary staging directory before `ctypes` loads them; this keeps the persistent file itself immutable and avoids Windows DLL locking. If a persisted library cannot be loaded, it is treated as stale or corrupt, removed, and rebuilt. `clear_native_cache()` unloads and removes process staging directories but deliberately leaves the user-owned persistent cache intact for later processes. Different graphs, compiler commands, compiler executable fingerprints, or targets therefore compile independently, while runtime input values do not affect the artifact key.
 
 ## Development
 
@@ -148,4 +151,4 @@ A native C compiler is required to exercise `execute_native()`: a `cc`-compatibl
 
 ## Near-term compiler roadmap
 
-The runtime-input boundary and safe ReLU-tail chain fusion are now explicit. Follow-up milestones can independently explore more general multi-operation fusion DAGs, SIMD/parallel loop scheduling, a persistent on-disk artifact cache, richer execution APIs, or eventually CUDA. Dynamic shapes, zero-copy external-buffer aliasing, and multiple-output ABI design remain separate correctness problems rather than implicit extensions of this fusion milestone.
+The runtime-input boundary, safe ReLU-tail chain fusion, and optional persistent native artifact cache are now explicit. Follow-up milestones can independently explore more general multi-operation fusion DAGs, SIMD/parallel loop scheduling, richer execution APIs, or eventually CUDA. Dynamic shapes, zero-copy external-buffer aliasing, and multiple-output ABI design remain separate correctness problems rather than implicit extensions of this cache milestone.
