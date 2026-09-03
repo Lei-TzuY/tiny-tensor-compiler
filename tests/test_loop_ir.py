@@ -1,10 +1,13 @@
 import numpy as np
+import pytest
 
 from tiny_tensor_compiler import (
     GraphBuilder,
     LoopKernel,
     execute_cpu,
+    execute_loop,
     execute_reference,
+    fuse_elementwise,
     lower_to_cpu,
     lower_to_loops,
 )
@@ -72,3 +75,50 @@ def test_loop_execution_matches_reference_for_broadcasting():
     module = builder.finish((lhs + rhs).relu())
 
     np.testing.assert_array_equal(execute_cpu(lower_to_cpu(module)), execute_reference(module))
+
+
+@pytest.mark.parametrize("opcode", ["add", "mul"])
+def test_elementwise_fusion_combines_safe_broadcast_binary_relu(opcode):
+    builder = GraphBuilder()
+    lhs = builder.tensor([[-3.0], [2.0]], dtype="float32")
+    rhs = builder.tensor([[1.0, 2.0, 4.0]], dtype="float32")
+    binary = lhs + rhs if opcode == "add" else lhs * rhs
+    module = builder.finish(binary.relu())
+
+    original = lower_to_loops(lower_to_cpu(module))
+    fused = fuse_elementwise(original)
+    fused_kernel = next(kernel for kernel in fused.kernels if kernel.opcode == f"relu_{opcode}")
+
+    assert len(fused.kernels) == len(original.kernels) - 1
+    assert fused_kernel.iteration_shape == (2, 3)
+    assert fused_kernel.input_maps[0].axes == (0, None)
+    assert fused_kernel.input_maps[1].axes == (None, 1)
+    np.testing.assert_array_equal(execute_loop(fused), execute_reference(module))
+
+
+def test_elementwise_fusion_refuses_output_input_alias():
+    builder = GraphBuilder()
+    lhs = builder.tensor([-3.0, 2.0], dtype="float32")
+    rhs = builder.tensor([1.0, 4.0], dtype="float32")
+    module = builder.finish((lhs + rhs).relu())
+
+    original = lower_to_loops(lower_to_cpu(module))
+    fused = fuse_elementwise(original)
+
+    assert [kernel.opcode for kernel in fused.kernels] == [kernel.opcode for kernel in original.kernels]
+    np.testing.assert_array_equal(execute_loop(fused), execute_reference(module))
+
+
+def test_elementwise_fusion_refuses_shared_producer_value():
+    builder = GraphBuilder()
+    lhs = builder.tensor([[-3.0], [2.0]], dtype="float32")
+    rhs = builder.tensor([[1.0, 2.0, 4.0]], dtype="float32")
+    shared = lhs + rhs
+    activated = shared.relu()
+    module = builder.finish(activated + shared)
+
+    original = lower_to_loops(lower_to_cpu(module))
+    fused = fuse_elementwise(original)
+
+    assert all(kernel.opcode != "relu_add" for kernel in fused.kernels)
+    np.testing.assert_array_equal(execute_loop(fused), execute_reference(module))
