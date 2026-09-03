@@ -15,7 +15,7 @@ Python tensor expressions
 -> NumPy-backed scalar CPU interpretation/reference
 ```
 
-The NumPy CPU executor remains the semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and native execution. The native path now compiles the verified generated C into a temporary shared library and invokes its stable output-pointer ABI through `ctypes`.
+The NumPy CPU executor remains the semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and native execution. The native path compiles the verified generated C into a temporary shared library and invokes its stable output-pointer ABI through `ctypes` on POSIX-like GCC/Clang toolchains and Windows MSVC.
 
 ## Working example
 
@@ -93,7 +93,7 @@ b3 -> p1 : tensor<3xi32>
 
 The next lowering layer makes elementwise iteration and broadcasting explicit. For example, adding tensors with shapes `(2, 1)` and `(1, 3)` produces a `(2, 3)` loop whose reads are indexed as `lhs[i0, 0]` and `rhs[0, i1]`. Scalar broadcasts use an empty input index map, and ReLU uses identity indexing. CPU execution interprets these loop kernels one output index at a time rather than delegating broadcasting to vectorized NumPy operations.
 
-The same verified loop IR can be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and the returned physical buffer is copied into the generated function's output pointer. `execute_native()` compiles that source with a POSIX-like GCC/Clang-style toolchain into a temporary shared library and invokes `tiny_tensor_run` through `ctypes`. Native compilation uses `-fwrapv` so signed integer add/multiply behavior matches NumPy's fixed-width wrapping semantics. Floating-point ReLU source explicitly preserves NaN propagation and NumPy's `-0.0 -> +0.0` behavior.
+The same verified loop IR can be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and the returned physical buffer is copied into the generated function's output pointer. Generated source exposes `tiny_tensor_run` through a portable export macro that expands to `__declspec(dllexport)` on Windows. `execute_native()` uses `cc`-style GCC/Clang flags on POSIX-like systems and MSVC `cl /std:c11 /O2 /LD` on Windows, then invokes the resulting shared library through `ctypes`. GCC-style native compilation uses `-fwrapv` so signed integer add/multiply behavior matches NumPy's fixed-width wrapping semantics. Floating-point ReLU source explicitly preserves NaN propagation and NumPy's `-0.0 -> +0.0` behavior.
 
 ## Implemented now
 
@@ -113,11 +113,12 @@ The same verified loop IR can be emitted as deterministic C11 source. Physical b
 - explicit `LoopAlloc`, `LoopKernel`, and `LoopReturn` IR over planned physical buffers
 - explicit broadcast index maps for elementwise `add`, `mul`, and `relu` loops
 - loop-IR verification for allocation order, read-before-write, non-in-place outputs, iteration shape, index maps, kernel types, and return validity
-- deterministic C11 source generation from explicit loop IR with fixed-width dtypes, nested loops, row-major indexing, scalar broadcasting, and typed constants
-- native CPU compilation/execution through a temporary shared library and stable `tiny_tensor_run` output-pointer ABI
+- deterministic C11 source generation from explicit loop IR with fixed-width dtypes, nested loops, row-major indexing, scalar broadcasting, typed constants, and portable DLL export
+- native CPU compilation/execution through temporary `.so`, `.dylib`, or `.dll` libraries and a stable `tiny_tensor_run` output-pointer ABI
+- GCC/Clang-compatible native compilation on POSIX-like systems and MSVC `cl` compilation/loading on Windows
 - CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
-- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, native differential tests, linting, and CI
+- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, cross-platform native differential tests, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
 
@@ -133,7 +134,7 @@ Virtual buffers remain single-write. Physical reuse is computed separately from 
 
 Loop IR is also deliberately conservative. Physical buffers are allocated before loop kernels, kernel outputs may overwrite only slots whose earlier virtual value is already dead, and a kernel output may not alias any input read by that same kernel. Broadcasting is represented by deterministic index maps rather than delegated implicitly to NumPy.
 
-Native execution is deliberately ephemeral and narrow. It compiles each `LoopProgram` into a temporary shared library, returns a copied NumPy result, and then discards the temporary build directory. The current compiler invocation targets POSIX-like GCC/Clang-compatible toolchains; persistent compilation caches, Windows/MSVC support, operator fusion, SIMD, parallel scheduling, and CUDA remain out of scope.
+Native execution is deliberately ephemeral and narrow. Each `LoopProgram` is compiled inside its own temporary build directory, including compiler side products such as MSVC `.obj`, `.lib`, and `.exp` files. On Windows the loaded DLL is explicitly released before temporary-directory cleanup because loaded DLLs cannot be unlinked like POSIX shared objects. No persistent compiled-artifact cache or external tensor-input ABI is introduced by this stage.
 
 ## Development
 
@@ -144,8 +145,8 @@ pytest
 python examples/basic.py
 ```
 
-A `cc`-compatible C compiler is required to exercise `execute_native()`; tests skip compiler-dependent execution only when no compiler is available.
+A native C compiler is required to exercise `execute_native()`: a `cc`-compatible GCC/Clang toolchain on POSIX-like systems, or an MSVC developer environment exposing `cl` on Windows. CI executes the full suite on Ubuntu and Windows for Python 3.11 and 3.13.
 
 ## Near-term compiler roadmap
 
-The next independently testable milestone is native toolchain portability, starting with Windows/MSVC-compatible compilation and loading without weakening the existing POSIX path. Reusable compiled-artifact caching can follow as a separate slice. Operator fusion should come only after native execution invariants are stable. SIMD, parallel loop scheduling, and CUDA remain deliberately out of scope until the scalar native CPU path is well tested.
+The next independently testable milestone is reusable compiled-artifact caching so identical generated programs do not rebuild their shared library on every call. That cache should remain a separate layer from code generation and native execution semantics. Operator fusion should come only after those invariants are stable. SIMD, parallel loop scheduling, and CUDA remain deliberately out of scope until the scalar native CPU path is well tested.
