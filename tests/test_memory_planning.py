@@ -19,14 +19,10 @@ def test_liveness_plan_reuses_dead_same_type_buffers_deterministically():
 
     assert plan.physical_count == 2
     assert [plan.physical_for(buffer) for buffer in range(4)] == [0, 1, 0, 1]
-    assert plan.dump() == "\n".join(
-        [
-            "b0 -> p0 : tensor<3xi32>",
-            "b1 -> p1 : tensor<3xi32>",
-            "b2 -> p0 : tensor<3xi32>",
-            "b3 -> p1 : tensor<3xi32>",
-        ]
-    )
+    assert plan.dump() == """b0 -> p0 : tensor<3xi32>
+b1 -> p1 : tensor<3xi32>
+b2 -> p0 : tensor<3xi32>
+b3 -> p1 : tensor<3xi32>"""
 
 
 def test_liveness_plan_never_aliases_buffers_live_in_the_same_kernel():
