@@ -10,10 +10,11 @@ Python tensor expressions
 -> explicit virtual-buffer CPU IR
 -> liveness-based physical memory planning
 -> explicit loop/kernel IR with broadcast index maps
+-> deterministic generated C11 source
 -> NumPy-backed scalar CPU execution
 ```
 
-The NumPy CPU executor is intentionally the first backend, not the final destination. It provides a stable semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and eventually native code.
+The NumPy CPU executor is intentionally the first executable backend, not the final destination. It provides a stable semantic baseline while lowering is made progressively more compiler-like through explicit buffers, memory planning, loop IR, generated C, and eventually native code.
 
 ## Working example
 
@@ -21,6 +22,7 @@ The NumPy CPU executor is intentionally the first backend, not the final destina
 from tiny_tensor_compiler import (
     GraphBuilder,
     execute_cpu,
+    generate_c,
     lower_to_cpu,
     lower_to_loops,
     plan_memory,
@@ -37,7 +39,9 @@ print(module.dump())
 program = lower_to_cpu(module)
 print(program.dump())
 print(plan_memory(program).dump())
-print(lower_to_loops(program).dump())
+loops = lower_to_loops(program)
+print(loops.dump())
+print(generate_c(loops))
 print(execute_cpu(program))
 ```
 
@@ -84,7 +88,9 @@ b2 -> p0 : tensor<3xi32>
 b3 -> p1 : tensor<3xi32>
 ```
 
-The next lowering layer makes elementwise iteration and broadcasting explicit. For example, adding tensors with shapes `(2, 1)` and `(1, 3)` produces a `(2, 3)` loop whose reads are indexed as `lhs[i0, 0]` and `rhs[0, i1]`. Scalar broadcasts use an empty input index map, and ReLU uses identity indexing. CPU execution now interprets these loop kernels one output index at a time rather than delegating broadcasting to vectorized NumPy operations.
+The next lowering layer makes elementwise iteration and broadcasting explicit. For example, adding tensors with shapes `(2, 1)` and `(1, 3)` produces a `(2, 3)` loop whose reads are indexed as `lhs[i0, 0]` and `rhs[0, i1]`. Scalar broadcasts use an empty input index map, and ReLU uses identity indexing. CPU execution interprets these loop kernels one output index at a time rather than delegating broadcasting to vectorized NumPy operations.
+
+The same verified loop IR can now be emitted as deterministic C11 source. Physical buffers become fixed-width typed local arrays, loop bounds become nested `int64_t` loops, broadcast index maps become explicit row-major offset expressions, constants are embedded as typed literals, and the returned physical buffer is copied into the generated function's output pointer. CI syntax-checks representative generated source with `cc -std=c11 -fsyntax-only` when a C compiler is available; compiling and executing the generated code is deliberately a separate milestone.
 
 ## Implemented now
 
@@ -104,9 +110,10 @@ The next lowering layer makes elementwise iteration and broadcasting explicit. F
 - explicit `LoopAlloc`, `LoopKernel`, and `LoopReturn` IR over planned physical buffers
 - explicit broadcast index maps for elementwise `add`, `mul`, and `relu` loops
 - loop-IR verification for allocation order, read-before-write, non-in-place outputs, iteration shape, index maps, kernel types, and return validity
+- deterministic C11 source generation from explicit loop IR with fixed-width dtypes, nested loops, row-major indexing, scalar broadcasting, and typed constants
 - CPU execution through explicit scalar loop iteration over planned physical NumPy buffers
 - direct tensor-IR reference execution and separately lowered CPU execution
-- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, linting, and CI
+- malformed-IR tests, broadcasting tests, deterministic dump tests, randomized NumPy differential tests, generated-C syntax checks, linting, and CI
 
 Python scalar literals are coerced to the peer tensor's dtype (`float32_tensor * 2` remains `f32`). Tensor-vs-tensor operations use explicit `numpy.result_type` promotion.
 
@@ -122,6 +129,8 @@ Virtual buffers remain single-write. Physical reuse is computed separately from 
 
 Loop IR is also deliberately conservative. Physical buffers are allocated before loop kernels, kernel outputs may overwrite only slots whose earlier virtual value is already dead, and a kernel output may not alias any input read by that same kernel. Broadcasting is represented by deterministic index maps rather than delegated implicitly to NumPy.
 
+Generated C is currently source-only. The emitter mirrors the verified scalar loop structure and does not introduce fusion, SIMD, parallel scheduling, runtime compilation, or dynamic loading. That keeps source generation independently reviewable before native execution is added.
+
 ## Development
 
 ```bash
@@ -133,4 +142,4 @@ python examples/basic.py
 
 ## Near-term compiler roadmap
 
-The next improvements should stay independently testable: generated C for the explicit loop IR, then native CPU compilation/execution. Operator fusion should come only after those invariants are stable. SIMD, parallel loop scheduling, and CUDA are deliberately out of scope until the scalar CPU path is compiler-like and well tested.
+The next independently testable milestone is native CPU compilation/execution of the generated C, with differential checks against the existing reference and loop interpreters. Operator fusion should come only after those invariants are stable. SIMD, parallel loop scheduling, and CUDA are deliberately out of scope until the scalar native CPU path is well tested.
