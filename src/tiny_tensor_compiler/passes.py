@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .ir import Module
+from .ir import DType, Module, Operation, Value
 from .verifier import verify
 
 
@@ -43,3 +43,46 @@ def constant_fold(module: Module) -> int:
 
     verify(module)
     return folded
+
+
+def algebraic_simplify(module: Module) -> int:
+    """Remove exact integer add-zero and multiply-one identities in place."""
+    verify(module)
+    function = module.function
+    simplified = 0
+
+    for op in list(function.ops):
+        replacement = _neutral_replacement(op)
+        if replacement is None:
+            continue
+
+        op.results[0].replace_all_uses_with(replacement)
+        function.erase_op(op)
+        simplified += 1
+
+    verify(module)
+    return simplified
+
+
+def _neutral_replacement(op: Operation) -> Value | None:
+    if op.opcode not in {"add", "mul"} or len(op.results) != 1:
+        return None
+
+    result_type = op.results[0].type
+    if result_type.dtype not in {DType.INT32, DType.INT64}:
+        return None
+
+    neutral = 0 if op.opcode == "add" else 1
+    for neutral_index, operand in enumerate(op.operands):
+        producer = operand.producer
+        if producer is None or producer.opcode != "const":
+            continue
+        if not np.all(np.asarray(producer.attrs["value"]) == neutral):
+            continue
+
+        replacement = op.operands[1 - neutral_index]
+        if replacement.type != result_type:
+            continue
+        return replacement
+
+    return None
