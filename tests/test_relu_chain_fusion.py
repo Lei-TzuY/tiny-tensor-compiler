@@ -46,6 +46,26 @@ def test_elementwise_fusion_absorbs_repeated_relu_tail(opcode):
     )
 
 
+def test_elementwise_fusion_collapses_pure_relu_chain_when_alias_safe():
+    builder = GraphBuilder()
+    value = builder.input((3,), dtype="float32")
+    first = value.relu()
+    second = first.relu()
+    module = builder.finish(second + value)
+
+    original = lower_to_loops(lower_to_cpu(module))
+    fused = fuse_elementwise(original)
+
+    assert [kernel.opcode for kernel in original.kernels] == ["relu", "relu", "add"]
+    assert [kernel.opcode for kernel in fused.kernels] == ["relu", "add"]
+
+    inputs = [np.array([-3.0, -0.0, 2.0], dtype=np.float32)]
+    np.testing.assert_array_equal(
+        execute_loop(fused, inputs=inputs),
+        execute_reference(module, inputs=inputs),
+    )
+
+
 def test_elementwise_fusion_stops_when_relu_result_has_another_live_use():
     builder = GraphBuilder()
     lhs = builder.input((2, 1), dtype="float32")
@@ -66,6 +86,18 @@ def test_elementwise_fusion_stops_when_relu_result_has_another_live_use():
         execute_loop(fused, inputs=inputs),
         execute_reference(module, inputs=inputs),
     )
+
+
+def test_elementwise_fusion_is_idempotent_after_relu_tail_absorption():
+    builder = GraphBuilder()
+    lhs = builder.input((2, 1), dtype="float32")
+    rhs = builder.input((1, 3), dtype="float32")
+    module = builder.finish((lhs + rhs).relu().relu().relu())
+
+    once = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
+    twice = fuse_elementwise(once)
+
+    assert twice.dump() == once.dump()
 
 
 def test_repeated_relu_tail_preserves_float_edge_semantics_in_native_execution():
