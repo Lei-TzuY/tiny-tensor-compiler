@@ -207,9 +207,7 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
                 break
 
             opcode = current.opcode
-            if opcode in {"add", "mul"}:
-                opcode = f"relu_{opcode}"
-            elif opcode in _BINARY_CHAIN_OPCODES:
+            if opcode in {"add", "mul"} or opcode in _BINARY_CHAIN_OPCODES:
                 opcode = f"relu_{opcode}"
             current = LoopKernel(
                 opcode=opcode,
