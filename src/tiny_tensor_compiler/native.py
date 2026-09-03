@@ -41,9 +41,61 @@ class _NativeArtifact:
         self.closed = True
 
 
+class NativeExecutable:
+    """Reusable native executable produced by :func:`compile_native`."""
+
+    def __init__(
+        self,
+        program: LoopProgram,
+        command: tuple[str, ...],
+        source: str,
+        persistent_library: Path | None,
+    ) -> None:
+        self._program = program
+        self._command = command
+        self._source = source
+        self._persistent_library = persistent_library
+
+    def execute(self, inputs: Sequence[Any] = ()) -> np.ndarray:
+        """Execute with exact runtime-input validation and cached native code."""
+        runtime_inputs = prepare_runtime_inputs(self._program.input_types, inputs)
+        command = list(self._command)
+        with _NATIVE_CACHE_LOCK:
+            artifact = _get_or_compile_artifact(
+                self._source,
+                command,
+                self._persistent_library,
+            )
+            return _execute_artifact(self._program, artifact, runtime_inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()) -> np.ndarray:
+        return self.execute(inputs)
+
+
 _PERSISTENT_CACHE_SCHEMA = "native-v1"
 _NATIVE_CACHE: dict[tuple[tuple[str, ...], str, str | None], _NativeArtifact] = {}
 _NATIVE_CACHE_LOCK = threading.RLock()
+
+
+def compile_native(
+    program: LoopProgram,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> NativeExecutable:
+    """Eagerly compile/load a loop program and return a reusable executable."""
+    command = _compiler_command(compiler)
+    source = generate_c(program)
+    persistent_library = _persistent_library_path(cache_dir, source, command)
+
+    with _NATIVE_CACHE_LOCK:
+        _get_or_compile_artifact(source, command, persistent_library)
+
+    return NativeExecutable(
+        program=program,
+        command=tuple(command),
+        source=source,
+        persistent_library=persistent_library,
+    )
 
 
 def execute_native(
@@ -57,30 +109,10 @@ def execute_native(
     command = _compiler_command(compiler)
     source = generate_c(program)
     persistent_library = _persistent_library_path(cache_dir, source, command)
-    return_type = _return_type(program)
-    output = np.empty(return_type.shape, dtype=return_type.dtype.to_numpy())
 
     with _NATIVE_CACHE_LOCK:
         artifact = _get_or_compile_artifact(source, command, persistent_library)
-        output_pointer_type = _pointer_type(return_type.dtype.to_numpy())
-        input_pointer_types = tuple(
-            _pointer_type(input_type.dtype.to_numpy()) for input_type in program.input_types
-        )
-        runner = artifact.library.tiny_tensor_run
-        runner.argtypes = [output_pointer_type, *input_pointer_types]
-        runner.restype = None
-        arguments = [output.ctypes.data_as(output_pointer_type)]
-        arguments.extend(
-            array.ctypes.data_as(pointer_type)
-            for array, pointer_type in zip(
-                runtime_inputs,
-                input_pointer_types,
-                strict=True,
-            )
-        )
-        runner(*arguments)
-
-    return output
+        return _execute_artifact(program, artifact, runtime_inputs)
 
 
 def clear_native_cache() -> None:
@@ -97,6 +129,33 @@ def clear_native_cache() -> None:
                     first_error = error
         if first_error is not None:
             raise NativeCompilationError(f"failed to clear native artifact cache: {first_error}") from first_error
+
+
+def _execute_artifact(
+    program: LoopProgram,
+    artifact: _NativeArtifact,
+    runtime_inputs: Sequence[np.ndarray[Any, Any]],
+) -> np.ndarray:
+    return_type = _return_type(program)
+    output = np.empty(return_type.shape, dtype=return_type.dtype.to_numpy())
+    output_pointer_type = _pointer_type(return_type.dtype.to_numpy())
+    input_pointer_types = tuple(
+        _pointer_type(input_type.dtype.to_numpy()) for input_type in program.input_types
+    )
+    runner = artifact.library.tiny_tensor_run
+    runner.argtypes = [output_pointer_type, *input_pointer_types]
+    runner.restype = None
+    arguments = [output.ctypes.data_as(output_pointer_type)]
+    arguments.extend(
+        array.ctypes.data_as(pointer_type)
+        for array, pointer_type in zip(
+            runtime_inputs,
+            input_pointer_types,
+            strict=True,
+        )
+    )
+    runner(*arguments)
+    return output
 
 
 def _get_or_compile_artifact(
