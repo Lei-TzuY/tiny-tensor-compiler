@@ -133,6 +133,74 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
     return LoopProgram(tuple(operations))
 
 
+def fuse_elementwise(program: LoopProgram) -> LoopProgram:
+    """Fuse safe adjacent binary-elementwise plus ReLU loop kernels."""
+    operations = program.operations
+    fused: list[LoopOperation] = []
+    index = 0
+
+    while index < len(operations):
+        producer = operations[index]
+        if (
+            isinstance(producer, LoopKernel)
+            and producer.opcode in {"add", "mul"}
+            and index + 1 < len(operations)
+            and isinstance(operations[index + 1], LoopKernel)
+        ):
+            consumer = operations[index + 1]
+            if _can_fuse_binary_relu(operations, index, producer, consumer):
+                fused.append(
+                    LoopKernel(
+                        opcode=f"relu_{producer.opcode}",
+                        output=consumer.output,
+                        inputs=producer.inputs,
+                        iteration_shape=consumer.iteration_shape,
+                        input_maps=producer.input_maps,
+                    )
+                )
+                index += 2
+                continue
+
+        fused.append(producer)
+        index += 1
+
+    return LoopProgram(tuple(fused))
+
+
+def _can_fuse_binary_relu(
+    operations: tuple[LoopOperation, ...],
+    producer_index: int,
+    producer: LoopKernel,
+    consumer: LoopKernel,
+) -> bool:
+    if consumer.opcode != "relu" or consumer.inputs != (producer.output,):
+        return False
+    if producer.iteration_shape != consumer.iteration_shape:
+        return False
+    identity = IndexMap(tuple(range(len(consumer.iteration_shape))))
+    if consumer.input_maps != (identity,):
+        return False
+    if consumer.output in producer.inputs:
+        return False
+    return _producer_value_has_no_later_use(operations, producer_index + 2, producer.output)
+
+
+def _producer_value_has_no_later_use(
+    operations: tuple[LoopOperation, ...],
+    start_index: int,
+    buffer: int,
+) -> bool:
+    for op in operations[start_index:]:
+        if isinstance(op, LoopKernel):
+            if op.output == buffer:
+                return True
+            if buffer in op.inputs:
+                return False
+        elif isinstance(op, LoopReturn) and op.buffer == buffer:
+            return False
+    return True
+
+
 def _broadcast_index_map(input_shape: tuple[int, ...], output_shape: tuple[int, ...]) -> IndexMap:
     if len(input_shape) > len(output_shape):
         raise ValueError("input rank exceeds loop iteration rank")
@@ -210,6 +278,16 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 expected = infer_relu(allocated[op.inputs[0]])
                 if expected != output_type:
                     raise ValueError("relu loop output buffer type does not match inference")
+                _verify_index_maps(op, allocated)
+            elif op.opcode in {"relu_add", "relu_mul"}:
+                if len(op.inputs) != 2 or len(op.input_maps) != 2 or op.literal is not None:
+                    raise ValueError(
+                        f"{op.opcode} loop requires two inputs and two index maps"
+                    )
+                binary_type = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
+                expected = infer_relu(binary_type)
+                if expected != output_type:
+                    raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
                 _verify_index_maps(op, allocated)
             else:
                 raise ValueError(f"unsupported loop kernel: {op.opcode}")
