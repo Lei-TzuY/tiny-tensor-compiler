@@ -1,6 +1,6 @@
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
-from .c_codegen import generate_c
+from .c_abi_codegen import generate_c
 from .compiler import compile_module
 from .frontend import GraphBuilder, Tensor
 from .inference import TypeInferenceError
