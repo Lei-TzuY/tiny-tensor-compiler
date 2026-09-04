@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from .c_codegen import _c_type, _element_count, _emit_input, _emit_kernel, _storage_size
+from .input_binding import BorrowedLoopProgram
 from .ir import TensorType
 from .loop_ir import LoopAlloc, LoopInput, LoopProgram, LoopReturn
 
 
-def generate_c(program: LoopProgram) -> str:
+def generate_c(program: LoopProgram | BorrowedLoopProgram) -> str:
     """Generate deterministic C11 with one output pointer per returned tensor."""
     types = {op.buffer: op.type for op in program.allocations}
     return_types = tuple(types[slot] for slot in program.return_slots)
@@ -53,8 +54,17 @@ def generate_c(program: LoopProgram) -> str:
         f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{",
     ]
 
+    borrowed_by_slot = {
+        binding.buffer: binding for binding in getattr(program, "borrowed_inputs", ())
+    }
     for alloc in program.allocations:
-        lines.append(f"    {_c_type(alloc.type.dtype)} p{alloc.buffer}[{_storage_size(alloc.type)}];")
+        binding = borrowed_by_slot.get(alloc.buffer)
+        if binding is None:
+            lines.append(f"    {_c_type(alloc.type.dtype)} p{alloc.buffer}[{_storage_size(alloc.type)}];")
+        else:
+            lines.append(
+                f"    const {_c_type(alloc.type.dtype)} *p{alloc.buffer} = input{binding.index};"
+            )
     if program.allocations:
         lines.append("")
 
@@ -64,7 +74,8 @@ def generate_c(program: LoopProgram) -> str:
         if isinstance(op, LoopAlloc):
             continue
         if isinstance(op, LoopInput):
-            lines.extend(_emit_input(op, types[op.output]))
+            if op.output not in borrowed_by_slot:
+                lines.extend(_emit_input(op, types[op.output]))
             continue
         if isinstance(op, LoopReturn):
             lines.extend(
