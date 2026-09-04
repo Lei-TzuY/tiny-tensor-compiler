@@ -5,6 +5,11 @@ from typing import Any
 
 import numpy as np
 
+from ..input_binding import (
+    BorrowedLoopProgram,
+    borrow_inputs as bind_borrowed_inputs,
+    borrowed_slots,
+)
 from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
     LoopAlloc,
@@ -17,6 +22,7 @@ from ..loop_ir import (
 from ..lowering import CPUProgram
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
+LoopExecutionProgram = LoopProgram | BorrowedLoopProgram
 
 _BINARY_CHAIN_FUNCTIONS = {
     "chain_add_add": (np.add, np.add),
@@ -50,24 +56,40 @@ _CHAIN_TREE_FUNCTIONS = {
 }
 
 
-def execute(program: CPUProgram, inputs: Sequence[Any] = ()) -> ExecutionResult:
-    """Lower verified buffer IR to explicit loops and execute them on the CPU."""
-    return execute_loop(lower_to_loops(program), inputs=inputs)
+def execute(
+    program: CPUProgram,
+    inputs: Sequence[Any] = (),
+    *,
+    borrow_inputs: bool = False,
+) -> ExecutionResult:
+    """Lower verified buffer IR and optionally borrow safe external input arrays."""
+    loops: LoopExecutionProgram = lower_to_loops(program)
+    if borrow_inputs:
+        loops = bind_borrowed_inputs(loops)
+    return execute_loop(loops, inputs=inputs)
 
 
-def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> ExecutionResult:
-    """Execute explicit loop IR over planned physical NumPy buffers."""
+def execute_loop(
+    program: LoopExecutionProgram,
+    inputs: Sequence[Any] = (),
+) -> ExecutionResult:
+    """Execute explicit loop IR over planned physical or borrowed NumPy buffers."""
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
+    direct_slots = borrowed_slots(program)
     buffers: dict[int, np.ndarray] = {}
     return_buffers: list[int] = []
 
     for op in program.operations:
         if isinstance(op, LoopAlloc):
-            buffers[op.buffer] = np.empty(op.type.shape, dtype=op.type.dtype.to_numpy())
+            if op.buffer not in direct_slots:
+                buffers[op.buffer] = np.empty(op.type.shape, dtype=op.type.dtype.to_numpy())
             continue
 
         if isinstance(op, LoopInput):
-            np.copyto(buffers[op.output], runtime_inputs[op.index])
+            if op.output in direct_slots:
+                buffers[op.output] = runtime_inputs[op.index]
+            else:
+                np.copyto(buffers[op.output], runtime_inputs[op.index])
             continue
 
         if isinstance(op, LoopReturn):
