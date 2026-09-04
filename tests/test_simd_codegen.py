@@ -33,7 +33,8 @@ def _contiguous_i32_relu_add_program(length: int = 9):
     builder = GraphBuilder()
     lhs = builder.input((length,), dtype="int32")
     rhs = builder.input((length,), dtype="int32")
-    module = builder.finish((lhs + rhs).relu())
+    activated = (lhs + rhs).relu()
+    module = builder.finish((activated + lhs) + rhs)
     loops = lower_to_loops(lower_to_cpu(module))
     return module, fuse_elementwise(loops)
 
