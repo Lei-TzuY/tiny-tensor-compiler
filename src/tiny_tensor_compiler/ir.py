@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, TypeAlias
 
 import numpy as np
 
@@ -37,14 +37,42 @@ class DType(str, Enum):
         }[self]
 
 
+@dataclass(frozen=True, order=True)
+class SymbolicDim:
+    """Named tensor dimension that must be specialized before physical lowering."""
+
+    name: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.isidentifier():
+            raise ValueError(f"invalid symbolic dimension name: {self.name!r}")
+
+    def __str__(self) -> str:
+        return self.name
+
+
+ShapeDim: TypeAlias = int | SymbolicDim
+
+
 @dataclass(frozen=True)
 class TensorType:
-    shape: tuple[int, ...]
+    shape: tuple[ShapeDim, ...]
     dtype: DType
 
     def __post_init__(self) -> None:
-        if any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in self.shape):
-            raise ValueError(f"invalid tensor shape: {self.shape}")
+        for dim in self.shape:
+            if isinstance(dim, SymbolicDim):
+                continue
+            if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
+                raise ValueError(f"invalid tensor shape: {self.shape}")
+
+    @property
+    def is_static(self) -> bool:
+        return all(isinstance(dim, int) for dim in self.shape)
+
+    @property
+    def symbolic_dims(self) -> frozenset[SymbolicDim]:
+        return frozenset(dim for dim in self.shape if isinstance(dim, SymbolicDim))
 
     def __str__(self) -> str:
         dims = "x".join(str(dim) for dim in self.shape)
