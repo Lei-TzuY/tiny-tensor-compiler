@@ -99,7 +99,8 @@ def test_generate_c_encodes_scalar_broadcast_and_relu_without_vector_intrinsics(
     source = generate_c(program)
 
     assert "p1[0]" in source
-    assert "? 0.0f :" in source
+    assert "value == 0.0f" in source
+    assert "fabsf(value)" in source
     assert "np." not in source
     assert "simd" not in source.lower()
 
