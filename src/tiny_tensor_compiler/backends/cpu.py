@@ -16,6 +16,8 @@ from ..loop_ir import (
 )
 from ..lowering import CPUProgram
 
+ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
+
 _BINARY_CHAIN_FUNCTIONS = {
     "chain_add_add": (np.add, np.add),
     "chain_add_mul": (np.add, np.multiply),
@@ -48,15 +50,16 @@ _CHAIN_TREE_FUNCTIONS = {
 }
 
 
-def execute(program: CPUProgram, inputs: Sequence[Any] = ()) -> np.ndarray:
+def execute(program: CPUProgram, inputs: Sequence[Any] = ()) -> ExecutionResult:
     """Lower verified buffer IR to explicit loops and execute them on the CPU."""
     return execute_loop(lower_to_loops(program), inputs=inputs)
 
 
-def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> np.ndarray:
+def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> ExecutionResult:
     """Execute explicit loop IR over planned physical NumPy buffers."""
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     buffers: dict[int, np.ndarray] = {}
+    return_buffers: list[int] = []
 
     for op in program.operations:
         if isinstance(op, LoopAlloc):
@@ -68,7 +71,8 @@ def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> np.ndarray
             continue
 
         if isinstance(op, LoopReturn):
-            return np.array(buffers[op.buffer], copy=True)
+            return_buffers.append(op.buffer)
+            continue
 
         if not isinstance(op, LoopKernel):
             raise TypeError("unsupported CPU loop operation")
@@ -129,4 +133,7 @@ def execute_loop(program: LoopProgram, inputs: Sequence[Any] = ()) -> np.ndarray
             else:
                 raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
 
-    raise RuntimeError("verified loop IR unexpectedly has no return")
+    if not return_buffers:
+        raise RuntimeError("verified loop IR unexpectedly has no return")
+    outputs = tuple(np.array(buffers[buffer], copy=True) for buffer in return_buffers)
+    return outputs[0] if len(outputs) == 1 else outputs
