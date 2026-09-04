@@ -101,11 +101,18 @@ class LoopProgram:
         return tuple(op for op in self.operations if isinstance(op, LoopKernel))
 
     @property
+    def return_slots(self) -> tuple[int, ...]:
+        return tuple(op.buffer for op in self.operations if isinstance(op, LoopReturn))
+
+    @property
     def return_slot(self) -> int:
-        for op in reversed(self.operations):
-            if isinstance(op, LoopReturn):
-                return op.buffer
-        raise RuntimeError("verified loop IR unexpectedly has no return")
+        """Compatibility alias for single-output programs."""
+        slots = self.return_slots
+        if len(slots) != 1:
+            raise RuntimeError(
+                f"return_slot requires exactly one returned buffer, found {len(slots)}"
+            )
+        return slots[0]
 
     def dump(self) -> str:
         lines: list[str] = []
@@ -519,7 +526,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
     saw_return = False
 
     for index, op in enumerate(operations):
-        if saw_return:
+        if saw_return and not isinstance(op, LoopReturn):
             raise ValueError("loop IR operation appears after return")
 
         if isinstance(op, LoopAlloc):
