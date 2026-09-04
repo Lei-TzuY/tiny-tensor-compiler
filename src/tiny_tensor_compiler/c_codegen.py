@@ -56,6 +56,13 @@ def generate_c(program: LoopProgram) -> str:
         "#include <math.h>",
         "#include <stdint.h>",
         "",
+        "#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)",
+        "#include <emmintrin.h>",
+        "#define TINY_TENSOR_HAS_SSE2 1",
+        "#else",
+        "#define TINY_TENSOR_HAS_SSE2 0",
+        "#endif",
+        "",
         "#if defined(_WIN32)",
         "#define TINY_TENSOR_EXPORT __declspec(dllexport)",
         "#else",
@@ -126,6 +133,12 @@ def _emit_kernel(
             f"        static const {_c_type(output_type.dtype)} {literal_name}"
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
+
+    if _can_emit_sse2_i32_add(op, types):
+        lines.extend(_emit_sse2_i32_add(op, output_type))
+        lines.append("    }")
+        lines.append("")
+        return lines
 
     linearized = _can_linearize_kernel(op, types)
     indent = "        "
@@ -264,6 +277,40 @@ def _emit_kernel(
     lines.append("    }")
     lines.append("")
     return lines
+
+
+def _can_emit_sse2_i32_add(op: LoopKernel, types: dict[int, TensorType]) -> bool:
+    return (
+        op.opcode == "add"
+        and types[op.output].dtype == DType.INT32
+        and all(types[buffer].dtype == DType.INT32 for buffer in op.inputs)
+        and _can_linearize_kernel(op, types)
+    )
+
+
+def _emit_sse2_i32_add(op: LoopKernel, output_type: TensorType) -> list[str]:
+    lhs, rhs = op.inputs
+    count = _element_count(output_type)
+    output = op.output
+    return [
+        "        #if TINY_TENSOR_HAS_SSE2",
+        "        int64_t n = 0;",
+        f"        for (; n + 4 <= {count}; n += 4) {{",
+        f"            __m128i lhs = _mm_loadu_si128((const __m128i *)&p{lhs}[n]);",
+        f"            __m128i rhs = _mm_loadu_si128((const __m128i *)&p{rhs}[n]);",
+        "            __m128i sum = _mm_add_epi32(lhs, rhs);",
+        f"            _mm_storeu_si128((__m128i *)&p{output}[n], sum);",
+        "        }",
+        f"        for (; n < {count}; ++n) {{",
+        f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
+        "        }",
+        "        #else",
+        "        TINY_TENSOR_VECTORIZE_LOOP",
+        f"        for (int64_t n = 0; n < {count}; ++n) {{",
+        f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
+        "        }",
+        "        #endif",
+    ]
 
 
 def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
