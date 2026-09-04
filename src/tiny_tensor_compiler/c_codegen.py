@@ -279,11 +279,17 @@ def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
 
 def _emit_relu_assignment(output_ref: str, dtype: DType, zero: str, indent: str) -> list[str]:
     if dtype in {DType.FLOAT32, DType.FLOAT64}:
+        absolute = "fabsf" if dtype == DType.FLOAT32 else "fabs"
         return [
-            (
-                f"{indent}{output_ref} = isnan(value) ? value : "
-                f"(value <= {zero} ? {zero} : value);"
-            )
+            f"{indent}if (isnan(value)) {{",
+            f"{indent}    {output_ref} = value;",
+            f"{indent}}} else if (value == {zero}) {{",
+            f"{indent}    {output_ref} = {absolute}(value);",
+            f"{indent}}} else if (value < {zero}) {{",
+            f"{indent}    {output_ref} = {zero};",
+            f"{indent}}} else {{",
+            f"{indent}    {output_ref} = value;",
+            f"{indent}}}",
         ]
     return [f"{indent}{output_ref} = value < {zero} ? {zero} : value;"]
 
