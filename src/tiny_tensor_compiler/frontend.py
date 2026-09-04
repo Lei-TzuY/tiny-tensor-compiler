@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from .inference import TypeInferenceError, infer_binary, infer_relu
-from .ir import DType, Function, Module, TensorType, Value
+from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 
 class Tensor:
@@ -42,7 +42,7 @@ class GraphBuilder:
 
     def input(
         self,
-        shape: Iterable[int],
+        shape: Iterable[ShapeDim],
         dtype: str | np.dtype[Any] | DType,
     ) -> Tensor:
         self._ensure_open()
