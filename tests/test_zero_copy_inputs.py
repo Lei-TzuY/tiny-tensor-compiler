@@ -87,8 +87,9 @@ def test_borrowed_codegen_uses_const_input_pointer_and_preserves_scratch_reuse()
     assert "const int32_t *p2 = input0;" in borrowed_source
     assert "p0[n] = input0[n];" in copied_source
     assert "p2[n] = input0[n];" not in borrowed_source
-    assert "p1[n] = p2[n]" in borrowed_source
-    assert "p0[n] = p1[n]" in borrowed_source
+    assert "_mm_loadu_si128((const __m128i *)&p2[n])" in borrowed_source
+    assert "_mm_loadu_si128((const __m128i *)&p1[n])" in borrowed_source
+    assert "out[r] = p0[r];" in borrowed_source
 
 
 def test_borrowed_runtime_inputs_reject_hidden_materialization_paths():
