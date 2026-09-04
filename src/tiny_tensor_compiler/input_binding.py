@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from .ir import TensorType
-from .loop_ir import LoopInput, LoopProgram
+from .loop_ir import LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
 
 
 @dataclass(frozen=True)
 class BorrowedInput:
-    """One runtime input proven safe to bind directly to a physical read slot."""
+    """One runtime input bound directly to a dedicated read-only physical slot."""
 
     index: int
     buffer: int
@@ -40,15 +39,13 @@ class InputTypeContract(Sequence[TensorType]):
 
 @dataclass(frozen=True)
 class BorrowedLoopProgram:
-    """A verified LoopProgram plus external inputs that may bypass materialization copies."""
+    """Verified Loop IR whose external-input epochs are safe to bind without copies."""
 
     program: LoopProgram
     borrowed_inputs: tuple[BorrowedInput, ...]
 
     def __post_init__(self) -> None:
-        input_ops = tuple(self.program.inputs)
-        input_by_index = {op.index: op for op in input_ops}
-        slot_counts = Counter(op.output for op in input_ops)
+        input_by_index = {op.index: op for op in self.program.inputs}
         types = {alloc.buffer: alloc.type for alloc in self.program.allocations}
         kernel_outputs = {kernel.output for kernel in self.program.kernels}
 
@@ -64,13 +61,9 @@ class BorrowedLoopProgram:
                 raise ValueError(
                     f"borrowed runtime input {binding.index} does not match its LoopInput slot"
                 )
-            if slot_counts[binding.buffer] != 1:
-                raise ValueError(
-                    f"borrowed physical buffer p{binding.buffer} is shared by multiple inputs"
-                )
             if binding.buffer in kernel_outputs:
                 raise ValueError(
-                    f"borrowed physical buffer p{binding.buffer} is later written by a kernel"
+                    f"borrowed physical buffer p{binding.buffer} is written by a kernel"
                 )
             if types[binding.buffer] != binding.type:
                 raise ValueError(
@@ -78,6 +71,10 @@ class BorrowedLoopProgram:
                 )
             seen_indices.add(binding.index)
             seen_buffers.add(binding.buffer)
+
+        expected_indices = set(range(len(self.program.inputs)))
+        if seen_indices != expected_indices:
+            raise ValueError("borrowed loop programs must bind every runtime input")
 
     @property
     def operations(self):
@@ -94,11 +91,7 @@ class BorrowedLoopProgram:
     @property
     def input_types(self) -> InputTypeContract:
         types = tuple(self.program.input_types)
-        borrowed = self.borrowed_input_indices
-        return InputTypeContract(
-            types=types,
-            borrow_mask=tuple(index in borrowed for index in range(len(types))),
-        )
+        return InputTypeContract(types=types, borrow_mask=(True,) * len(types))
 
     @property
     def kernels(self):
@@ -125,25 +118,76 @@ class BorrowedLoopProgram:
 
 
 def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
-    """Borrow every runtime input whose planned physical slot is never reused for a write."""
-    input_ops = tuple(program.inputs)
-    slot_counts = Counter(op.output for op in input_ops)
-    kernel_outputs = {kernel.output for kernel in program.kernels}
+    """Split reused input lifetimes so every runtime input can be bound zero-copy."""
     types = {alloc.buffer: alloc.type for alloc in program.allocations}
+    next_buffer = len(types)
+    extra_allocations: list[LoopAlloc] = []
+    transformed_operations = []
+    active_aliases: dict[int, int] = {}
+    bindings: list[BorrowedInput] = []
+    operations = program.operations
 
-    bindings = tuple(
-        BorrowedInput(index=op.index, buffer=op.output, type=types[op.output])
-        for op in input_ops
-        if slot_counts[op.output] == 1 and op.output not in kernel_outputs
+    for position, op in enumerate(operations):
+        if isinstance(op, LoopAlloc):
+            continue
+
+        if isinstance(op, LoopInput):
+            active_aliases.pop(op.output, None)
+            destination = op.output
+            if _has_future_write(operations, position, op.output):
+                destination = next_buffer
+                next_buffer += 1
+                extra_allocations.append(LoopAlloc(destination, types[op.output]))
+                active_aliases[op.output] = destination
+
+            transformed_operations.append(LoopInput(destination, op.index))
+            bindings.append(
+                BorrowedInput(
+                    index=op.index,
+                    buffer=destination,
+                    type=types[op.output],
+                )
+            )
+            continue
+
+        if isinstance(op, LoopKernel):
+            transformed_operations.append(
+                LoopKernel(
+                    opcode=op.opcode,
+                    output=op.output,
+                    inputs=tuple(active_aliases.get(buffer, buffer) for buffer in op.inputs),
+                    iteration_shape=op.iteration_shape,
+                    input_maps=op.input_maps,
+                    literal=op.literal,
+                )
+            )
+            active_aliases.pop(op.output, None)
+            continue
+
+        if isinstance(op, LoopReturn):
+            transformed_operations.append(
+                LoopReturn(active_aliases.get(op.buffer, op.buffer))
+            )
+            continue
+
+        raise TypeError("unsupported Loop IR operation during input borrowing")
+
+    transformed = LoopProgram(
+        tuple([*program.allocations, *extra_allocations, *transformed_operations])
     )
-    return BorrowedLoopProgram(program=program, borrowed_inputs=bindings)
-
-
-def unwrap_loop_program(program: LoopProgram | BorrowedLoopProgram) -> LoopProgram:
-    return program.program if isinstance(program, BorrowedLoopProgram) else program
+    return BorrowedLoopProgram(program=transformed, borrowed_inputs=tuple(bindings))
 
 
 def borrowed_slots(program: LoopProgram | BorrowedLoopProgram) -> frozenset[int]:
     if isinstance(program, BorrowedLoopProgram):
         return program.borrowed_input_slots
     return frozenset()
+
+
+def _has_future_write(operations, position: int, buffer: int) -> bool:
+    for later in operations[position + 1 :]:
+        if isinstance(later, LoopInput) and later.output == buffer:
+            return True
+        if isinstance(later, LoopKernel) and later.output == buffer:
+            return True
+    return False
