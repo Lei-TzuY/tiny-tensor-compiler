@@ -10,10 +10,12 @@ All notable project milestones are recorded here.
 - Multi-output reference and explicit loop-CPU execution while preserving the existing single-output `numpy.ndarray` result contract.
 - Return-aware virtual-buffer liveness and physical memory planning so simultaneously returned values remain distinct when required.
 - Fusion safety for intermediates that are both returned and consumed by later kernels.
+- Generated C/native execution with one typed output pointer per returned tensor and one shared native entrypoint.
+- Ordered multi-output native results plus optional preallocated output sequences with exact shape, dtype, layout, alignment, mutability, input-alias, and cross-output alias validation.
 
-### Backend boundary
+### Compatibility
 
-- Generated C/native execution remains explicitly single-output. Multi-output loop programs fail the single-output `return_slot` contract instead of being silently lowered through the existing one-output ABI.
+- Single-output generated C and the existing `out=np.ndarray` native call contract remain unchanged.
 
 ## [0.1.0] - 2026-09-04
 
