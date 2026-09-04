@@ -5,11 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from ..input_binding import (
-    BorrowedLoopProgram,
-    borrow_inputs as bind_borrowed_inputs,
-    borrowed_slots,
-)
+from ..input_binding import BorrowedLoopProgram, borrowed_slots
+from ..input_binding import borrow_inputs as bind_borrowed_inputs
 from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
     LoopAlloc,
