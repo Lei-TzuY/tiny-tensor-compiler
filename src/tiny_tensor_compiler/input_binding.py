@@ -134,7 +134,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
         if isinstance(op, LoopInput):
             active_aliases.pop(op.output, None)
             destination = op.output
-            if _has_future_write(operations, position, op.output):
+            if _has_other_write(operations, position, op.output):
                 destination = next_buffer
                 next_buffer += 1
                 extra_allocations.append(LoopAlloc(destination, types[op.output]))
@@ -184,10 +184,12 @@ def borrowed_slots(program: LoopProgram | BorrowedLoopProgram) -> frozenset[int]
     return frozenset()
 
 
-def _has_future_write(operations, position: int, buffer: int) -> bool:
-    for later in operations[position + 1 :]:
-        if isinstance(later, LoopInput) and later.output == buffer:
+def _has_other_write(operations, position: int, buffer: int) -> bool:
+    for other_position, other in enumerate(operations):
+        if other_position == position:
+            continue
+        if isinstance(other, LoopInput) and other.output == buffer:
             return True
-        if isinstance(later, LoopKernel) and later.output == buffer:
+        if isinstance(other, LoopKernel) and other.output == buffer:
             return True
     return False
