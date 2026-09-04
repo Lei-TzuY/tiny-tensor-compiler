@@ -34,6 +34,7 @@ The project treats verification and explicit semantics as compiler features, not
 - Integer lowering preserves fixed-width wrapping semantics across the scalar and generated-C paths.
 - Floating-point ReLU preserves NaN behavior and canonicalizes negative zero to match the reference semantics.
 - Runtime inputs are exact: count, static shape, and dtype must match the compiled graph; there is no silent cast.
+- Native outputs are exact: every returned tensor has its own typed ABI pointer, and preallocated outputs must match shape/dtype/layout/alignment/mutability while remaining disjoint from runtime inputs and from one another.
 
 ## Execution paths
 
@@ -41,7 +42,7 @@ There are intentionally separate execution paths so optimized lowering can be ch
 
 1. **Reference** — executes verified tensor IR with NumPy and defines the semantic baseline. Supports one or multiple returned tensors.
 2. **Loop interpreter** — executes explicit planned loop IR one output index at a time. Supports one or multiple returned tensors after memory planning and fusion.
-3. **Native** — emits deterministic C11, compiles a shared library, and invokes a stable output-first ABI through `ctypes`. The current native ABI remains deliberately single-output; multi-output programs are rejected rather than silently miscompiled.
+3. **Native** — emits deterministic C11, compiles a shared library, and invokes one stable output-first ABI entrypoint through `ctypes`. A program with `N` returned tensors exposes `N` ordered typed output pointers followed by its input pointers; single-output programs retain the historical one-`out` signature.
 
 Native code may be reused in-process or persisted by content-addressed cache identity. Persistent library bytes are staged before loading so the cache remains immutable and Windows DLL locking does not poison reusable artifacts.
 
@@ -64,10 +65,14 @@ Included: static shapes, one returned tensor, explicit external inputs, CPU lowe
 
 The release boundary remains historical and should not be rewritten as new capabilities land.
 
-### Post-v0.1 — current frontier
+### Post-v0.1 — multi-output phase
 
-The first promoted capability is multiple returned tensors across the Python frontend, typed tensor IR, verifier, reference execution, virtual-buffer lowering, lifetime-aware memory planning, loop IR, fusion safety, and the loop CPU executor. Single-output callers keep the existing `numpy.ndarray` result contract; multi-output CPU/reference execution returns an ordered tuple of arrays.
+Multiple returned tensors now cross the complete compiler stack: Python frontend, typed tensor IR, verifier, optimization use-def semantics, reference execution, virtual-buffer lowering, return-aware lifetime planning, loop IR, fusion safety, generated C, native compilation, reusable native execution, and the high-level `compile_module()` path.
 
-The native C ABI is intentionally the next separate frontier. It still exposes one output pointer and therefore rejects a multi-output loop program through the single-output `return_slot` contract. Extending that ABI requires its own cross-platform native vertical slice rather than an unverified signature change hidden inside the CPU milestone.
+Single-output callers keep the existing `numpy.ndarray` result and `out=np.ndarray` contract. Multi-output execution returns an ordered tuple; callers may optionally provide an ordered sequence of preallocated NumPy arrays. Generated C uses one native entrypoint with ordered output pointers, so kernels execute once and all terminal values are copied to their corresponding outputs without per-output recompilation or recomputation.
 
-Later candidate frontiers remain dynamic shapes, zero-copy input aliasing, generalized SIMD abstraction, general expression-DAG matching, parallel scheduling, and accelerator backends.
+This phase is complete when the same exact candidate passes GCC/MSVC native differential execution and the repository's full Ubuntu/Windows CI matrix.
+
+### Next architectural frontier
+
+Candidate frontiers remain dynamic shapes, zero-copy input aliasing, generalized SIMD abstraction, general expression-DAG matching, parallel scheduling, and accelerator backends. The next phase should be selected by executable cross-layer value rather than by enumerating more opcode × SIMD corner cases.
