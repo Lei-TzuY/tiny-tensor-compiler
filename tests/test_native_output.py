@@ -34,6 +34,12 @@ def _input_program(shape=(2, 3), dtype="int32"):
     return lower_to_loops(lower_to_cpu(module))
 
 
+def _scalar_relu_program():
+    builder = GraphBuilder()
+    value = builder.input((), dtype="float32")
+    return lower_to_loops(lower_to_cpu(builder.finish(value.relu())))
+
+
 def test_execute_native_writes_preallocated_output_and_returns_same_array():
     _default_compiler_or_skip()
     program = _input_program()
@@ -129,12 +135,23 @@ def test_preallocated_output_rejects_overlap_with_runtime_input():
         execute_native(program, inputs=[shared], out=shared)
 
 
+def test_external_scalar_relu_signed_zero_baseline_without_preallocated_output():
+    _default_compiler_or_skip()
+    program = _scalar_relu_program()
+
+    result = execute_native(
+        program,
+        inputs=[np.array(-0.0, dtype=np.float32)],
+    )
+
+    assert result.shape == ()
+    assert not np.signbit(result).item()
+
+
 def test_preallocated_output_supports_scalar_and_zero_extent_results():
     _default_compiler_or_skip()
 
-    scalar_builder = GraphBuilder()
-    scalar_input = scalar_builder.input((), dtype="float32")
-    scalar_program = lower_to_loops(lower_to_cpu(scalar_builder.finish(scalar_input.relu())))
+    scalar_program = _scalar_relu_program()
     scalar_out = np.empty((), dtype=np.float32)
     scalar_result = execute_native(
         scalar_program,
