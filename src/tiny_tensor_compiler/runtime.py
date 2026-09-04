@@ -7,13 +7,16 @@ import numpy as np
 
 from .input_validation import prepare_runtime_inputs
 from .ir import Module, Value
+from .symbolic import has_symbolic_shapes, specialize_for_inputs
 from .verifier import verify
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 
 
 def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionResult:
-    """Execute verified tensor IR directly; used as a semantic reference backend."""
+    """Execute verified tensor IR directly; symbolic batch shapes specialize from inputs."""
+    if has_symbolic_shapes(module):
+        module, _ = specialize_for_inputs(module, inputs)
     verify(module)
     input_ops = tuple(op for op in module.function.ops if op.opcode == "input")
     runtime_inputs = prepare_runtime_inputs(
