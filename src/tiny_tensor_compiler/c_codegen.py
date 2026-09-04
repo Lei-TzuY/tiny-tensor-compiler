@@ -281,7 +281,14 @@ def _emit_kernel(
 
 def _can_emit_sse2_i32(op: LoopKernel, types: dict[int, TensorType]) -> bool:
     return (
-        op.opcode in {"add", "relu", "relu_add", "chain_add_add", "relu_chain_add_add"}
+        op.opcode in {
+            "add",
+            "relu",
+            "relu_add",
+            "chain_add_add",
+            "relu_chain_add_add",
+            "tree_add_add_add",
+        }
         and types[op.output].dtype == DType.INT32
         and all(types[buffer].dtype == DType.INT32 for buffer in op.inputs)
         and _can_linearize_kernel(op, types)
@@ -293,6 +300,8 @@ def _emit_sse2_i32(op: LoopKernel, output_type: TensorType) -> list[str]:
         return _emit_sse2_i32_relu(op, output_type)
     if op.opcode in {"chain_add_add", "relu_chain_add_add"}:
         return _emit_sse2_i32_chain_add_add(op, output_type)
+    if op.opcode == "tree_add_add_add":
+        return _emit_sse2_i32_tree_add_add_add(op, output_type)
 
     lhs, rhs = op.inputs
     count = _element_count(output_type)
@@ -406,6 +415,39 @@ def _emit_sse2_i32_chain_add_add(op: LoopKernel, output_type: TensorType) -> lis
     return lines
 
 
+def _emit_sse2_i32_tree_add_add_add(op: LoopKernel, output_type: TensorType) -> list[str]:
+    a, b, c, d = op.inputs
+    count = _element_count(output_type)
+    output = op.output
+    return [
+        "        #if TINY_TENSOR_HAS_SSE2",
+        "        int64_t n = 0;",
+        f"        for (; n + 4 <= {count}; n += 4) {{",
+        f"            __m128i a = _mm_loadu_si128((const __m128i *)&p{a}[n]);",
+        f"            __m128i b = _mm_loadu_si128((const __m128i *)&p{b}[n]);",
+        f"            __m128i c = _mm_loadu_si128((const __m128i *)&p{c}[n]);",
+        f"            __m128i d = _mm_loadu_si128((const __m128i *)&p{d}[n]);",
+        "            __m128i left = _mm_add_epi32(a, b);",
+        "            __m128i right = _mm_add_epi32(c, d);",
+        "            __m128i result = _mm_add_epi32(left, right);",
+        f"            _mm_storeu_si128((__m128i *)&p{output}[n], result);",
+        "        }",
+        f"        for (; n < {count}; ++n) {{",
+        f"            int32_t left = ((int32_t)p{a}[n] + (int32_t)p{b}[n]);",
+        f"            int32_t right = ((int32_t)p{c}[n] + (int32_t)p{d}[n]);",
+        f"            p{output}[n] = ((int32_t)left + (int32_t)right);",
+        "        }",
+        "        #else",
+        "        TINY_TENSOR_VECTORIZE_LOOP",
+        f"        for (int64_t n = 0; n < {count}; ++n) {{",
+        f"            int32_t left = ((int32_t)p{a}[n] + (int32_t)p{b}[n]);",
+        f"            int32_t right = ((int32_t)p{c}[n] + (int32_t)p{d}[n]);",
+        f"            p{output}[n] = ((int32_t)left + (int32_t)right);",
+        "        }",
+        "        #endif",
+    ]
+
+
 def _emit_sse2_i32_relu(op: LoopKernel, output_type: TensorType) -> list[str]:
     (operand,) = op.inputs
     count = _element_count(output_type)
@@ -437,7 +479,6 @@ def _emit_sse2_i32_relu(op: LoopKernel, output_type: TensorType) -> list[str]:
 def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
     if not op.iteration_shape or _element_count(types[op.output]) == 0:
         return False
-
     identity = tuple(range(len(op.iteration_shape)))
     return all(
         types[buffer].shape == op.iteration_shape and index_map.axes == identity
