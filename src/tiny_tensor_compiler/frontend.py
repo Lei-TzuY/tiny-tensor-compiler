@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import numpy as np
@@ -94,10 +94,24 @@ class GraphBuilder:
         )
         return Tensor(self, op.results[0])
 
-    def finish(self, result: Tensor) -> Module:
+    def finish(self, result: Tensor | Sequence[Tensor]) -> Module:
         self._ensure_open()
-        self._check_tensor_owner(result)
-        self.function.add_op("return", operands=[result.value])
+        if isinstance(result, Tensor):
+            results = (result,)
+        else:
+            try:
+                results = tuple(result)
+            except TypeError as exc:
+                raise TypeError("graph result must be a Tensor or a sequence of Tensors") from exc
+            if not results:
+                raise ValueError("graph must return at least one tensor")
+
+        for tensor in results:
+            if not isinstance(tensor, Tensor):
+                raise TypeError("graph result sequence must contain only Tensor values")
+            self._check_tensor_owner(tensor)
+
+        self.function.add_op("return", operands=[tensor.value for tensor in results])
         self._finished = True
         return Module(self.function)
 
