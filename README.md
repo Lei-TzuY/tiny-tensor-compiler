@@ -160,3 +160,9 @@ ruff check .
 pytest
 python examples/basic.py
 ```
+
+A native C compiler is required to exercise `execute_native()` or `compile_native()`: a `cc`-compatible GCC/Clang toolchain on POSIX-like systems, or an MSVC developer environment exposing `cl` on Windows. CI executes the full suite on Ubuntu and Windows for Python 3.11 and 3.13.
+
+## Near-term compiler roadmap
+
+The runtime-input boundary, verifier-backed fusion shapes, persistent native artifact cache, reusable compiled-executable handle, conservative contiguous-loop codegen scheduling, cross-compiler vectorization dependency hint, and ordered multi-output ABI are now explicit. Follow-up milestones can independently add explicit SIMD/vector-width selection or parallel scheduling beyond this hinted flat loop, broaden DAG matching beyond the current exact shapes, improve higher-level execution ergonomics, or eventually target CUDA. Dynamic shapes and zero-copy external-buffer aliasing remain separate correctness problems rather than implicit extensions of this execution milestone.
