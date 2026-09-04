@@ -134,8 +134,8 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
-    if _can_emit_sse2_i32_add(op, types):
-        lines.extend(_emit_sse2_i32_add(op, output_type))
+    if _can_emit_sse2_i32(op, types):
+        lines.extend(_emit_sse2_i32(op, output_type))
         lines.append("    }")
         lines.append("")
         return lines
@@ -279,38 +279,62 @@ def _emit_kernel(
     return lines
 
 
-def _can_emit_sse2_i32_add(op: LoopKernel, types: dict[int, TensorType]) -> bool:
+def _can_emit_sse2_i32(op: LoopKernel, types: dict[int, TensorType]) -> bool:
     return (
-        op.opcode == "add"
+        op.opcode in {"add", "relu_add"}
         and types[op.output].dtype == DType.INT32
         and all(types[buffer].dtype == DType.INT32 for buffer in op.inputs)
         and _can_linearize_kernel(op, types)
     )
 
 
-def _emit_sse2_i32_add(op: LoopKernel, output_type: TensorType) -> list[str]:
+def _emit_sse2_i32(op: LoopKernel, output_type: TensorType) -> list[str]:
     lhs, rhs = op.inputs
     count = _element_count(output_type)
     output = op.output
-    return [
+    relu = op.opcode == "relu_add"
+    lines = [
         "        #if TINY_TENSOR_HAS_SSE2",
         "        int64_t n = 0;",
         f"        for (; n + 4 <= {count}; n += 4) {{",
         f"            __m128i lhs = _mm_loadu_si128((const __m128i *)&p{lhs}[n]);",
         f"            __m128i rhs = _mm_loadu_si128((const __m128i *)&p{rhs}[n]);",
         "            __m128i sum = _mm_add_epi32(lhs, rhs);",
-        f"            _mm_storeu_si128((__m128i *)&p{output}[n], sum);",
-        "        }",
-        f"        for (; n < {count}; ++n) {{",
-        f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
-        "        }",
-        "        #else",
-        "        TINY_TENSOR_VECTORIZE_LOOP",
-        f"        for (int64_t n = 0; n < {count}; ++n) {{",
-        f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
-        "        }",
-        "        #endif",
     ]
+    if relu:
+        lines.extend(
+            [
+                "            __m128i zero = _mm_setzero_si128();",
+                "            __m128i positive = _mm_cmpgt_epi32(sum, zero);",
+                "            __m128i relu = _mm_and_si128(sum, positive);",
+                f"            _mm_storeu_si128((__m128i *)&p{output}[n], relu);",
+            ]
+        )
+    else:
+        lines.append(f"            _mm_storeu_si128((__m128i *)&p{output}[n], sum);")
+    lines.extend(["        }", f"        for (; n < {count}; ++n) {{"])
+    if relu:
+        lines.extend(
+            [
+                f"            int32_t value = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
+                f"            p{output}[n] = value < 0 ? 0 : value;",
+            ]
+        )
+    else:
+        lines.append(f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);")
+    lines.extend(["        }", "        #else", "        TINY_TENSOR_VECTORIZE_LOOP"])
+    lines.append(f"        for (int64_t n = 0; n < {count}; ++n) {{")
+    if relu:
+        lines.extend(
+            [
+                f"            int32_t value = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
+                f"            p{output}[n] = value < 0 ? 0 : value;",
+            ]
+        )
+    else:
+        lines.append(f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);")
+    lines.extend(["        }", "        #endif"])
+    return lines
 
 
 def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
