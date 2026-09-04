@@ -56,9 +56,14 @@ class NativeExecutable:
         self._source = source
         self._persistent_library = persistent_library
 
-    def execute(self, inputs: Sequence[Any] = ()) -> np.ndarray:
-        """Execute with exact runtime-input validation and cached native code."""
+    def execute(
+        self,
+        inputs: Sequence[Any] = (),
+        out: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Execute with exact runtime-input/output validation and cached native code."""
         runtime_inputs = prepare_runtime_inputs(self._program.input_types, inputs)
+        output = _prepare_native_output(self._program, out, runtime_inputs)
         command = list(self._command)
         with _NATIVE_CACHE_LOCK:
             artifact = _get_or_compile_artifact(
@@ -66,10 +71,14 @@ class NativeExecutable:
                 command,
                 self._persistent_library,
             )
-            return _execute_artifact(self._program, artifact, runtime_inputs)
+            return _execute_artifact(self._program, artifact, runtime_inputs, output)
 
-    def __call__(self, inputs: Sequence[Any] = ()) -> np.ndarray:
-        return self.execute(inputs)
+    def __call__(
+        self,
+        inputs: Sequence[Any] = (),
+        out: np.ndarray | None = None,
+    ) -> np.ndarray:
+        return self.execute(inputs, out=out)
 
 
 _PERSISTENT_CACHE_SCHEMA = "native-v1"
@@ -103,16 +112,18 @@ def execute_native(
     compiler: str | None = None,
     inputs: Sequence[Any] = (),
     cache_dir: str | os.PathLike[str] | None = None,
+    out: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compile or reuse generated C and execute it on the native CPU."""
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
+    output = _prepare_native_output(program, out, runtime_inputs)
     command = _compiler_command(compiler)
     source = generate_c(program)
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
         artifact = _get_or_compile_artifact(source, command, persistent_library)
-        return _execute_artifact(program, artifact, runtime_inputs)
+        return _execute_artifact(program, artifact, runtime_inputs, output)
 
 
 def clear_native_cache() -> None:
@@ -131,13 +142,42 @@ def clear_native_cache() -> None:
             raise NativeCompilationError(f"failed to clear native artifact cache: {first_error}") from first_error
 
 
+def _prepare_native_output(
+    program: LoopProgram,
+    output: np.ndarray | None,
+    runtime_inputs: Sequence[np.ndarray[Any, Any]],
+) -> np.ndarray:
+    return_type = _return_type(program)
+    expected_dtype = np.dtype(return_type.dtype.to_numpy())
+    if output is None:
+        return np.empty(return_type.shape, dtype=expected_dtype)
+    if not isinstance(output, np.ndarray):
+        raise TypeError("output must be a numpy.ndarray")
+    if tuple(output.shape) != return_type.shape:
+        raise ValueError(
+            f"output shape {tuple(output.shape)} does not match expected {return_type.shape}"
+        )
+    if output.dtype != expected_dtype:
+        raise ValueError(f"output dtype {output.dtype} does not match expected {expected_dtype}")
+    if not output.flags.c_contiguous:
+        raise ValueError("output must be C-contiguous")
+    if not output.flags.writeable:
+        raise ValueError("output must be writable")
+    if not output.flags.aligned:
+        raise ValueError("output must be aligned for its dtype")
+    for index, runtime_input in enumerate(runtime_inputs):
+        if np.shares_memory(output, runtime_input):
+            raise ValueError(f"output must not overlap runtime input {index}")
+    return output
+
+
 def _execute_artifact(
     program: LoopProgram,
     artifact: _NativeArtifact,
     runtime_inputs: Sequence[np.ndarray[Any, Any]],
+    output: np.ndarray,
 ) -> np.ndarray:
     return_type = _return_type(program)
-    output = np.empty(return_type.shape, dtype=return_type.dtype.to_numpy())
     output_pointer_type = _pointer_type(return_type.dtype.to_numpy())
     input_pointer_types = tuple(
         _pointer_type(input_type.dtype.to_numpy()) for input_type in program.input_types
