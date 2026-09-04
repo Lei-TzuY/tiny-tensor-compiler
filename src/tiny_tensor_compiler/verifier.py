@@ -46,7 +46,7 @@ def verify(module: Module) -> None:
             _verify_relu(op_index, op)
         elif op.opcode == "return":
             returns += 1
-            _expect_arity(op_index, op, operands=1, results=0)
+            _verify_return(op_index, op)
             if op_index != len(function.ops) - 1:
                 _fail(op_index, op, "return must be the final operation")
         else:
@@ -129,6 +129,15 @@ def _verify_relu(op_index: int, op: Operation) -> None:
             op,
             f"result type {op.results[0].type} does not match operand type {expected_type}",
         )
+
+
+def _verify_return(op_index: int, op: Operation) -> None:
+    if op.results:
+        _fail(op_index, op, "return must not produce results")
+    if not op.operands:
+        _fail(op_index, op, "return requires at least one operand")
+    if op.attrs:
+        _fail(op_index, op, "return does not accept attributes")
 
 
 def _expect_arity(op_index: int, op: Operation, operands: int, results: int) -> None:
