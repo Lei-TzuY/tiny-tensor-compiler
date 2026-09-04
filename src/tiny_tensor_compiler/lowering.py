@@ -113,12 +113,18 @@ class CPUProgram:
         return tuple(op for op in self.operations if isinstance(op, BufferKernel))
 
     @property
+    def return_slots(self) -> tuple[int, ...]:
+        return tuple(op.buffer for op in self.operations if isinstance(op, BufferReturn))
+
+    @property
     def return_slot(self) -> int:
-        """Compatibility alias for the returned virtual buffer."""
-        for op in reversed(self.operations):
-            if isinstance(op, BufferReturn):
-                return op.buffer
-        raise RuntimeError("verified buffer IR unexpectedly has no return")
+        """Compatibility alias for single-output programs."""
+        slots = self.return_slots
+        if len(slots) != 1:
+            raise RuntimeError(
+                f"return_slot requires exactly one returned buffer, found {len(slots)}"
+            )
+        return slots[0]
 
     def dump(self) -> str:
         lines: list[str] = []
@@ -148,7 +154,7 @@ def lower_to_cpu(module: Module) -> CPUProgram:
 
     for op in module.function.ops:
         if op.opcode == "return":
-            operations.append(BufferReturn(buffers[op.operands[0]]))
+            operations.extend(BufferReturn(buffers[operand]) for operand in op.operands)
             continue
 
         result = op.results[0]
@@ -227,7 +233,7 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
     saw_return = False
 
     for index, op in enumerate(operations):
-        if saw_return:
+        if saw_return and not isinstance(op, BufferReturn):
             raise ValueError("buffer IR operation appears after return")
 
         if isinstance(op, BufferAlloc):
