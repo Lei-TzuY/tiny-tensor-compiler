@@ -173,7 +173,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
         raise TypeError("unsupported Loop IR operation during input borrowing")
 
     transformed = LoopProgram(
-        tuple([*program.allocations, *extra_allocations, *transformed_operations])
+        (*program.allocations, *extra_allocations, *transformed_operations)
     )
     return BorrowedLoopProgram(program=transformed, borrowed_inputs=tuple(bindings))
 
