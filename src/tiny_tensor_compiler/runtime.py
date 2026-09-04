@@ -9,8 +9,10 @@ from .input_validation import prepare_runtime_inputs
 from .ir import Module, Value
 from .verifier import verify
 
+ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 
-def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> np.ndarray:
+
+def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionResult:
     """Execute verified tensor IR directly; used as a semantic reference backend."""
     verify(module)
     input_ops = tuple(op for op in module.function.ops if op.opcode == "input")
@@ -36,5 +38,6 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> np.ndarray:
             operand = values[op.operands[0]].astype(dtype, copy=False)
             values[op.results[0]] = np.maximum(operand, np.array(0, dtype=dtype))
         elif op.opcode == "return":
-            return np.array(values[op.operands[0]], copy=True)
+            outputs = tuple(np.array(values[operand], copy=True) for operand in op.operands)
+            return outputs[0] if len(outputs) == 1 else outputs
     raise RuntimeError("verified module unexpectedly has no return")
