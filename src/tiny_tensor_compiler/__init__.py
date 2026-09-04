@@ -4,6 +4,7 @@ from .c_abi_codegen import generate_c
 from .compiler import compile_module
 from .frontend import GraphBuilder, Tensor
 from .inference import TypeInferenceError
+from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
 from .loop_ir import (
     IndexMap,
     LoopAlloc,
@@ -43,6 +44,8 @@ from .runtime import execute_reference
 from .verifier import VerificationError, verify
 
 __all__ = [
+    "BorrowedInput",
+    "BorrowedLoopProgram",
     "BufferAlloc",
     "BufferAssignment",
     "BufferInput",
@@ -63,6 +66,7 @@ __all__ = [
     "TypeInferenceError",
     "VerificationError",
     "algebraic_simplify",
+    "borrow_inputs",
     "canonicalize",
     "clear_native_cache",
     "common_subexpression_eliminate",
