@@ -31,6 +31,9 @@ The project treats verification and explicit semantics as compiler features, not
 - Multiple returned tensors remain live through the terminal return block, so simultaneously returned same-typed values cannot be accidentally assigned one physical slot.
 - Loop IR makes broadcasting explicit through deterministic index maps; kernels may not overwrite a physical slot still read by the same kernel.
 - Fusion must preserve every returned value, including intermediates that are both returned and consumed by a later kernel.
+- Verified input borrowing transforms already verified Loop IR and constructs a new `LoopProgram`, so input-lifetime splitting is rechecked by the existing allocation/read-before-write/kernel-alias verifier instead of bypassing it.
+- A borrowed runtime input owns a dedicated read-only physical epoch. If the planner later reuses the original input slot as scratch storage, the borrowing transform appends a dedicated external slot and rewrites only that input epoch's reads, leaving the original scratch reuse intact.
+- Borrowed runtime arrays must match exact shape/dtype and already be NumPy, C-contiguous, and aligned; the zero-copy contract rejects any input that would require hidden normalization.
 - Integer lowering preserves fixed-width wrapping semantics across the scalar and generated-C paths.
 - Floating-point ReLU preserves NaN behavior and canonicalizes negative zero to match the reference semantics.
 - Runtime inputs are exact: count, static shape, and dtype must match the compiled graph; there is no silent cast.
@@ -41,8 +44,8 @@ The project treats verification and explicit semantics as compiler features, not
 There are intentionally separate execution paths so optimized lowering can be checked against a simpler semantic baseline.
 
 1. **Reference** — executes verified tensor IR with NumPy and defines the semantic baseline. Supports one or multiple returned tensors.
-2. **Loop interpreter** — executes explicit planned loop IR one output index at a time. Supports one or multiple returned tensors after memory planning and fusion.
-3. **Native** — emits deterministic C11, compiles a shared library, and invokes one stable output-first ABI entrypoint through `ctypes`. A program with `N` returned tensors exposes `N` ordered typed output pointers followed by its input pointers; single-output programs retain the historical one-`out` signature.
+2. **Loop interpreter** — executes explicit planned loop IR one output index at a time. Supports one or multiple returned tensors after memory planning and fusion. A `BorrowedLoopProgram` binds verified external input slots directly to caller NumPy arrays instead of materializing `LoopInput` copies.
+3. **Native** — emits deterministic C11, compiles a shared library, and invokes one stable output-first ABI entrypoint through `ctypes`. A program with `N` returned tensors exposes `N` ordered typed output pointers followed by its input pointers; single-output programs retain the historical one-`out` signature. Borrowed inputs become typed `const` aliases to those ABI input pointers, so generated input-copy loops disappear while kernel code continues to read the same physical-buffer names.
 
 Native code may be reused in-process or persisted by content-addressed cache identity. Persistent library bytes are staged before loading so the cache remains immutable and Windows DLL locking does not poison reusable artifacts.
 
@@ -71,8 +74,16 @@ Multiple returned tensors now cross the complete compiler stack: Python frontend
 
 Single-output callers keep the existing `numpy.ndarray` result and `out=np.ndarray` contract. Multi-output execution returns an ordered tuple; callers may optionally provide an ordered sequence of preallocated NumPy arrays. Generated C uses one native entrypoint with ordered output pointers, so kernels execute once and all terminal values are copied to their corresponding outputs without per-output recompilation or recomputation.
 
-This phase is complete when the same exact candidate passes GCC/MSVC native differential execution and the repository's full Ubuntu/Windows CI matrix.
+This phase is complete after the exact integrated candidate passes GCC/MSVC native differential execution and the repository's full Ubuntu/Windows CI matrix.
+
+### Post-v0.1 — verified zero-copy input phase
+
+Zero-copy external input binding is an explicit opt-in data-plane transform rather than a hidden runtime heuristic. `borrow_inputs(loop_program)` isolates each external input's read-only lifetime from scratch-buffer reuse, then returns a `BorrowedLoopProgram` that carries the strict runtime contract into both interpreter and native execution. `compile_module(..., borrow_inputs=True)` exposes the same path at the high-level API.
+
+When an input's original physical slot is never written by another input or kernel, the transform borrows that slot in place and adds no storage. When that physical slot is reused after the input dies, the transform appends one dedicated external slot, rewrites reads during the input epoch to that slot, and preserves the planner's original scratch slot for later writes. Generated C maps borrowed slots to `const T *pN = inputK` aliases and omits the corresponding copy loops; the loop interpreter installs the caller array directly into the same logical slot.
+
+The historical copied-input path remains the default compatibility behavior. Borrowed mode deliberately rejects Python sequences, non-contiguous views, wrong dtypes/shapes, or misaligned arrays rather than materializing a copy while claiming zero-copy execution.
 
 ### Next architectural frontier
 
-Candidate frontiers remain dynamic shapes, zero-copy input aliasing, generalized SIMD abstraction, general expression-DAG matching, parallel scheduling, and accelerator backends. The next phase should be selected by executable cross-layer value rather than by enumerating more opcode × SIMD corner cases.
+Candidate frontiers now include dynamic shapes, generalized SIMD abstraction, general expression-DAG matching, parallel scheduling, and accelerator backends. The next phase should be selected by executable cross-layer value rather than by enumerating more opcode × SIMD corner cases.
