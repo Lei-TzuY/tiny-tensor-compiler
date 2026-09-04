@@ -281,7 +281,7 @@ def _emit_kernel(
 
 def _can_emit_sse2_i32(op: LoopKernel, types: dict[int, TensorType]) -> bool:
     return (
-        op.opcode in {"add", "relu_add"}
+        op.opcode in {"add", "relu", "relu_add"}
         and types[op.output].dtype == DType.INT32
         and all(types[buffer].dtype == DType.INT32 for buffer in op.inputs)
         and _can_linearize_kernel(op, types)
@@ -289,6 +289,9 @@ def _can_emit_sse2_i32(op: LoopKernel, types: dict[int, TensorType]) -> bool:
 
 
 def _emit_sse2_i32(op: LoopKernel, output_type: TensorType) -> list[str]:
+    if op.opcode == "relu":
+        return _emit_sse2_i32_relu(op, output_type)
+
     lhs, rhs = op.inputs
     count = _element_count(output_type)
     output = op.output
@@ -335,6 +338,34 @@ def _emit_sse2_i32(op: LoopKernel, output_type: TensorType) -> list[str]:
         lines.append(f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);")
     lines.extend(["        }", "        #endif"])
     return lines
+
+
+def _emit_sse2_i32_relu(op: LoopKernel, output_type: TensorType) -> list[str]:
+    (operand,) = op.inputs
+    count = _element_count(output_type)
+    output = op.output
+    return [
+        "        #if TINY_TENSOR_HAS_SSE2",
+        "        int64_t n = 0;",
+        f"        for (; n + 4 <= {count}; n += 4) {{",
+        f"            __m128i value = _mm_loadu_si128((const __m128i *)&p{operand}[n]);",
+        "            __m128i zero = _mm_setzero_si128();",
+        "            __m128i positive = _mm_cmpgt_epi32(value, zero);",
+        "            __m128i relu = _mm_and_si128(value, positive);",
+        f"            _mm_storeu_si128((__m128i *)&p{output}[n], relu);",
+        "        }",
+        f"        for (; n < {count}; ++n) {{",
+        f"            int32_t value = (int32_t)p{operand}[n];",
+        f"            p{output}[n] = value < 0 ? 0 : value;",
+        "        }",
+        "        #else",
+        "        TINY_TENSOR_VECTORIZE_LOOP",
+        f"        for (int64_t n = 0; n < {count}; ++n) {{",
+        f"            int32_t value = (int32_t)p{operand}[n];",
+        f"            p{output}[n] = value < 0 ? 0 : value;",
+        "        }",
+        "        #endif",
+    ]
 
 
 def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
