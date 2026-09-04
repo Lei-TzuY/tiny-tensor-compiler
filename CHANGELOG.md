@@ -2,6 +2,19 @@
 
 All notable project milestones are recorded here.
 
+## [Unreleased]
+
+### Added
+
+- Ordered multiple tensor returns in the Python frontend and typed tensor IR.
+- Multi-output reference and explicit loop-CPU execution while preserving the existing single-output `numpy.ndarray` result contract.
+- Return-aware virtual-buffer liveness and physical memory planning so simultaneously returned values remain distinct when required.
+- Fusion safety for intermediates that are both returned and consumed by later kernels.
+
+### Backend boundary
+
+- Generated C/native execution remains explicitly single-output. Multi-output loop programs fail the single-output `return_slot` contract instead of being silently lowered through the existing one-output ABI.
+
 ## [0.1.0] - 2026-09-04
 
 First frozen compiler milestone: a compact, correctness-first tensor compiler with a complete CPU vertical slice from typed tensor expressions to verified generated C and reusable native execution.
