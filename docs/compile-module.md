@@ -26,6 +26,7 @@ tensor Module
 -> liveness-based physical memory planning
 -> explicit loop IR
 -> conservative elementwise fusion
+-> optional verified external-input borrowing
 -> eager native compilation/loading
 -> reusable NativeExecutable
 ```
@@ -34,7 +35,17 @@ It deliberately does **not** run tensor optimization passes such as constant fol
 
 `compiler=` and `cache_dir=` are forwarded to the existing native compilation layer. Runtime inputs therefore retain the same exact count, static shape, and dtype requirements as `compile_native()`, and the returned `NativeExecutable` retains the same cache and resource-lifecycle guarantees.
 
-Native execution can optionally write directly into a caller-provided NumPy output array:
+By default, external inputs retain the historical compatibility path: runtime arrays may be normalized to contiguous storage and are copied into planned physical buffers before kernels execute. Passing `borrow_inputs=True` selects the verified zero-copy path:
+
+```python
+executable = compile_module(module, borrow_inputs=True)
+values = np.array([-2.0, 0.0, 3.0], dtype=np.float32)
+result = executable(inputs=[values])
+```
+
+Borrowed inputs must already be `numpy.ndarray` objects with the exact compiled shape and dtype, C-contiguous layout, and aligned storage. Python sequences, non-contiguous views, or misaligned arrays are rejected rather than silently materialized. The borrowing transform separates each external input's read-only lifetime from later scratch-buffer reuse and constructs a new verified loop program. Generated C then aliases the borrowed physical slot directly to the ABI input pointer and omits that input's materialization loop; the loop interpreter binds the caller array to the same slot directly.
+
+Native execution can optionally write directly into caller-provided NumPy output arrays. A single-output executable accepts one array; a multi-output executable accepts an ordered sequence matching its returned tensors:
 
 ```python
 out = np.empty((3,), dtype=np.float32)
@@ -45,8 +56,8 @@ result = executable(
 assert result is out
 ```
 
-A provided `out` must be a writable, aligned, C-contiguous `numpy.ndarray` with the exact compiled result shape and dtype. It must not overlap any runtime input. Scalar and zero-extent outputs are supported under the same exact contract. Omitting `out` keeps the existing behavior and allocates a fresh result array. Invalid outputs are rejected before `execute_native()` performs compiler lookup or compilation; `compile_native()` itself remains an eager compilation API.
+A provided output must be writable, aligned, C-contiguous, and have the exact compiled result shape and dtype. Every output must remain disjoint from all runtime inputs and from every other output. Scalar and zero-extent outputs are supported under the same exact contract. Omitting `out` allocates fresh result arrays. Invalid outputs are rejected before native execution.
 
 Floating-point ReLU source explicitly canonicalizes both `+0.0` and `-0.0` to positive zero while preserving NaNs. The generated C uses `fabsf`/`fabs` on the zero branch rather than relying on compiler-dependent signed-zero behavior, so the same semantics hold on GCC/Clang and MSVC native paths.
 
-Dynamic shapes, multiple outputs, zero-copy external input aliasing, new ABI behavior, and additional fusion forms are outside this API's scope.
+Dynamic shapes remain outside this API's current scope. Multiple outputs and verified zero-copy external inputs are supported without changing the default copied-input compatibility behavior.
