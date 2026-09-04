@@ -12,10 +12,13 @@ All notable project milestones are recorded here.
 - Fusion safety for intermediates that are both returned and consumed by later kernels.
 - Generated C/native execution with one typed output pointer per returned tensor and one shared native entrypoint.
 - Ordered multi-output native results plus optional preallocated output sequences with exact shape, dtype, layout, alignment, mutability, input-alias, and cross-output alias validation.
+- Opt-in verified zero-copy external-input binding for loop CPU and native execution, including input-lifetime splitting when the original planned slot is reused later as scratch storage.
+- Strict borrowed-input contracts requiring exact NumPy arrays with compiled shape/dtype plus C-contiguous aligned storage, so the zero-copy path never hides a normalization copy.
 
 ### Compatibility
 
 - Single-output generated C and the existing `out=np.ndarray` native call contract remain unchanged.
+- External inputs still use the historical copied-buffer path by default; zero-copy binding is explicitly selected through `borrow_inputs()` or `compile_module(..., borrow_inputs=True)`.
 
 ## [0.1.0] - 2026-09-04
 
