@@ -62,6 +62,16 @@ def generate_c(program: LoopProgram) -> str:
         "#define TINY_TENSOR_EXPORT",
         "#endif",
         "",
+        "#if defined(_MSC_VER)",
+        "#define TINY_TENSOR_VECTORIZE_LOOP __pragma(loop(ivdep))",
+        "#elif defined(__clang__)",
+        '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")',
+        "#elif defined(__GNUC__)",
+        '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("GCC ivdep")',
+        "#else",
+        "#define TINY_TENSOR_VECTORIZE_LOOP",
+        "#endif",
+        "",
         f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{",
     ]
 
@@ -120,6 +130,7 @@ def _emit_kernel(
     linearized = _can_linearize_kernel(op, types)
     indent = "        "
     if linearized:
+        lines.append(f"{indent}TINY_TENSOR_VECTORIZE_LOOP")
         lines.append(
             f"{indent}for (int64_t n = 0; n < {_element_count(output_type)}; ++n) {{"
         )
