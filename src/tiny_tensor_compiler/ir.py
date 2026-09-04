@@ -201,7 +201,8 @@ class Module:
                     f"{op.results[0].type}"
                 )
             elif op.opcode == "return":
-                lines.append(f"  return {value_names[op.operands[0]]}")
+                operands = ", ".join(value_names[value] for value in op.operands)
+                lines.append(f"  return {operands}")
             else:
                 operands = ", ".join(
                     value_names.get(value, f"%?{value.id}") for value in op.operands
