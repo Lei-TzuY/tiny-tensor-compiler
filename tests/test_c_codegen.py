@@ -42,6 +42,10 @@ def test_generate_c_is_deterministic_and_encodes_broadcast_offsets():
     assert "p0[i0]" in first
     assert "p1[i1]" in first
     assert "p2[(i0 * 3) + i1]" in first
+    assert (
+        "\n        TINY_TENSOR_VECTORIZE_LOOP\n"
+        "        for (int64_t i0 = 0; i0 < 2; ++i0)"
+    ) not in first
 
 
 def test_generate_c_linearizes_contiguous_multidimensional_kernel():
@@ -52,7 +56,13 @@ def test_generate_c_linearizes_contiguous_multidimensional_kernel():
 
     source = generate_c(program)
 
-    assert "for (int64_t n = 0; n < 6; ++n)" in source
+    assert "#define TINY_TENSOR_VECTORIZE_LOOP __pragma(loop(ivdep))" in source
+    assert '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")' in source
+    assert '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("GCC ivdep")' in source
+    assert (
+        "\n        TINY_TENSOR_VECTORIZE_LOOP\n"
+        "        for (int64_t n = 0; n < 6; ++n)"
+    ) in source
     assert "p2[n] = ((int32_t)p0[n] + (int32_t)p1[n]);" in source
     assert "for (int64_t i0 = 0; i0 < 2; ++i0)" not in source
     assert "for (int64_t i1 = 0; i1 < 3; ++i1)" not in source
