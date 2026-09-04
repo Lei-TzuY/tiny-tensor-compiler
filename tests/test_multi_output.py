@@ -104,14 +104,14 @@ def test_single_output_execution_and_compatibility_properties_remain_unchanged()
     np.testing.assert_array_equal(execute_loop(loops, inputs=inputs), reference)
 
 
-def test_native_codegen_rejects_multi_output_until_abi_support_exists():
+def test_codegen_exposes_one_output_pointer_per_returned_tensor():
     loops = lower_to_loops(lower_to_cpu(_build_returned_intermediate_module()))
 
-    with pytest.raises(
-        RuntimeError,
-        match="return_slot requires exactly one returned buffer, found 2",
-    ):
-        generate_c(loops)
+    source = generate_c(loops)
+
+    assert "tiny_tensor_run(int32_t *out0, int32_t *out1, const int32_t *input0)" in source
+    assert "out0[r] =" in source
+    assert "out1[r] =" in source
 
 
 def test_graph_builder_rejects_empty_result_sequence():
