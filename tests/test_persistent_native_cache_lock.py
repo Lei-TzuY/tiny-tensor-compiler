@@ -1,5 +1,6 @@
 import contextlib
 import multiprocessing
+import os
 import time
 from pathlib import Path
 
@@ -40,6 +41,13 @@ def _acquire_persistent_lease(
         Path(acquired).write_text("acquired", encoding="utf-8")
 
 
+def _acquire_persistent_lease_and_exit(library: str, acquired: str) -> None:
+    lease = native_module._persistent_cache_lease(Path(library))
+    lease.__enter__()
+    Path(acquired).write_text("acquired", encoding="utf-8")
+    os._exit(0)
+
+
 def test_persistent_cache_lease_is_exclusive_across_processes(tmp_path):
     library = tmp_path / native_module._PERSISTENT_CACHE_SCHEMA / "digest" / native_module._library_name()
     ready = tmp_path / "ready"
@@ -77,6 +85,77 @@ def test_persistent_cache_lease_is_exclusive_across_processes(tmp_path):
         if waiter.pid is not None and waiter.is_alive():
             waiter.terminate()
             waiter.join(timeout=5)
+
+
+def test_persistent_cache_leases_are_independent_per_digest(tmp_path):
+    schema = tmp_path / native_module._PERSISTENT_CACHE_SCHEMA
+    held_library = schema / "digest-a" / native_module._library_name()
+    other_library = schema / "digest-b" / native_module._library_name()
+    ready = tmp_path / "ready"
+    release = tmp_path / "release"
+    started = tmp_path / "started"
+    acquired = tmp_path / "acquired"
+    context = multiprocessing.get_context("spawn")
+
+    holder = context.Process(
+        target=_hold_persistent_lease,
+        args=(str(held_library), str(ready), str(release)),
+    )
+    waiter = context.Process(
+        target=_acquire_persistent_lease,
+        args=(str(other_library), str(started), str(acquired)),
+    )
+    holder.start()
+    try:
+        _wait_for(ready)
+        waiter.start()
+        _wait_for(started)
+        _wait_for(acquired)
+        assert holder.is_alive()
+
+        release.write_text("release", encoding="utf-8")
+        holder.join(timeout=20)
+        waiter.join(timeout=20)
+        assert holder.exitcode == 0
+        assert waiter.exitcode == 0
+    finally:
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=5)
+        if waiter.pid is not None and waiter.is_alive():
+            waiter.terminate()
+            waiter.join(timeout=5)
+
+
+def test_persistent_cache_lease_releases_when_owner_process_exits(tmp_path):
+    library = tmp_path / native_module._PERSISTENT_CACHE_SCHEMA / "digest" / native_module._library_name()
+    child_acquired = tmp_path / "child-acquired"
+    parent_acquired = tmp_path / "parent-acquired"
+    started = tmp_path / "parent-started"
+    context = multiprocessing.get_context("spawn")
+
+    owner = context.Process(
+        target=_acquire_persistent_lease_and_exit,
+        args=(str(library), str(child_acquired)),
+    )
+    owner.start()
+    _wait_for(child_acquired)
+    owner.join(timeout=20)
+    assert owner.exitcode == 0
+
+    follower = context.Process(
+        target=_acquire_persistent_lease,
+        args=(str(library), str(started), str(parent_acquired)),
+    )
+    follower.start()
+    try:
+        follower.join(timeout=20)
+        assert follower.exitcode == 0
+        assert parent_acquired.read_text(encoding="utf-8") == "acquired"
+    finally:
+        if follower.is_alive():
+            follower.terminate()
+            follower.join(timeout=5)
 
 
 def test_persistent_cache_rechecks_verified_entry_after_lease(monkeypatch, tmp_path):
