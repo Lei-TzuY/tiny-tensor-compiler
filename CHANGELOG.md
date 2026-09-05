@@ -43,13 +43,14 @@ All notable project milestones are recorded here.
 - Ordered writable generations: each write must consume the current fresh full-root handle plus fresh target/source values, invalidates every older handle on that root, and produces the next fresh full-root handle. Fresh generations may feed ordinary computation, new views, and later writes without allocating new root storage.
 - Generated C keeps post-write full-root handles mutable for subsequent verified writes; native regressions cover multiple writes with an intervening OpenMP kernel on GCC-style and MSVC toolchains while borrowed runtime inputs remain read-only.
 - Overlap-safe same-root source semantics at the public builder boundary. Every same-root source is first materialized through an explicit owning C-order `reshape` snapshot before mutation, including shifted overlap, interleaved strides, reversed/permuted layouts, and runtime-symbolic axes; canonical tensor/Buffer/Loop `copy_into` therefore keeps its existing different-root source invariant.
+- Deterministic full-tensor `Tensor.sum()` reduction to a rank-zero tensor of the same dtype, with logical C-order left-fold semantics, exact empty-tensor zero identity, fixed-width integer step boundaries, signed-stride/permuted-view support, serial behavior under `parallel=True`, native GCC/MSVC execution, dynamic specialization, borrowed-input/multi-output composition, and pure DCE/CSE integration.
 
 ### Compatibility
 
 - Single-output generated C and the existing `out=np.ndarray` native call contract remain unchanged.
 - External inputs still use the historical copied-buffer path by default; zero-copy binding is explicitly selected through `borrow_inputs()` or `compile_module(..., borrow_inputs=True)`.
 - `compile_module()` remains the eager concrete-shape entrypoint. Symbolic tensor IR must use the explicit `compile_dynamic_module()` specialization boundary before physical lowering.
-- Existing one-symbol dynamic callers retain `bind_dynamic_batch()`, `DynamicExecutable.symbolic_dim`, integer `specialize(size)`, and `cached_batch_sizes`; multi-symbol executables use complete binding mappings instead of ambiguous batch-only values.
+- Existing one-symbol dynamic callers retain `bind_dynamic_batch()`, `DynamicExecutable.symbolic_dim`, integer `specialize()`, and `cached_batch_sizes`; multi-symbol executables use complete binding mappings instead of ambiguous batch-only values.
 - Plain `SymbolicDim` and one-variable `AffineDim` shapes keep their existing direct runtime-binding behavior. `LinearDim` adds positive-coefficient/non-negative-offset relations across multiple named symbols, but all relations are solved to one complete integer binding before Buffer/Loop IR.
 - Symbolic broadcasting stays structural: exact matching symbolic/affine/linear expressions may align or broadcast with dimension `1`; runtime equation solving does not implicitly equate different expressions during type inference.
 - `reshape` remains a verified row-major copy into distinct storage. `view` is the explicit zero-copy alternative for whole-storage C-contiguous shape changes. `slice` adds one compile-time-bounded positive-stride axis, `reverse` adds one explicit signed-stride axis reversal, and `transpose` adds a complete compile-time axis permutation; all remain read-only aliases. Inferred `-1`, generic negative-step slice syntax, writable view kernels, runtime permutation axes, and general advanced indexing remain out of scope.
@@ -65,6 +66,7 @@ All notable project milestones are recorded here.
 - Parallel native scheduling is opt-in; `parallel=False` retains the serial call shape and code-generation behavior. Scalar and zero-extent kernels remain serial, and the existing explicit SSE2 path keeps priority instead of stacking OpenMP onto its vector loop and scalar tail.
 - OpenMP input materialization and terminal output copies remain serial. Only verified kernel iteration is scheduled in parallel, and each emitted `parallel for` retains its implicit barrier; this phase does not introduce asynchronous kernel execution or graph-level reordering.
 - The OpenMP phase establishes executable scheduling semantics and cross-platform correctness only. It does not claim wall-clock speedup, optimal thread count, grain-size selection, or benchmark superiority.
+- Full-tensor `sum` is deterministic and deliberately serial in this phase. It preserves the input dtype, consumes values in logical C-order with one left fold, and does not yet expose axis selection, `keepdims`, parallel/tree reduction, or reduction-specific SIMD.
 
 ## [0.1.0] - 2026-09-04
 
@@ -87,7 +89,3 @@ First frozen compiler milestone: a compact, correctness-first tensor compiler wi
 ### Frozen scope
 
 `v0.1.0` intentionally keeps shapes static, returns a single output, copies inputs into planned internal buffers, and uses a CPU/C11 backend. Dynamic shapes, multiple outputs, zero-copy input aliasing, generalized SIMD abstraction, general DAG fusion, parallel scheduling, and accelerator backends are deferred to later milestones.
-
-### Release policy
-
-The `v0.1.x` line is maintenance-oriented. Changes should address correctness, regressions, diagnostics, portability, tests, or bounded release-quality improvements. New language/backend scope belongs in a separately selected later milestone rather than an endless stream of opcode/SIMD micro-specializations.
