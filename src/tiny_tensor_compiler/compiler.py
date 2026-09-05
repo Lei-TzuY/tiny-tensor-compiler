@@ -5,9 +5,10 @@ import threading
 from collections.abc import Sequence
 from typing import Any
 
+from .fusion_planner import fuse_elementwise
 from .input_binding import borrow_inputs as bind_borrowed_inputs
 from .ir import Module, SymbolicDim
-from .loop_ir import fuse_elementwise, lower_to_loops
+from .loop_ir import lower_to_loops
 from .lowering import lower_to_cpu
 from .native import NativeExecutable, compile_native
 from .symbolic import (
