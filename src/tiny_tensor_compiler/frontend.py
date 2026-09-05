@@ -5,7 +5,14 @@ from typing import Any
 
 import numpy as np
 
-from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape, infer_slice
+from .inference import (
+    TypeInferenceError,
+    infer_binary,
+    infer_relu,
+    infer_reshape,
+    infer_slice,
+    infer_transpose,
+)
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 
@@ -48,6 +55,9 @@ class Tensor:
         step: int = 1,
     ) -> Tensor:
         return self._builder.slice(self, axis=axis, start=start, stop=stop, step=step)
+
+    def transpose(self, axes: Iterable[int] | None = None) -> Tensor:
+        return self._builder.transpose(self, axes)
 
 
 class GraphBuilder:
@@ -143,7 +153,12 @@ class GraphBuilder:
     ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
-        if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(tensor.type.shape):
+        if (
+            not isinstance(axis, int)
+            or isinstance(axis, bool)
+            or axis < 0
+            or axis >= len(tensor.type.shape)
+        ):
             raise TypeInferenceError("slice axis is out of range")
         extent = tensor.type.shape[axis]
         if not isinstance(extent, int) or isinstance(extent, bool):
@@ -166,6 +181,21 @@ class GraphBuilder:
                 "stop": normalized_stop,
                 "step": step,
             },
+        )
+        return Tensor(self, op.results[0])
+
+    def transpose(self, tensor: Tensor, axes: Iterable[int] | None = None) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        permutation = (
+            tuple(reversed(range(len(tensor.type.shape)))) if axes is None else tuple(axes)
+        )
+        result_type = infer_transpose(tensor.type, permutation)
+        op = self.function.add_op(
+            "transpose",
+            operands=[tensor.value],
+            result_types=[result_type],
+            attrs={"axes": permutation},
         )
         return Tensor(self, op.results[0])
 
