@@ -1,92 +1,155 @@
-# Verified contiguous view semantics
+# Verified tensor view semantics
 
-This phase adds `Tensor.view(shape)` as the first alias-aware tensor/storage capability. A view changes the logical C-order shape while sharing the complete underlying storage allocation; it is not a copy kernel and it does not create a second physical buffer.
+The view subsystem now has two bounded zero-copy alias forms over one storage root:
 
-## Semantic contract
+- `Tensor.view(shape)` changes only the logical C-order shape of a contiguous value;
+- `Tensor.slice(axis=..., start=..., stop=..., step=...)` creates one read-only positive-stride single-axis slice.
 
-`view` uses the same exact element-count and symbolic-shape proof as `reshape`. Source and target element-count polynomials must be identical, dtype is unchanged, and the target may not introduce a symbol absent from the source.
+Neither operation creates a second physical storage allocation. Logical view handles remain distinct from their backing storage root, while verification tracks the root lifetime and storage generation independently.
 
-The difference is physical semantics:
+## Storage layout descriptor
 
-- `reshape` remains an explicit row-major copy into distinct storage;
-- `view` creates a logical alias handle over the source storage root;
-- this phase supports only whole-storage C-contiguous reshaping, so the alias has zero offset and no arbitrary stride metadata.
+Physical view semantics are represented by `StorageLayout(offset, strides)` in element units.
 
-Reference execution uses `numpy.reshape(..., order="C")` and requires `numpy.shares_memory()` with the source. Loop execution creates the same NumPy view without an allocation or `copyto`. Generated C emits a typed pointer alias such as `const float *p3 = p0;` rather than a view array or element-copy loop.
+- `offset` is a non-negative element offset from the storage root;
+- every stride is a strictly positive integer;
+- layout rank must match the logical tensor rank;
+- the maximum reachable element must remain inside the root storage allocation;
+- empty logical tensors remain valid without manufacturing a zero stride.
 
-Native return values still cross the existing output ABI by copy-out. Returning a view therefore does not expose internal storage ownership to the caller; it only avoids an intermediate internal materialization.
+A root allocation has the canonical contiguous layout for its concrete shape. A whole-storage `view` derives a new contiguous logical layout at the same offset. A positive-stride slice composes from the source layout by adding `start * source_stride[axis]` to the absolute root offset and multiplying that axis stride by `step`.
 
-## Storage planning and lifetimes
+For example, slicing a `(3, 6)` contiguous tensor as `axis=1, start=1, stop=6, step=2` produces logical shape `(3, 3)` with layout:
 
-Buffer IR represents a view with `BufferView(output, source)`. The virtual view keeps its own logical `TensorType` but receives no physical storage assignment.
+```text
+offset = 1
+strides = (6, 2)
+```
 
-`MemoryPlan` records a `BufferAlias` from the virtual view to the source storage root. Every use or return of a direct or transitive view extends the root virtual value's lifetime. A storage slot therefore cannot be reused while any alias can still observe the old contents.
+The descriptor is absolute relative to the storage root, so transitive views do not accumulate hidden pointer arithmetic in different backends.
 
-Loop IR makes the split explicit:
+## Tensor-IR contract
 
-- `LoopAlloc` identifies a physical storage root;
-- `LoopView` identifies a logical shape/type handle backed by an existing root;
-- kernels may read either storage handles or view handles;
+`view` uses the same exact element-count and symbolic-shape proof as `reshape`: source and target element-count polynomials must be identical, dtype is unchanged, and the target may not introduce a symbol absent from the source.
+
+`slice` is deliberately narrower in this phase:
+
+- exactly one axis is sliced per operation;
+- `axis`, `start`, `stop`, and `step` are compile-time integers;
+- `step >= 1`;
+- bounds satisfy `0 <= start <= stop <= extent`;
+- the sliced axis extent must already be concrete in tensor IR;
+- other axes may remain symbolic and specialize through the existing runtime-symbolic boundary;
+- dtype is unchanged.
+
+This keeps runtime solving independent from slice-bound normalization while still allowing shapes such as `(B, 6)` to slice the concrete second axis and later specialize `B`.
+
+Reference execution uses NumPy views and requires `numpy.shares_memory()` for non-empty results. Caller-visible return values still copy through the existing result contract.
+
+## Buffer planning and lifetimes
+
+Buffer IR represents both alias forms with `BufferView`. A view output keeps its own logical `TensorType` but receives no physical storage assignment.
+
+`MemoryPlan` records a `BufferAlias` with:
+
+- the virtual view id;
+- the source virtual value;
+- the storage-root physical slot;
+- the logical view type;
+- the verified absolute `StorageLayout`.
+
+Every direct or transitive alias use extends the storage root's lifetime. A physical slot cannot be reused while any live alias can still observe its prior contents.
+
+Alias validation is no longer based on equal element count alone: the layout descriptor must preserve dtype and remain within the root storage bounds.
+
+## Loop IR and storage generations
+
+Loop IR separates storage roots from logical view handles:
+
+- `LoopAlloc` identifies physical storage;
+- `LoopView` identifies a logical type plus optional explicit storage layout;
+- kernels may read storage roots or view handles;
 - kernels may write only allocated storage roots.
 
-Alias safety is checked by storage root, not by handle number. A kernel output may not share a storage root with any input, even when the input is reached through one or more view handles.
+A contiguous `LoopView` may omit an explicit layout and derive it from its source. Lowered slice views carry their explicit absolute layout.
 
-## Storage generations
+Alias safety is checked by storage root, not by handle number. A kernel output may not share a storage root with any input, including a strided view.
 
-Loop verification independently checks lifetime freshness instead of trusting the planner alone.
+Every write to a storage root advances its generation. A view captures the current generation. Reading or returning that view after the root has been rewritten is rejected as stale, including transitive aliases.
 
-Every write to a storage root advances its generation. A `LoopView` captures the current generation of its source root. Reading or returning that view after the root has been rewritten is rejected as a stale alias. This catches malformed hand-built Loop IR even if it bypasses the normal memory planner.
+## CPU execution
 
-Transitive views inherit both the same storage root and the same captured generation.
+The Loop CPU backend materializes no slice buffer. It creates a NumPy logical view directly over the root array using:
+
+- root buffer ownership;
+- byte offset derived from the element offset;
+- byte strides derived from the verified element strides.
+
+Downstream elementwise kernels then index that logical NumPy view normally. Borrowed external inputs remain compatible: a verified borrowed root may feed one or more views without input materialization or view materialization.
+
+## Generated C and native execution
+
+Generated C emits each logical view as a typed pointer alias to the root plus its absolute element offset, for example:
+
+```c
+const int32_t *p3 = p0 + 1;
+```
+
+Logical reads then use the layout strides rather than assuming the view type is physically row-major. A `(3, 3)` slice with strides `(6, 2)` therefore computes source offsets from `i0 * 6 + i1 * 2`.
+
+This changes backend eligibility conservatively:
+
+- an input layout must be contiguous for the existing flat-loop/SSE2 path;
+- a strided slice therefore falls back to the general nested generated-C path;
+- OpenMP may still schedule the verified outer loop of that general-C kernel;
+- native returns from strided views gather logical elements into the existing contiguous caller-owned output ABI.
+
+The internal alias is zero-copy. The public native result remains an owned/copied output array, so this phase does not expose internal storage lifetime to callers.
 
 ## Borrowed inputs
 
-Verified borrowed inputs remain compatible with views. If an input's planned storage root is later reused for a write, `borrow_inputs()` still splits the external read-only epoch into a dedicated storage slot.
+Verified borrowed inputs still split an external read epoch when the planned root storage is reused later for a write. Logical view handles remain in a separate id space and are shifted when extra borrowed storage slots are inserted, preventing storage/view id collisions.
 
-Because view handles live in a separate logical id space after the storage ids, the borrowing transform shifts existing view handles when it appends split storage slots. This prevents a newly allocated borrowed slot from colliding with an existing logical view handle.
-
-A borrowed input may therefore flow directly through `view` into downstream kernels or returns without an input materialization copy or a view materialization copy.
+The layout descriptor is preserved by that transform, so a borrowed input may flow directly into a positive-stride slice and downstream native kernels without a hidden normalization or slice copy.
 
 ## Optimization and fusion boundary
 
-`view` is a known pure operation:
+Both `view` and `slice` are known pure operations for DCE. Existing exact CSE continues to merge attribute-free whole-storage `view` operations; this phase does not add attribute-aware slice CSE.
 
-- DCE may remove an unused view;
-- exact CSE may merge duplicate views with the same source and result type.
-
-This phase keeps views as explicit fusion boundaries. Elementwise fusion does not absorb or cross a view operation. The fusion planner treats creation of a view from a producer as a real later use of that producer.
+Views remain explicit fusion boundaries. Elementwise fusion does not absorb or cross a view/slice creation, and the planner still treats creation of an alias from a producer as an observable later use.
 
 ## Verification evidence
 
-Regression coverage includes:
+Regression coverage now includes:
 
-- typed view construction and C-order reference semantics;
-- no physical allocation for a view;
-- source-root lifetime extension across downstream view users;
-- storage-root output/input alias rejection;
-- stale-view rejection after a root rewrite;
-- generated-C pointer aliases with no view array/copy loop;
-- direct return of a logical view through the native ABI;
-- borrowed-input views with storage/view id collision prevention;
-- multi-output native execution using both a view and a downstream kernel;
-- symbolic dynamic specialization and native-cache reuse;
-- DCE/CSE behavior and an explicit fusion boundary;
+- typed positive-stride slice construction and NumPy reference semantics;
+- absolute offset/stride layout derivation with no physical allocation;
+- positive canonical strides for zero-extent storage layouts;
+- deterministic invalid-bound, non-positive-step, and symbolic-sliced-axis rejection;
+- storage-root lifetime/generation safety inherited from the contiguous-view phase;
+- generated-C offset pointer aliases and strided logical indexing;
+- fallback from flat/SSE2 selection for non-contiguous input layouts;
+- borrowed-input CPU and native execution;
+- ordered multi-output execution using both a slice and a downstream kernel;
+- dynamic specialization on unsliced symbolic axes with native-cache reuse;
+- DCE purity;
 - Ubuntu and Windows execution under Python 3.11 and 3.13.
 
-These tests establish zero-copy internal view semantics and alias correctness. They do not establish a wall-clock speedup or a measured peak-memory reduction.
+These tests establish alias/layout correctness and executable zero-copy internal slicing. They do not establish a wall-clock speedup or measured memory-footprint reduction.
 
 ## Deliberately out of scope
 
-This is not a general strided tensor subsystem. The phase does not add:
+The storage-layout abstraction is intentionally bounded. This phase does not add:
 
-- non-zero storage offsets;
-- arbitrary element strides;
+- negative or zero strides;
+- reverse slicing;
 - transpose/permutation views;
-- slicing or negative strides;
-- writable/in-place view kernels;
-- overlapping partial views;
+- multi-axis slicing in one operation;
+- writable/in-place alias kernels;
+- partial-overlap output mutation;
 - alias-aware fusion across a view;
 - caller-visible native output views;
-- a performance or memory-footprint claim.
+- arbitrary runtime slice bounds;
+- a performance or peak-memory claim.
 
-The next layout frontier should add explicit offset/stride descriptors and prove bounds/overlap/indexing semantics end-to-end before exposing transpose or slice views. Raising the number of view shapes or adding syntax aliases would be low-value farming rather than a new architecture phase.
+The next layout phase should add a genuinely new layout transformation such as verified axis permutation/transpose or a broader multi-axis view model, but only after preserving the same root-bound, generation, and backend-indexing invariants. Merely adding more slice spellings or step values would be low-value farming.
