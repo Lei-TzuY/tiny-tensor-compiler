@@ -49,6 +49,7 @@ from .runtime import execute_reference
 from .symbolic import (
     SymbolicShapeError,
     bind_dynamic_batch,
+    bind_dynamic_shapes,
     has_symbolic_shapes,
     specialize_module,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "VerificationError",
     "algebraic_simplify",
     "bind_dynamic_batch",
+    "bind_dynamic_shapes",
     "borrow_inputs",
     "canonicalize",
     "clear_native_cache",
