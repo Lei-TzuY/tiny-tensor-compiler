@@ -120,7 +120,7 @@ def run_configuration_metamorphic_campaign(
 
         minimized, evaluations = _shrink_spec(
             spec,
-            lambda candidate: _same_failure(candidate, runner, observation),
+            lambda candidate, expected=observation: _same_failure(candidate, runner, expected),
         )
         original_module, original_inputs = _materialize(spec)
         minimized_module, minimized_inputs = _materialize(minimized)
