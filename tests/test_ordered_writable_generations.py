@@ -62,7 +62,9 @@ def test_two_ordered_writes_advance_one_root_across_reference_cpu_and_native():
     reference = execute_reference(module, inputs=[base, even_patch, odd_patch])
     loops = lower_to_loops(lower_to_cpu(module))
     cpu = execute_loop(borrow_inputs(loops), inputs=[base, even_patch, odd_patch])
-    native = compile_module(module, borrow_inputs=True)(inputs=[base, even_patch, odd_patch])
+    native = compile_module(module, borrow_inputs=True, parallel=True)(
+        inputs=[base, even_patch, odd_patch]
+    )
 
     for actual in (reference, cpu, native):
         assert isinstance(actual, tuple)
@@ -125,7 +127,7 @@ def test_dynamic_ordered_writes_specialize_and_reuse_native_cache():
     _default_compiler_or_skip()
     batch = SymbolicDim("B")
     module = _two_write_module(batch)
-    executable = compile_dynamic_module(module, borrow_inputs=True)
+    executable = compile_dynamic_module(module, borrow_inputs=True, parallel=True)
 
     for size in (2, 5, 0, 2):
         base = np.arange(size * 6, dtype=np.int32).reshape(size, 6) - 3
