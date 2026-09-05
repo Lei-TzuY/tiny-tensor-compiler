@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from .c_codegen import _c_type, _element_count, _emit_input, _emit_kernel, _storage_size
+from .c_codegen import (
+    _c_type,
+    _emit_input,
+    _emit_kernel,
+    _emit_return_copy,
+    _storage_size,
+)
 from .input_binding import BorrowedLoopProgram
-from .ir import TensorType
 from .loop_ir import LoopAlloc, LoopInput, LoopProgram, LoopReturn, LoopView
 from .parallel_codegen import emit_parallel_kernel
 
@@ -14,6 +19,7 @@ def generate_c(
 ) -> str:
     """Generate deterministic C11 with one output pointer per returned tensor."""
     types = program.value_types
+    layouts = program.value_layouts
     return_types = tuple(types[slot] for slot in program.return_slots)
     output_names = (
         ("out",)
@@ -83,23 +89,25 @@ def generate_c(
                 lines.extend(_emit_input(op, types[op.output]))
             continue
         if isinstance(op, LoopView):
-            lines.append(
-                f"    const {_c_type(op.type.dtype)} *p{op.output} = p{op.source};"
-            )
+            root = program.storage_root(op.output)
+            offset = layouts[op.output].offset
+            pointer = f"p{root}" if offset == 0 else f"p{root} + {offset}"
+            lines.append(f"    const {_c_type(op.type.dtype)} *p{op.output} = {pointer};")
             lines.append("")
             continue
         if isinstance(op, LoopReturn):
             lines.extend(
-                _emit_return(
-                    op,
+                _emit_return_copy(
+                    op.buffer,
                     types[op.buffer],
+                    layouts[op.buffer],
                     output_names[return_number],
                 )
             )
             return_number += 1
             continue
         emitter = emit_parallel_kernel if parallel else _emit_kernel
-        lines.extend(emitter(op, types, kernel_number))
+        lines.extend(emitter(op, types, kernel_number, layouts=layouts))
         kernel_number += 1
 
     if return_number != len(output_names):
@@ -107,14 +115,3 @@ def generate_c(
 
     lines.append("}")
     return "\n".join(lines) + "\n"
-
-
-def _emit_return(op: LoopReturn, type_: TensorType, output_name: str) -> list[str]:
-    count = _element_count(type_)
-    if type_.shape:
-        return [
-            f"    for (int64_t r = 0; r < {count}; ++r) {{",
-            f"        {output_name}[r] = p{op.buffer}[r];",
-            "    }",
-        ]
-    return [f"    {output_name}[0] = p{op.buffer}[0];"]
