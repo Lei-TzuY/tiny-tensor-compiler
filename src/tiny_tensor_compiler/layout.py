@@ -54,7 +54,8 @@ class StorageLayout:
             raise ValueError("contiguous view reshape requires equal element counts")
         if not self.is_contiguous(source_shape):
             raise ValueError("cannot reshape a non-contiguous storage view without copying")
-        return StorageLayout.contiguous(target_shape, offset=self.offset)
+        offset = 0 if any(dim == 0 for dim in target_shape) else self.offset
+        return StorageLayout.contiguous(target_shape, offset=offset)
 
     def sliced(
         self,
@@ -72,7 +73,10 @@ class StorageLayout:
         strides = list(self.strides)
         offset = self.offset + start * strides[axis]
         strides[axis] *= step
-        return StorageLayout(offset=offset, strides=tuple(strides)), tuple(shape)
+        output_shape = tuple(shape)
+        if any(dim == 0 for dim in output_shape):
+            offset = 0
+        return StorageLayout(offset=offset, strides=tuple(strides)), output_shape
 
     def reversed(self, source_shape: tuple[int, ...], axis: int) -> StorageLayout:
         _validate_axis(source_shape, axis, operation="reverse")
@@ -82,6 +86,8 @@ class StorageLayout:
         if extent:
             offset += (extent - 1) * strides[axis]
         strides[axis] *= -1
+        if any(dim == 0 for dim in source_shape):
+            offset = 0
         return StorageLayout(offset=offset, strides=tuple(strides))
 
     def permuted(
@@ -92,7 +98,8 @@ class StorageLayout:
         permutation = normalize_permutation(len(source_shape), axes)
         shape = tuple(source_shape[axis] for axis in permutation)
         strides = tuple(self.strides[axis] for axis in permutation)
-        return StorageLayout(offset=self.offset, strides=strides), shape
+        offset = 0 if any(dim == 0 for dim in shape) else self.offset
+        return StorageLayout(offset=offset, strides=strides), shape
 
 
 def normalize_permutation(rank: int, axes: tuple[int, ...]) -> tuple[int, ...]:
