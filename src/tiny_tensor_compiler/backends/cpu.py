@@ -67,6 +67,11 @@ def execute_loop(
             raise TypeError("unsupported CPU loop operation")
 
         output = buffers[op.output]
+        if op.opcode == "reshape":
+            source = buffers[op.inputs[0]]
+            np.copyto(output.reshape(-1), source.reshape(-1))
+            continue
+
         for output_index in np.ndindex(op.iteration_shape):
             if op.opcode == "const":
                 if op.literal is None:
