@@ -16,7 +16,7 @@ All notable project milestones are recorded here.
 - Strict borrowed-input contracts requiring exact NumPy arrays with compiled shape/dtype plus C-contiguous aligned storage, so the zero-copy path never hides a normalization copy.
 - `SymbolicDim` in typed tensor IR plus conservative symbolic broadcasting for named runtime dimensions.
 - `compile_dynamic_module()` and reusable `DynamicExecutable` handles that bind one-or-more symbols on arbitrary axes, clone/reverify a fully concrete specialization, and cache one `NativeExecutable` per complete deterministic binding tuple.
-- `bind_dynamic_shapes()` plus generalized `symbolic_dims` / `cached_bindings` execution metadata while retaining the existing one-symbol `symbolic_dim`, integer `specialize(size)`, and `cached_batch_sizes` convenience surface.
+- `bind_dynamic_shapes()` plus generalized `symbolic_dims` / `cached_bindings` execution metadata while retaining the existing one-symbol `symbolic_dim`, integer `specialize()`, and `cached_batch_sizes` convenience surface.
 - Bounded one-variable `AffineDim` shape terms such as `2*B+1`, with exact runtime inversion, non-negative/integral constraint checks, concrete specialization, and unchanged physical lowering boundaries.
 - Canonical multi-symbol `LinearDim` shape relations such as `B+W` and `2*B+W+3`, with exact rational elimination over runtime input-axis equations, unique-solution enforcement, and non-negative integer binding checks.
 - Dynamic reference execution plus native multi-output, verified borrowed-input, multi-symbol broadcast, affine/relational-shape, and zero-extent coverage across distinct runtime bindings.
@@ -43,7 +43,6 @@ All notable project milestones are recorded here.
 - Ordered writable generations: each write must consume the current fresh full-root handle plus fresh target/source values, invalidates every older handle on that root, and produces the next fresh full-root handle. Fresh generations may feed ordinary computation, new views, and later writes without allocating new root storage.
 - Generated C keeps post-write full-root handles mutable for subsequent verified writes; native regressions cover multiple writes with an intervening OpenMP kernel on GCC-style and MSVC toolchains while borrowed runtime inputs remain read-only.
 - Overlap-safe same-root source semantics at the public builder boundary. Every same-root source is first materialized through an explicit owning C-order `reshape` snapshot before mutation, including shifted overlap, interleaved strides, reversed/permuted layouts, and runtime-symbolic axes; canonical tensor/Buffer/Loop `copy_into` therefore keeps its existing different-root source invariant.
-- Deterministic full-tensor `Tensor.sum()` reduction to a rank-zero tensor of the same dtype, with logical C-order left-fold semantics, exact empty-tensor zero identity, fixed-width integer step boundaries, signed-stride/permuted-view support, serial behavior under `parallel=True`, native GCC/MSVC execution, dynamic specialization, borrowed-input/multi-output composition, and pure DCE/CSE integration.
 
 ### Compatibility
 
@@ -66,7 +65,6 @@ All notable project milestones are recorded here.
 - Parallel native scheduling is opt-in; `parallel=False` retains the serial call shape and code-generation behavior. Scalar and zero-extent kernels remain serial, and the existing explicit SSE2 path keeps priority instead of stacking OpenMP onto its vector loop and scalar tail.
 - OpenMP input materialization and terminal output copies remain serial. Only verified kernel iteration is scheduled in parallel, and each emitted `parallel for` retains its implicit barrier; this phase does not introduce asynchronous kernel execution or graph-level reordering.
 - The OpenMP phase establishes executable scheduling semantics and cross-platform correctness only. It does not claim wall-clock speedup, optimal thread count, grain-size selection, or benchmark superiority.
-- Full-tensor `sum` is deterministic and deliberately serial in this phase. It preserves the input dtype, consumes values in logical C-order with one left fold, and does not yet expose axis selection, `keepdims`, parallel/tree reduction, or reduction-specific SIMD.
 
 ## [0.1.0] - 2026-09-04
 
