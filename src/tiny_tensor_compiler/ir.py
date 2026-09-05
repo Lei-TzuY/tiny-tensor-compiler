@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, TypeAlias
@@ -59,14 +59,17 @@ class SymbolicDim:
     def __rmul__(self, scale: int) -> SymbolicDim | AffineDim:
         return self * scale
 
-    def __add__(self, offset: int) -> SymbolicDim | AffineDim:
-        _validate_non_negative_offset(offset)
-        if offset == 0:
-            return self
-        return AffineDim(self, offset=offset)
+    def __add__(
+        self,
+        other: int | SymbolicDim | AffineDim | LinearDim,
+    ) -> SymbolicDim | AffineDim | LinearDim:
+        return _add_shape_expression(self, other)
 
-    def __radd__(self, offset: int) -> SymbolicDim | AffineDim:
-        return self + offset
+    def __radd__(
+        self,
+        other: int | SymbolicDim | AffineDim | LinearDim,
+    ) -> SymbolicDim | AffineDim | LinearDim:
+        return _add_shape_expression(other, self)
 
 
 @dataclass(frozen=True, order=True)
@@ -100,18 +103,17 @@ class AffineDim:
     def __rmul__(self, factor: int) -> AffineDim:
         return self * factor
 
-    def __add__(self, offset: int) -> AffineDim:
-        _validate_non_negative_offset(offset)
-        if offset == 0:
-            return self
-        return AffineDim(
-            self.symbol,
-            scale=self.scale,
-            offset=self.offset + offset,
-        )
+    def __add__(
+        self,
+        other: int | SymbolicDim | AffineDim | LinearDim,
+    ) -> SymbolicDim | AffineDim | LinearDim:
+        return _add_shape_expression(self, other)
 
-    def __radd__(self, offset: int) -> AffineDim:
-        return self + offset
+    def __radd__(
+        self,
+        other: int | SymbolicDim | AffineDim | LinearDim,
+    ) -> SymbolicDim | AffineDim | LinearDim:
+        return _add_shape_expression(other, self)
 
     def evaluate(self, binding: int) -> int:
         if not isinstance(binding, int) or isinstance(binding, bool) or binding < 0:
@@ -135,7 +137,83 @@ class AffineDim:
         return residual // self.scale
 
 
-ShapeDim: TypeAlias = int | SymbolicDim | AffineDim
+@dataclass(frozen=True)
+class LinearDim:
+    """Canonical positive linear form over at least two named dimensions."""
+
+    terms: tuple[tuple[SymbolicDim, int], ...]
+    offset: int = 0
+
+    def __post_init__(self) -> None:
+        _validate_non_negative_offset(self.offset)
+        combined: dict[SymbolicDim, int] = {}
+        for term in self.terms:
+            if not isinstance(term, tuple) or len(term) != 2:
+                raise TypeError("linear dimension terms must be (SymbolicDim, coefficient) pairs")
+            symbol, coefficient = term
+            if not isinstance(symbol, SymbolicDim):
+                raise TypeError("linear dimension terms require SymbolicDim keys")
+            _validate_positive_coefficient(coefficient)
+            combined[symbol] = combined.get(symbol, 0) + coefficient
+
+        canonical = tuple(sorted(combined.items(), key=lambda item: item[0].name))
+        if len(canonical) < 2:
+            raise ValueError("linear dimension requires at least two distinct symbols")
+        object.__setattr__(self, "terms", canonical)
+
+    @property
+    def symbolic_dims(self) -> frozenset[SymbolicDim]:
+        return frozenset(symbol for symbol, _ in self.terms)
+
+    def __str__(self) -> str:
+        pieces = [
+            str(symbol) if coefficient == 1 else f"{coefficient}*{symbol}"
+            for symbol, coefficient in self.terms
+        ]
+        if self.offset:
+            pieces.append(str(self.offset))
+        return "+".join(pieces)
+
+    def __mul__(self, factor: int) -> LinearDim:
+        _validate_positive_scale(factor)
+        if factor == 1:
+            return self
+        return LinearDim(
+            tuple((symbol, coefficient * factor) for symbol, coefficient in self.terms),
+            offset=self.offset * factor,
+        )
+
+    def __rmul__(self, factor: int) -> LinearDim:
+        return self * factor
+
+    def __add__(
+        self,
+        other: int | SymbolicDim | AffineDim | LinearDim,
+    ) -> SymbolicDim | AffineDim | LinearDim:
+        return _add_shape_expression(self, other)
+
+    def __radd__(
+        self,
+        other: int | SymbolicDim | AffineDim | LinearDim,
+    ) -> SymbolicDim | AffineDim | LinearDim:
+        return _add_shape_expression(other, self)
+
+    def evaluate(self, bindings: Mapping[SymbolicDim, int]) -> int:
+        total = self.offset
+        for symbol, coefficient in self.terms:
+            try:
+                binding = bindings[symbol]
+            except KeyError as exc:
+                raise ValueError(f"missing binding for linear dimension symbol {symbol}") from exc
+            if not isinstance(binding, int) or isinstance(binding, bool) or binding < 0:
+                raise ValueError(
+                    f"linear dimension symbol {symbol} requires a non-negative integer binding"
+                )
+            total += coefficient * binding
+        return total
+
+
+ShapeDim: TypeAlias = int | SymbolicDim | AffineDim | LinearDim
 
 
 @dataclass(frozen=True)
@@ -145,7 +223,7 @@ class TensorType:
 
     def __post_init__(self) -> None:
         for dim in self.shape:
-            if isinstance(dim, (SymbolicDim, AffineDim)):
+            if isinstance(dim, (SymbolicDim, AffineDim, LinearDim)):
                 continue
             if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
                 raise ValueError(f"invalid tensor shape: {self.shape}")
@@ -162,6 +240,8 @@ class TensorType:
                 symbols.add(dim)
             elif isinstance(dim, AffineDim):
                 symbols.add(dim.symbol)
+            elif isinstance(dim, LinearDim):
+                symbols.update(dim.symbolic_dims)
         return frozenset(symbols)
 
     def __str__(self) -> str:
@@ -331,9 +411,60 @@ class Module:
         return "\n".join(lines)
 
 
+def _add_shape_expression(
+    lhs: int | SymbolicDim | AffineDim | LinearDim,
+    rhs: int | SymbolicDim | AffineDim | LinearDim,
+) -> SymbolicDim | AffineDim | LinearDim:
+    lhs_terms, lhs_offset = _shape_expression_parts(lhs)
+    rhs_terms, rhs_offset = _shape_expression_parts(rhs)
+    coefficients = dict(lhs_terms)
+    for symbol, coefficient in rhs_terms.items():
+        coefficients[symbol] = coefficients.get(symbol, 0) + coefficient
+    return _build_shape_expression(coefficients, lhs_offset + rhs_offset)
+
+
+def _shape_expression_parts(
+    dim: int | SymbolicDim | AffineDim | LinearDim,
+) -> tuple[dict[SymbolicDim, int], int]:
+    if isinstance(dim, bool):
+        raise ValueError("symbolic shape offsets must be non-negative integers")
+    if isinstance(dim, int):
+        _validate_non_negative_offset(dim)
+        return {}, dim
+    if isinstance(dim, SymbolicDim):
+        return {dim: 1}, 0
+    if isinstance(dim, AffineDim):
+        return {dim.symbol: dim.scale}, dim.offset
+    if isinstance(dim, LinearDim):
+        return dict(dim.terms), dim.offset
+    raise TypeError(f"unsupported symbolic shape expression operand: {type(dim).__name__}")
+
+
+def _build_shape_expression(
+    coefficients: Mapping[SymbolicDim, int],
+    offset: int,
+) -> SymbolicDim | AffineDim | LinearDim:
+    _validate_non_negative_offset(offset)
+    canonical = tuple(sorted(coefficients.items(), key=lambda item: item[0].name))
+    if not canonical:
+        raise TypeError("symbolic shape expression must contain at least one symbol")
+    if len(canonical) == 1:
+        symbol, scale = canonical[0]
+        _validate_positive_scale(scale)
+        if scale == 1 and offset == 0:
+            return symbol
+        return AffineDim(symbol, scale=scale, offset=offset)
+    return LinearDim(canonical, offset=offset)
+
+
 def _validate_positive_scale(value: int) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError("affine dimension requires a positive integer scale")
+
+
+def _validate_positive_coefficient(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("linear dimension requires a positive integer coefficient")
 
 
 def _validate_non_negative_offset(value: int) -> None:
