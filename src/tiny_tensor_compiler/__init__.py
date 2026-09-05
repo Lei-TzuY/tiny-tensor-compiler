@@ -1,3 +1,4 @@
+from .alias_views import alias_contiguous_reshapes
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
@@ -18,6 +19,7 @@ from .loop_ir import (
     LoopKernel,
     LoopProgram,
     LoopReturn,
+    LoopView,
     lower_to_loops,
 )
 from .lowering import (
@@ -74,6 +76,7 @@ __all__ = [
     "LoopKernel",
     "LoopProgram",
     "LoopReturn",
+    "LoopView",
     "MemoryPlan",
     "NativeCompilationError",
     "NativeExecutable",
@@ -83,6 +86,7 @@ __all__ = [
     "TypeInferenceError",
     "VerificationError",
     "algebraic_simplify",
+    "alias_contiguous_reshapes",
     "bind_dynamic_batch",
     "bind_dynamic_shapes",
     "borrow_inputs",
