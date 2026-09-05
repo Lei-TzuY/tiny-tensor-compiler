@@ -4,7 +4,7 @@ from collections import Counter
 
 import numpy as np
 
-from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape
+from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape, infer_slice
 from .ir import DType, Module, Operation, TensorType, Value
 
 
@@ -46,6 +46,8 @@ def verify(module: Module) -> None:
             _verify_relu(op_index, op)
         elif op.opcode in {"reshape", "view"}:
             _verify_shape_transform(op_index, op)
+        elif op.opcode == "slice":
+            _verify_slice(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -146,6 +148,22 @@ def _verify_shape_transform(op_index: int, op: Operation) -> None:
             op_index,
             op,
             f"{op.opcode} result type {op.results[0].type} does not match inferred type {expected_type}",
+        )
+
+
+def _verify_slice(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=1, results=1)
+    if set(op.attrs) != {"axis", "start", "stop", "step"}:
+        _fail(op_index, op, "slice requires axis/start/stop/step attributes")
+    try:
+        expected_type = infer_slice(op.operands[0].type, **op.attrs)
+    except (TypeError, TypeInferenceError) as exc:
+        _fail(op_index, op, str(exc))
+    if op.results[0].type != expected_type:
+        _fail(
+            op_index,
+            op,
+            f"slice result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
