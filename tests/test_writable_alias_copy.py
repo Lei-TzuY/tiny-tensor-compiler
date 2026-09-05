@@ -65,7 +65,7 @@ def test_copy_into_result_is_alias_without_new_physical_storage():
     assert alias.physical == plan.physical_for(copy.root)
     assert len(loops.copies) == 1
     loop_copy = loops.copies[0]
-    assert loops.storage_root(loop_copy.output) == loop_copy.root
+    assert loops.storage_root(loop_copy.output) == loops.storage_root(loop_copy.root)
     assert loop_copy.output not in {alloc.buffer for alloc in loops.allocations}
 
 
@@ -106,7 +106,7 @@ def test_generated_c_writes_root_through_target_layout_and_defines_fresh_alias()
 
     assert "copy_into" not in source
     assert f"p{copy.root}[" in source
-    assert f"const int32_t *p{copy.output} = p{copy.root};" in source
+    assert f"int32_t *p{copy.output} = p{copy.root};" in source
     assert "* 2" in source
 
 
@@ -138,7 +138,17 @@ def test_copy_into_rejects_same_root_source_and_type_mismatch():
         owned.copy_into(target, patch)
 
 
-def test_copy_into_is_terminal_effect_and_old_handles_cannot_be_used_after_write():
+def test_copy_into_allows_fresh_post_write_use_but_rejects_stale_handles():
+    builder = GraphBuilder()
+    base = builder.input((2, 4), dtype="int32")
+    patch = builder.input((2, 2), dtype="int32")
+    owned = base.relu()
+    target = owned.slice(axis=1, start=0, stop=4, step=2)
+    updated = owned.copy_into(target, patch)
+    fresh_use = updated.relu()
+    module = builder.finish(fresh_use)
+    verify(module)
+
     builder = GraphBuilder()
     base = builder.input((2, 4), dtype="int32")
     patch = builder.input((2, 2), dtype="int32")
@@ -147,8 +157,7 @@ def test_copy_into_is_terminal_effect_and_old_handles_cannot_be_used_after_write
     owned.copy_into(target, patch)
     stale_use = owned.relu()
     module = builder.finish(stale_use)
-
-    with pytest.raises(VerificationError, match="copy_into must be the final effect"):
+    with pytest.raises(VerificationError, match="stale tensor view/alias"):
         verify(module)
 
     builder = GraphBuilder()
@@ -158,7 +167,7 @@ def test_copy_into_is_terminal_effect_and_old_handles_cannot_be_used_after_write
     target = owned.slice(axis=1, start=0, stop=4, step=2)
     updated = owned.copy_into(target, patch)
     module = builder.finish((updated, target))
-    with pytest.raises(VerificationError, match="stale alias"):
+    with pytest.raises(VerificationError, match="stale tensor view/alias"):
         verify(module)
 
 
