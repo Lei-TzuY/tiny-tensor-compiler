@@ -18,7 +18,6 @@ def emit_copy_into(
 
     target_layout = layouts[op.target]
     source_layout = layouts[op.source]
-    c_type = _c_type(target_type.dtype)
     lines = ["    {"]
 
     if not target_type.shape:
