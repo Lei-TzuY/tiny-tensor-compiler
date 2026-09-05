@@ -44,8 +44,8 @@ def verify(module: Module) -> None:
             _verify_binary(op_index, op)
         elif op.opcode == "relu":
             _verify_relu(op_index, op)
-        elif op.opcode == "reshape":
-            _verify_reshape(op_index, op)
+        elif op.opcode in {"reshape", "view"}:
+            _verify_shape_transform(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -133,10 +133,10 @@ def _verify_relu(op_index: int, op: Operation) -> None:
         )
 
 
-def _verify_reshape(op_index: int, op: Operation) -> None:
+def _verify_shape_transform(op_index: int, op: Operation) -> None:
     _expect_arity(op_index, op, operands=1, results=1)
     if op.attrs:
-        _fail(op_index, op, "reshape does not accept attributes")
+        _fail(op_index, op, f"{op.opcode} does not accept attributes")
     try:
         expected_type = infer_reshape(op.operands[0].type, op.results[0].type.shape)
     except TypeInferenceError as exc:
@@ -145,7 +145,7 @@ def _verify_reshape(op_index: int, op: Operation) -> None:
         _fail(
             op_index,
             op,
-            f"reshape result type {op.results[0].type} does not match inferred type {expected_type}",
+            f"{op.opcode} result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
