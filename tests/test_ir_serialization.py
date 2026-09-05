@@ -112,6 +112,23 @@ def test_constant_payload_round_trip_preserves_exact_float32_bits():
     assert serialize_module(restored) == document
 
 
+def test_scalar_constant_round_trip_preserves_rank_zero_shape():
+    builder = GraphBuilder()
+    module = builder.finish(builder.tensor(7, dtype="int32"))
+
+    document = serialize_module(module)
+    payload = json.loads(document)
+    encoded_value = payload["function"]["ops"][0]["attrs"]["value"]
+    restored = deserialize_module(document)
+    restored_value = restored.function.ops[0].attrs["value"]
+
+    assert encoded_value["shape"] == []
+    assert restored.function.ops[0].results[0].type.shape == ()
+    assert restored_value.shape == ()
+    assert restored_value.item() == 7
+    assert serialize_module(restored) == document
+
+
 def test_equivalent_modules_have_identical_canonical_bytes_and_fingerprint():
     lhs = _build_alias_effect_module()
     rhs = _build_alias_effect_module()
