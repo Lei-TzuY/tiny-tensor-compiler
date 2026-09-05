@@ -8,7 +8,14 @@ import numpy as np
 from . import fused_expr
 from .inference import infer_binary, infer_relu, infer_reshape
 from .ir import DType, TensorType
-from .lowering import BufferAlloc, BufferInput, BufferReturn, CPUProgram, plan_memory
+from .lowering import (
+    BufferAlloc,
+    BufferInput,
+    BufferReturn,
+    BufferView,
+    CPUProgram,
+    plan_memory,
+)
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,13 @@ class LoopInput:
 
 
 @dataclass(frozen=True)
+class LoopView:
+    output: int
+    source: int
+    type: TensorType
+
+
+@dataclass(frozen=True)
 class LoopKernel:
     opcode: str
     output: int
@@ -54,7 +68,7 @@ class LoopReturn:
     buffer: int
 
 
-LoopOperation = LoopAlloc | LoopInput | LoopKernel | LoopReturn
+LoopOperation = LoopAlloc | LoopInput | LoopView | LoopKernel | LoopReturn
 
 
 @dataclass(frozen=True)
@@ -73,8 +87,18 @@ class LoopProgram:
         return tuple(op for op in self.operations if isinstance(op, LoopInput))
 
     @property
-    def input_types(self) -> tuple[TensorType, ...]:
+    def views(self) -> tuple[LoopView, ...]:
+        return tuple(op for op in self.operations if isinstance(op, LoopView))
+
+    @property
+    def value_types(self) -> dict[int, TensorType]:
         types = {alloc.buffer: alloc.type for alloc in self.allocations}
+        types.update({view.output: view.type for view in self.views})
+        return types
+
+    @property
+    def input_types(self) -> tuple[TensorType, ...]:
+        types = self.value_types
         return tuple(types[op.output] for op in self.inputs)
 
     @property
@@ -95,6 +119,17 @@ class LoopProgram:
             )
         return slots[0]
 
+    def storage_root(self, buffer: int) -> int:
+        roots = {alloc.buffer: alloc.buffer for alloc in self.allocations}
+        for view in self.views:
+            if view.source not in roots:
+                raise KeyError(f"view source p{view.source} has no storage root")
+            roots[view.output] = roots[view.source]
+        try:
+            return roots[buffer]
+        except KeyError as exc:
+            raise KeyError(f"loop value p{buffer} has no storage root") from exc
+
     def dump(self) -> str:
         lines: list[str] = []
         for op in self.operations:
@@ -103,6 +138,9 @@ class LoopProgram:
                 continue
             if isinstance(op, LoopInput):
                 lines.append(f"p{op.output} = input {op.index}")
+                continue
+            if isinstance(op, LoopView):
+                lines.append(f"p{op.output} = view p{op.source} : {op.type}")
                 continue
             if isinstance(op, LoopReturn):
                 lines.append(f"return p{op.buffer}")
@@ -138,9 +176,13 @@ def fused_expression_for_kernel(op: LoopKernel) -> fused_expr.FusedExpression | 
 
 
 def lower_to_loops(program: CPUProgram) -> LoopProgram:
-    """Lower verified virtual-buffer operations to explicit physical-buffer loops."""
+    """Lower verified virtual-buffer operations to storage roots plus logical loop views."""
     plan = plan_memory(program)
     virtual_types = {alloc.buffer: alloc.type for alloc in program.allocations}
+    virtual_handles = {
+        assignment.virtual: assignment.physical for assignment in plan.assignments
+    }
+    next_handle = plan.physical_count
     operations: list[LoopOperation] = [
         LoopAlloc(slot, buffer_type) for slot, buffer_type in enumerate(plan.physical_types)
     ]
@@ -149,10 +191,17 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
         if isinstance(op, BufferAlloc):
             continue
         if isinstance(op, BufferInput):
-            operations.append(LoopInput(plan.physical_for(op.output), op.index))
+            operations.append(LoopInput(virtual_handles[op.output], op.index))
+            continue
+        if isinstance(op, BufferView):
+            source = virtual_handles[op.source]
+            handle = next_handle
+            next_handle += 1
+            virtual_handles[op.output] = handle
+            operations.append(LoopView(handle, source, virtual_types[op.output]))
             continue
         if isinstance(op, BufferReturn):
-            operations.append(LoopReturn(plan.physical_for(op.buffer)))
+            operations.append(LoopReturn(virtual_handles[op.buffer]))
             continue
 
         output_type = virtual_types[op.output]
@@ -168,8 +217,8 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
         operations.append(
             LoopKernel(
                 opcode=op.opcode,
-                output=plan.physical_for(op.output),
-                inputs=tuple(plan.physical_for(buffer) for buffer in op.inputs),
+                output=virtual_handles[op.output],
+                inputs=tuple(virtual_handles[buffer] for buffer in op.inputs),
                 iteration_shape=output_type.shape,
                 input_maps=input_maps,
                 literal=op.literal,
@@ -206,9 +255,11 @@ def _broadcast_index_map(input_shape: tuple[int, ...], output_shape: tuple[int, 
 
 def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
     allocated: dict[int, TensorType] = {}
+    types: dict[int, TensorType] = {}
+    roots: dict[int, int] = {}
     written: set[int] = set()
     next_input_index = 0
-    saw_kernel = False
+    saw_execution = False
     saw_return = False
 
     for index, op in enumerate(operations):
@@ -216,19 +267,21 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             raise ValueError("loop IR operation appears after return")
 
         if isinstance(op, LoopAlloc):
-            if saw_kernel:
+            if saw_execution:
                 raise ValueError("physical buffer allocation appears after loop execution begins")
             if op.buffer < 0:
                 raise ValueError(f"invalid negative physical buffer p{op.buffer}")
-            if op.buffer in allocated:
+            if op.buffer in types:
                 raise ValueError(f"physical buffer p{op.buffer} is allocated more than once")
             allocated[op.buffer] = op.type
+            types[op.buffer] = op.type
+            roots[op.buffer] = op.buffer
             continue
 
         if isinstance(op, LoopInput):
-            saw_kernel = True
+            saw_execution = True
             if op.output not in allocated:
-                raise ValueError(f"loop input destination p{op.output} is not allocated")
+                raise ValueError(f"loop input destination p{op.output} is not allocated storage")
             if op.index != next_input_index:
                 raise ValueError(
                     f"input index {op.index} is not the next dense input index {next_input_index}"
@@ -237,19 +290,38 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             written.add(op.output)
             continue
 
+        if isinstance(op, LoopView):
+            saw_execution = True
+            if op.output < 0:
+                raise ValueError(f"invalid negative loop view id p{op.output}")
+            if op.output in types:
+                raise ValueError(f"loop view p{op.output} collides with an existing loop value")
+            if op.source not in types:
+                raise ValueError(f"loop view source p{op.source} is not defined")
+            if op.source not in written:
+                raise ValueError(f"loop view source p{op.source} is not written")
+            expected = infer_reshape(types[op.source], op.type.shape)
+            if expected != op.type:
+                raise ValueError("loop view type does not match contiguous reshape inference")
+            types[op.output] = op.type
+            roots[op.output] = roots[op.source]
+            written.add(op.output)
+            continue
+
         if isinstance(op, LoopKernel):
-            saw_kernel = True
+            saw_execution = True
             if op.output not in allocated:
-                raise ValueError(f"loop output p{op.output} is not allocated")
-            if op.output in op.inputs:
-                raise ValueError("loop kernels do not permit in-place input/output aliasing")
+                raise ValueError(f"loop output p{op.output} is not allocated storage")
             for buffer in op.inputs:
-                if buffer not in allocated:
-                    raise ValueError(f"loop input p{buffer} is not allocated")
+                if buffer not in types:
+                    raise ValueError(f"loop input p{buffer} is not defined")
                 if buffer not in written:
                     raise ValueError(f"loop input p{buffer} is read before being written")
+            output_root = roots[op.output]
+            if any(roots[buffer] == output_root for buffer in op.inputs):
+                raise ValueError("loop kernels do not permit output/input storage aliasing")
 
-            output_type = allocated[op.output]
+            output_type = types[op.output]
             if op.iteration_shape != output_type.shape:
                 raise ValueError("loop iteration shape must match output buffer shape")
 
@@ -269,21 +341,21 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             elif op.opcode in {"add", "mul"}:
                 if len(op.inputs) != 2 or len(op.input_maps) != 2 or op.literal is not None:
                     raise ValueError(f"{op.opcode} loop requires two inputs and two index maps")
-                expected = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
+                expected = infer_binary(types[op.inputs[0]], types[op.inputs[1]])
                 if expected != output_type:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
-                _verify_index_maps(op, allocated)
+                _verify_index_maps(op, types)
             elif op.opcode == "relu":
                 if len(op.inputs) != 1 or len(op.input_maps) != 1 or op.literal is not None:
                     raise ValueError("relu loop requires one input and one index map")
-                expected = infer_relu(allocated[op.inputs[0]])
+                expected = infer_relu(types[op.inputs[0]])
                 if expected != output_type:
                     raise ValueError("relu loop output buffer type does not match inference")
-                _verify_index_maps(op, allocated)
+                _verify_index_maps(op, types)
             elif op.opcode == "reshape":
                 if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
                     raise ValueError("reshape loop requires one input, no index maps, and no literal")
-                expected = infer_reshape(allocated[op.inputs[0]], output_type.shape)
+                expected = infer_reshape(types[op.inputs[0]], output_type.shape)
                 if expected != output_type:
                     raise ValueError("reshape loop output buffer type does not match inference")
             elif op.opcode in {"relu_add", "relu_mul"}:
@@ -291,26 +363,26 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError(
                         f"{op.opcode} loop requires two inputs and two index maps"
                     )
-                binary_type = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
+                binary_type = infer_binary(types[op.inputs[0]], types[op.inputs[1]])
                 expected = infer_relu(binary_type)
                 if expected != output_type:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
-                _verify_index_maps(op, allocated)
+                _verify_index_maps(op, types)
             else:
                 expression = fused_expression_for_kernel(op)
                 if expression is None:
                     raise ValueError(f"unsupported loop kernel: {op.opcode}")
-                _verify_fused_expression(op, expression, allocated, output_type)
+                _verify_fused_expression(op, expression, types, output_type)
 
             written.add(op.output)
             continue
 
         if not isinstance(op, LoopReturn):
             raise TypeError(f"unsupported loop IR operation at index {index}")
-        if op.buffer not in allocated:
-            raise ValueError(f"returned physical buffer p{op.buffer} is not allocated")
+        if op.buffer not in types:
+            raise ValueError(f"returned loop value p{op.buffer} is not defined")
         if op.buffer not in written:
-            raise ValueError(f"returned physical buffer p{op.buffer} is not written")
+            raise ValueError(f"returned loop value p{op.buffer} is not written")
         saw_return = True
 
     if not saw_return:
@@ -322,7 +394,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
 def _verify_fused_expression(
     op: LoopKernel,
     expression: fused_expr.FusedExpression,
-    allocated: dict[int, TensorType],
+    types: dict[int, TensorType],
     output_type: TensorType,
 ) -> None:
     arity_word = {3: "three", 4: "four", 5: "five"}.get(
@@ -340,11 +412,11 @@ def _verify_fused_expression(
 
     if output_type.dtype not in {DType.INT32, DType.INT64}:
         raise ValueError(f"{expression.display_name} loop requires an integer output dtype")
-    if any(allocated[buffer].dtype != output_type.dtype for buffer in op.inputs):
+    if any(types[buffer].dtype != output_type.dtype for buffer in op.inputs):
         raise ValueError(f"{expression.display_name} loop requires one exact integer dtype")
 
     refs = {
-        name: allocated[buffer]
+        name: types[buffer]
         for name, buffer in zip(expression.input_names, op.inputs, strict=True)
     }
     for step_index, step in enumerate(expression.steps):
@@ -366,12 +438,12 @@ def _verify_fused_expression(
             f"{op.opcode} loop intermediate {intermediate} must match its output type"
         )
 
-    _verify_index_maps(op, allocated)
+    _verify_index_maps(op, types)
 
 
-def _verify_index_maps(op: LoopKernel, allocated: dict[int, TensorType]) -> None:
+def _verify_index_maps(op: LoopKernel, types: dict[int, TensorType]) -> None:
     for buffer, index_map in zip(op.inputs, op.input_maps, strict=True):
-        expected = _broadcast_index_map(allocated[buffer].shape, op.iteration_shape)
+        expected = _broadcast_index_map(types[buffer].shape, op.iteration_shape)
         if index_map != expected:
             raise ValueError("loop input index map does not match broadcasting semantics")
 
