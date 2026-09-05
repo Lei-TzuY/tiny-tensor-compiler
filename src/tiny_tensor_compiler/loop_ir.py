@@ -89,7 +89,7 @@ class LoopProgram:
     @property
     def buffer_types(self) -> dict[int, TensorType]:
         types: dict[int, TensorType] = {alloc.buffer: alloc.type for alloc in self.allocations}
-        types.update(view.output, view.type for view in self.views)
+        types.update((view.output, view.type) for view in self.views)
         return types
 
     @property
@@ -360,6 +360,11 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if op.output in view_positions:
                     raise ValueError("loop alias views are read-only and cannot be kernel outputs")
                 raise ValueError(f"loop output p{op.output} is not allocated")
+            for buffer in op.inputs:
+                if buffer not in buffer_types:
+                    raise ValueError(f"loop input p{buffer} is not declared")
+                if buffer not in written:
+                    raise ValueError(f"loop input p{buffer} is read before being written")
             _verify_storage_write_safety(
                 position=index,
                 output=op.output,
@@ -369,11 +374,6 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             )
             if any(roots[op.output] == roots[buffer] for buffer in op.inputs):
                 raise ValueError("loop kernels do not permit input/output storage aliasing")
-            for buffer in op.inputs:
-                if buffer not in buffer_types:
-                    raise ValueError(f"loop input p{buffer} is not declared")
-                if buffer not in written:
-                    raise ValueError(f"loop input p{buffer} is read before being written")
 
             output_type = allocated[op.output]
             if op.iteration_shape != output_type.shape:
