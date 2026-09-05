@@ -223,19 +223,18 @@ def test_registry_publish_fetch_and_load_are_content_addressed_and_compiler_free
         assert executable.closed
 
         assert any(method == "PUT" for method, _path, _auth in state.requests)
-        assert all(
-            auth == "Bearer secret"
-            for _method, _path, auth in state.requests
-        )
+        assert all(auth == "Bearer secret" for _method, _path, auth in state.requests)
 
 
 def test_registry_requires_explicit_opt_in_for_plain_http(tmp_path: Path) -> None:
     from tiny_tensor_compiler.native_bundle_registry import publish_dynamic_bundle_set_archive
 
     archive = _compile_archive(tmp_path)
-    with _registry_server() as (registry, _state):
-        with pytest.raises(ValueError, match="allow_insecure_http=True"):
-            publish_dynamic_bundle_set_archive(archive, registry)
+    with (
+        _registry_server() as (registry, _state),
+        pytest.raises(ValueError, match="allow_insecure_http=True"),
+    ):
+        publish_dynamic_bundle_set_archive(archive, registry)
 
 
 def test_registry_fetch_rejects_server_substitution_and_cleans_destination(
