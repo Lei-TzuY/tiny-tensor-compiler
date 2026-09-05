@@ -6,6 +6,7 @@ import numpy as np
 
 from .ir import AffineDim, DType, LinearDim, ShapeDim, SymbolicDim, TensorType
 from .layout import normalize_permutation
+from .reduction import ReductionOperator
 
 
 class TypeInferenceError(ValueError):
@@ -27,25 +28,56 @@ def infer_relu(input_type: TensorType) -> TensorType:
     return input_type
 
 
-def normalize_sum_axis(input_type: TensorType, axis: int) -> int:
+def normalize_reduction_axis(
+    input_type: TensorType,
+    axis: int,
+    operator: ReductionOperator,
+) -> int:
     """Normalize one Python-style reduction axis to canonical non-negative form."""
     if not isinstance(axis, int) or isinstance(axis, bool):
-        raise TypeInferenceError("sum axis must be an integer")
+        raise TypeInferenceError(f"{operator.value} axis must be an integer")
     rank = len(input_type.shape)
     if axis < -rank or axis >= rank:
-        raise TypeInferenceError(f"sum axis {axis} is out of range for rank {rank}")
+        raise TypeInferenceError(
+            f"{operator.value} axis {axis} is out of range for rank {rank}"
+        )
     return axis + rank if axis < 0 else axis
 
 
-def infer_sum(input_type: TensorType, axis: int | None = None) -> TensorType:
-    """Infer a deterministic full-tensor or single-axis same-dtype sum."""
+def infer_reduction(
+    input_type: TensorType,
+    operator: ReductionOperator,
+    axis: int | None = None,
+) -> TensorType:
+    """Infer one deterministic same-dtype full-tensor or single-axis reduction."""
     if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
-        raise TypeInferenceError(f"sum requires a numeric tensor, got {input_type.dtype.value}")
+        raise TypeInferenceError(
+            f"{operator.value} requires a numeric tensor, got {input_type.dtype.value}"
+        )
     if axis is None:
         return TensorType((), input_type.dtype)
-    normalized_axis = normalize_sum_axis(input_type, axis)
+    normalized_axis = normalize_reduction_axis(input_type, axis, operator)
     shape = input_type.shape[:normalized_axis] + input_type.shape[normalized_axis + 1 :]
     return TensorType(shape, input_type.dtype)
+
+
+def normalize_sum_axis(input_type: TensorType, axis: int) -> int:
+    """Compatibility wrapper for the historical sum-axis API."""
+    return normalize_reduction_axis(input_type, axis, ReductionOperator.SUM)
+
+
+def normalize_prod_axis(input_type: TensorType, axis: int) -> int:
+    return normalize_reduction_axis(input_type, axis, ReductionOperator.PRODUCT)
+
+
+def infer_sum(input_type: TensorType, axis: int | None = None) -> TensorType:
+    """Compatibility wrapper for deterministic sum inference."""
+    return infer_reduction(input_type, ReductionOperator.SUM, axis)
+
+
+def infer_prod(input_type: TensorType, axis: int | None = None) -> TensorType:
+    """Infer a deterministic full-tensor or single-axis same-dtype product."""
+    return infer_reduction(input_type, ReductionOperator.PRODUCT, axis)
 
 
 def infer_reshape(input_type: TensorType, shape: Iterable[ShapeDim]) -> TensorType:
