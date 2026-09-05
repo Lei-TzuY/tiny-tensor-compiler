@@ -78,7 +78,7 @@ def contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
     running = 1
     for axis in range(len(shape) - 1, -1, -1):
         strides[axis] = running
-        running *= shape[axis]
+        running *= max(shape[axis], 1)
     return tuple(strides)
 
 
@@ -114,7 +114,7 @@ def _validate_slice(
         raise ValueError("slice step must be a positive integer")
     extent = shape[axis]
     if not isinstance(extent, int) or isinstance(extent, bool):
-        raise ValueError("slice axis extent must be concrete")
+        raise TypeError("slice axis extent must be concrete")
     if start < 0 or stop < 0 or start > stop or stop > extent:
         raise ValueError(
             f"slice bounds must satisfy 0 <= start <= stop <= extent ({extent})"
