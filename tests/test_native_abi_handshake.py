@@ -77,8 +77,12 @@ def test_native_loader_rejects_real_library_with_wrong_embedded_abi():
             command,
             Path(directory),
         )
-        with pytest.raises(NativeCompilationError, match="native ABI fingerprint mismatch"):
-            native_module._load_library(library_path, expected_abi_sha256=expected)
+        library = native_module._load_library(library_path)
+        try:
+            with pytest.raises(NativeCompilationError, match="native ABI fingerprint mismatch"):
+                native_module._verify_native_abi(library, expected)
+        finally:
+            native_module._release_library(library)
 
 
 def test_persistent_cache_rebuilds_self_consistent_wrong_abi_artifact(tmp_path, monkeypatch):
@@ -137,14 +141,14 @@ def test_reusable_native_handle_revalidates_abi_after_cache_clear(monkeypatch):
     loops = _loops()
     executable = native_module.compile_native(loops)
     expected = native_abi_sha256(loops)
-    original_load_library = native_module._load_library
-    observed: list[str | None] = []
+    original_verify_native_abi = native_module._verify_native_abi
+    observed: list[str] = []
 
-    def recording_load_library(path, *, expected_abi_sha256=None):
+    def recording_verify_native_abi(library, expected_abi_sha256):
         observed.append(expected_abi_sha256)
-        return original_load_library(path, expected_abi_sha256=expected_abi_sha256)
+        return original_verify_native_abi(library, expected_abi_sha256)
 
-    monkeypatch.setattr(native_module, "_load_library", recording_load_library)
+    monkeypatch.setattr(native_module, "_verify_native_abi", recording_verify_native_abi)
     native_module.clear_native_cache()
     result = executable(inputs=[np.array([-2, 0, 3], dtype=np.int32)])
 
