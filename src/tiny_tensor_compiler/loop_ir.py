@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from . import fused_expr
-from .inference import infer_binary, infer_relu
+from .inference import infer_binary, infer_relu, infer_reshape
 from .ir import DType, TensorType
 from .lowering import BufferAlloc, BufferInput, BufferReturn, CPUProgram, plan_memory
 
@@ -116,6 +116,8 @@ class LoopProgram:
                 literal = _format_literal(op.literal)
                 literal_index = "" if op.literal.ndim == 0 else output_index
                 rhs = f"const {literal}{literal_index}"
+            elif op.opcode == "reshape":
+                rhs = f"reshape p{op.inputs[0]}[linear]"
             else:
                 operands = ", ".join(
                     f"p{buffer}{_format_index(index_map.axes)}"
@@ -155,16 +157,21 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
 
         output_type = virtual_types[op.output]
         input_types = tuple(virtual_types[buffer] for buffer in op.inputs)
+        input_maps = (
+            ()
+            if op.opcode == "reshape"
+            else tuple(
+                _broadcast_index_map(input_type.shape, output_type.shape)
+                for input_type in input_types
+            )
+        )
         operations.append(
             LoopKernel(
                 opcode=op.opcode,
                 output=plan.physical_for(op.output),
                 inputs=tuple(plan.physical_for(buffer) for buffer in op.inputs),
                 iteration_shape=output_type.shape,
-                input_maps=tuple(
-                    _broadcast_index_map(input_type.shape, output_type.shape)
-                    for input_type in input_types
-                ),
+                input_maps=input_maps,
                 literal=op.literal,
             )
         )
@@ -273,6 +280,12 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if expected != output_type:
                     raise ValueError("relu loop output buffer type does not match inference")
                 _verify_index_maps(op, allocated)
+            elif op.opcode == "reshape":
+                if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
+                    raise ValueError("reshape loop requires one input, no index maps, and no literal")
+                expected = infer_reshape(allocated[op.inputs[0]], output_type.shape)
+                if expected != output_type:
+                    raise ValueError("reshape loop output buffer type does not match inference")
             elif op.opcode in {"relu_add", "relu_mul"}:
                 if len(op.inputs) != 2 or len(op.input_maps) != 2 or op.literal is not None:
                     raise ValueError(
