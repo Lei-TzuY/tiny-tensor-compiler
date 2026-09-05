@@ -17,6 +17,13 @@ from .configuration_metamorphic import (
     _native_configuration_runner,
     run_configuration_metamorphic_campaign,
 )
+from .cross_compiler_metamorphic import (
+    CROSS_COMPILER_CONFIGURATIONS,
+    CompilerRunner,
+    CrossCompilerMetamorphicFailure,
+    _native_compiler_runner,
+    run_cross_compiler_metamorphic_campaign,
+)
 from .differential import (
     CandidateRunner,
     DifferentialFailure,
@@ -40,10 +47,14 @@ from .repro import (
 _FORMAT_NAME = "tiny-tensor-verification-corpus"
 _FORMAT_VERSION_V1 = 1
 _FORMAT_VERSION_V2 = 2
+_FORMAT_VERSION_V3 = 3
 _UINT64_MAX = (1 << 64) - 1
 _CONFIGURATION_NAMES = frozenset(configuration.name for configuration in NATIVE_CONFIGURATIONS)
 _CONFIGURATION_BY_NAME = {configuration.name: configuration for configuration in NATIVE_CONFIGURATIONS}
 _BASELINE_CONFIGURATION = NATIVE_CONFIGURATIONS[0].name
+_COMPILER_NAMES = frozenset(configuration.name for configuration in CROSS_COMPILER_CONFIGURATIONS)
+_COMPILER_BY_NAME = {configuration.name: configuration for configuration in CROSS_COMPILER_CONFIGURATIONS}
+_BASELINE_COMPILER = CROSS_COMPILER_CONFIGURATIONS[0].name
 
 
 class VerificationCorpusError(ValueError):
@@ -62,6 +73,8 @@ class VerificationCorpusEntry:
     entry_sha256: str
     baseline_configuration: str | None = None
     failing_configuration: str | None = None
+    baseline_compiler: str | None = None
+    failing_compiler: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +168,28 @@ def collect_configuration_corpus(
     return VerificationCorpus(_merge_entries(entries))
 
 
+def collect_cross_compiler_corpus(
+    *,
+    start_seed: int,
+    cases: int,
+    compiler_runner: CompilerRunner | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> VerificationCorpus:
+    """Persist deduplicated failures from the canonical GCC/Clang compiler oracle."""
+    first_seed = _require_campaign_range(start_seed, cases)
+    entries: list[VerificationCorpusEntry] = []
+    for offset in range(cases):
+        result = run_cross_compiler_metamorphic_campaign(
+            start_seed=first_seed + offset,
+            cases=1,
+            compiler_runner=compiler_runner,
+            cache_dir=cache_dir,
+        )
+        if result.failure is not None:
+            entries.append(_entry_from_cross_compiler_failure(result.failure))
+    return VerificationCorpus(_merge_entries(entries))
+
+
 def merge_verification_corpora(*corpora: VerificationCorpus) -> VerificationCorpus:
     """Merge corpora by canonical failure identity and union sorted witness seeds."""
     entries: list[VerificationCorpusEntry] = []
@@ -169,17 +204,18 @@ def serialize_verification_corpus(corpus: VerificationCorpus) -> str:
     """Serialize one corpus as canonical versioned JSON.
 
     Pure differential/metamorphic corpora retain the historical byte-compatible
-    version-1 format. A corpus containing configuration-specific failure entries
-    is promoted to version 2.
+    version-1 format. Configuration-specific entries promote the document to
+    version 2, while compiler-pair entries explicitly promote it to version 3.
     """
     if not isinstance(corpus, VerificationCorpus):
         raise TypeError("serialize_verification_corpus requires a VerificationCorpus")
     entries = _merge_entries(corpus.entries)
-    version = (
-        _FORMAT_VERSION_V2
-        if any(entry.kind == "configuration" for entry in entries)
-        else _FORMAT_VERSION_V1
-    )
+    if any(entry.kind == "compiler" for entry in entries):
+        version = _FORMAT_VERSION_V3
+    elif any(entry.kind == "configuration" for entry in entries):
+        version = _FORMAT_VERSION_V2
+    else:
+        version = _FORMAT_VERSION_V1
     payload = {
         "entries": [_entry_payload(entry) for entry in entries],
         "format": _FORMAT_NAME,
@@ -206,7 +242,7 @@ def load_verification_corpus(document: str) -> VerificationCorpus:
     if (
         not isinstance(version, int)
         or isinstance(version, bool)
-        or version not in {_FORMAT_VERSION_V1, _FORMAT_VERSION_V2}
+        or version not in {_FORMAT_VERSION_V1, _FORMAT_VERSION_V2, _FORMAT_VERSION_V3}
     ):
         raise VerificationCorpusError(f"unsupported verification corpus version: {version!r}")
 
@@ -226,10 +262,17 @@ def load_verification_corpus(document: str) -> VerificationCorpus:
         entries.append(entry)
 
     has_configuration = any(entry.kind == "configuration" for entry in entries)
-    if version == _FORMAT_VERSION_V1 and has_configuration:
-        raise VerificationCorpusError("verification corpus version 1 cannot contain configuration entries")
+    has_compiler = any(entry.kind == "compiler" for entry in entries)
+    if version == _FORMAT_VERSION_V1 and (has_configuration or has_compiler):
+        raise VerificationCorpusError(
+            "verification corpus version 1 cannot contain configuration or compiler entries"
+        )
+    if version == _FORMAT_VERSION_V2 and has_compiler:
+        raise VerificationCorpusError("verification corpus version 2 cannot contain compiler entries")
     if version == _FORMAT_VERSION_V2 and not has_configuration:
         raise VerificationCorpusError("verification corpus version 2 requires a configuration entry")
+    if version == _FORMAT_VERSION_V3 and not has_compiler:
+        raise VerificationCorpusError("verification corpus version 3 requires a compiler entry")
 
     corpus = VerificationCorpus(tuple(entries))
     canonical = serialize_verification_corpus(corpus)
@@ -270,10 +313,10 @@ def replay_verification_corpus(
 ) -> VerificationCorpusReplayResult:
     """Replay every minimized corpus artifact through one supported backend.
 
-    Native replay of a configuration entry executes the stored baseline/failing
-    configuration pair. Each execution must now agree with the captured reference
-    result, making a fixed historical configuration divergence a regression gate.
-    The global ``parallel`` option still applies to non-configuration entries only.
+    Native replay of configuration/compiler entries executes their stored
+    canonical pair. Every execution must now agree with the captured reference
+    result, making a fixed historical divergence a deterministic regression gate.
+    Global ``parallel`` applies only to ordinary differential/metamorphic entries.
     """
     if backend not in {"reference", "native"}:
         raise ValueError("backend must be 'reference' or 'native'")
@@ -281,18 +324,30 @@ def replay_verification_corpus(
         raise ValueError("compiler, cache_dir, and parallel are native-backend options")
 
     corpus = load_verification_corpus(document)
+    has_compiler_entries = any(entry.kind == "compiler" for entry in corpus.entries)
+    if backend == "native" and has_compiler_entries and compiler is not None:
+        raise ValueError("compiler override is incompatible with stored compiler corpus entries")
+
     configuration_runner = None
     if backend == "native" and any(entry.kind == "configuration" for entry in corpus.entries):
         configuration_runner = _native_configuration_runner(
             compiler=compiler,
             cache_dir=cache_dir,
         )
+    compiler_runner = None
+    if backend == "native" and has_compiler_entries:
+        compiler_runner = _native_compiler_runner(cache_dir=cache_dir)
 
     repro_count = 0
     for entry in corpus.entries:
         if backend == "native" and entry.kind == "configuration":
             assert configuration_runner is not None
             _replay_configuration_entry(entry, configuration_runner)
+            repro_count += 1
+            continue
+        if backend == "native" and entry.kind == "compiler":
+            assert compiler_runner is not None
+            _replay_compiler_entry(entry, compiler_runner)
             repro_count += 1
             continue
 
@@ -345,6 +400,20 @@ def _entry_from_configuration_failure(
     )
 
 
+def _entry_from_cross_compiler_failure(
+    failure: CrossCompilerMetamorphicFailure,
+) -> VerificationCorpusEntry:
+    return _make_entry(
+        kind="compiler",
+        signature=failure.signature,
+        relation=None,
+        witness_seeds=(failure.seed,),
+        repros=(failure.minimized_repro,),
+        baseline_compiler=failure.baseline_compiler,
+        failing_compiler=failure.failing_compiler,
+    )
+
+
 def _make_entry(
     *,
     kind: str,
@@ -354,6 +423,8 @@ def _make_entry(
     repros: Sequence[str],
     baseline_configuration: str | None = None,
     failing_configuration: str | None = None,
+    baseline_compiler: str | None = None,
+    failing_compiler: str | None = None,
 ) -> VerificationCorpusEntry:
     normalized_seeds = tuple(sorted(set(witness_seeds)))
     normalized_repros = tuple(repros)
@@ -365,6 +436,8 @@ def _make_entry(
         repro_digests,
         baseline_configuration,
         failing_configuration,
+        baseline_compiler,
+        failing_compiler,
     )
     entry = VerificationCorpusEntry(
         kind=kind,
@@ -375,6 +448,8 @@ def _make_entry(
         entry_sha256=identity,
         baseline_configuration=baseline_configuration,
         failing_configuration=failing_configuration,
+        baseline_compiler=baseline_compiler,
+        failing_compiler=failing_compiler,
     )
     return _validate_entry(entry)
 
@@ -382,7 +457,7 @@ def _make_entry(
 def _validate_entry(entry: VerificationCorpusEntry) -> VerificationCorpusEntry:
     if not isinstance(entry, VerificationCorpusEntry):
         raise TypeError("verification corpus entries must be VerificationCorpusEntry values")
-    if entry.kind not in {"differential", "metamorphic", "configuration"}:
+    if entry.kind not in {"differential", "metamorphic", "configuration", "compiler"}:
         raise VerificationCorpusError(f"unsupported verification corpus entry kind: {entry.kind!r}")
     if not isinstance(entry.signature, str) or not entry.signature:
         raise VerificationCorpusError("verification corpus entry signature must be non-empty text")
@@ -402,14 +477,16 @@ def _validate_entry(entry: VerificationCorpusEntry) -> VerificationCorpusEntry:
         raise VerificationCorpusError("verification corpus repros must be a tuple")
     if entry.kind == "differential":
         _require_no_configuration_metadata(entry)
+        _require_no_compiler_metadata(entry)
         if entry.relation is not None:
             raise VerificationCorpusError("differential corpus entries must not carry a relation")
         if len(entry.repros) != 1:
             raise VerificationCorpusError("differential corpus entries require exactly one repro")
-        if entry.signature.startswith(("metamorphic:", "configuration:")):
+        if entry.signature.startswith(("metamorphic:", "configuration:", "compiler:")):
             raise VerificationCorpusError("differential corpus signature uses another oracle namespace")
     elif entry.kind == "metamorphic":
         _require_no_configuration_metadata(entry)
+        _require_no_compiler_metadata(entry)
         if entry.relation not in METAMORPHIC_RELATIONS:
             raise VerificationCorpusError(
                 f"unsupported metamorphic corpus relation: {entry.relation!r}"
@@ -421,7 +498,8 @@ def _validate_entry(entry: VerificationCorpusEntry) -> VerificationCorpusEntry:
             raise VerificationCorpusError(
                 "metamorphic corpus signature does not match its relation"
             )
-    else:
+    elif entry.kind == "configuration":
+        _require_no_compiler_metadata(entry)
         if entry.relation is not None:
             raise VerificationCorpusError("configuration corpus entries must not carry a relation")
         if len(entry.repros) != 1:
@@ -441,6 +519,23 @@ def _validate_entry(entry: VerificationCorpusEntry) -> VerificationCorpusEntry:
             raise VerificationCorpusError(
                 "configuration corpus signature does not match its stored configuration pair"
             )
+    else:
+        _require_no_configuration_metadata(entry)
+        if entry.relation is not None:
+            raise VerificationCorpusError("compiler corpus entries must not carry a relation")
+        if len(entry.repros) != 1:
+            raise VerificationCorpusError("compiler corpus entries require exactly one repro")
+        if entry.baseline_compiler != _BASELINE_COMPILER:
+            raise VerificationCorpusError("compiler corpus baseline must be the canonical gcc compiler")
+        if entry.failing_compiler not in _COMPILER_NAMES:
+            raise VerificationCorpusError(
+                f"unsupported failing compiler: {entry.failing_compiler!r}"
+            )
+        prefix = f"compiler:{entry.baseline_compiler}->{entry.failing_compiler}:"
+        if not entry.signature.startswith(prefix):
+            raise VerificationCorpusError(
+                "compiler corpus signature does not match its stored compiler pair"
+            )
 
     repro_digests = tuple(_require_canonical_repro(repro) for repro in entry.repros)
     if entry.kind == "metamorphic":
@@ -452,6 +547,8 @@ def _validate_entry(entry: VerificationCorpusEntry) -> VerificationCorpusEntry:
         repro_digests,
         entry.baseline_configuration,
         entry.failing_configuration,
+        entry.baseline_compiler,
+        entry.failing_compiler,
     )
     if entry.entry_sha256 != expected_identity:
         raise VerificationCorpusError(
@@ -465,6 +562,13 @@ def _require_no_configuration_metadata(entry: VerificationCorpusEntry) -> None:
     if entry.baseline_configuration is not None or entry.failing_configuration is not None:
         raise VerificationCorpusError(
             f"{entry.kind} corpus entries must not carry native configuration metadata"
+        )
+
+
+def _require_no_compiler_metadata(entry: VerificationCorpusEntry) -> None:
+    if entry.baseline_compiler is not None or entry.failing_compiler is not None:
+        raise VerificationCorpusError(
+            f"{entry.kind} corpus entries must not carry compiler-pair metadata"
         )
 
 
@@ -483,6 +587,8 @@ def _merge_entries(entries: Sequence[VerificationCorpusEntry]) -> tuple[Verifica
             or previous.repros != entry.repros
             or previous.baseline_configuration != entry.baseline_configuration
             or previous.failing_configuration != entry.failing_configuration
+            or previous.baseline_compiler != entry.baseline_compiler
+            or previous.failing_compiler != entry.failing_compiler
         ):
             raise VerificationCorpusError(
                 f"verification corpus identity collision: {entry.entry_sha256}"
@@ -496,6 +602,8 @@ def _merge_entries(entries: Sequence[VerificationCorpusEntry]) -> tuple[Verifica
             entry_sha256=entry.entry_sha256,
             baseline_configuration=entry.baseline_configuration,
             failing_configuration=entry.failing_configuration,
+            baseline_compiler=entry.baseline_compiler,
+            failing_compiler=entry.failing_compiler,
         )
     return tuple(merged[identity] for identity in sorted(merged))
 
@@ -513,6 +621,9 @@ def _entry_payload(entry: VerificationCorpusEntry) -> dict[str, Any]:
     if validated.kind == "configuration":
         payload["baseline_configuration"] = validated.baseline_configuration
         payload["failing_configuration"] = validated.failing_configuration
+    elif validated.kind == "compiler":
+        payload["baseline_compiler"] = validated.baseline_compiler
+        payload["failing_compiler"] = validated.failing_compiler
     return payload
 
 
@@ -527,8 +638,10 @@ def _entry_from_payload(raw: Any, index: int, version: int) -> VerificationCorpu
         "signature",
         "witness_seeds",
     }
-    if version == _FORMAT_VERSION_V2 and kind == "configuration":
+    if version >= _FORMAT_VERSION_V2 and kind == "configuration":
         expected_keys |= {"baseline_configuration", "failing_configuration"}
+    if version == _FORMAT_VERSION_V3 and kind == "compiler":
+        expected_keys |= {"baseline_compiler", "failing_compiler"}
     _require_exact_keys(record, expected_keys, f"verification corpus entry #{index}")
 
     raw_seeds = record["witness_seeds"]
@@ -555,6 +668,8 @@ def _entry_from_payload(raw: Any, index: int, version: int) -> VerificationCorpu
         entry_sha256=entry_sha256,
         baseline_configuration=record.get("baseline_configuration"),
         failing_configuration=record.get("failing_configuration"),
+        baseline_compiler=record.get("baseline_compiler"),
+        failing_compiler=record.get("failing_compiler"),
     )
     return _validate_entry(entry)
 
@@ -566,6 +681,8 @@ def _entry_identity(
     repro_digests: tuple[str, ...],
     baseline_configuration: str | None = None,
     failing_configuration: str | None = None,
+    baseline_compiler: str | None = None,
+    failing_compiler: str | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "kind": kind,
@@ -576,6 +693,9 @@ def _entry_identity(
     if kind == "configuration":
         payload["baseline_configuration"] = baseline_configuration
         payload["failing_configuration"] = failing_configuration
+    elif kind == "compiler":
+        payload["baseline_compiler"] = baseline_compiler
+        payload["failing_compiler"] = failing_compiler
     canonical = json.dumps(
         payload,
         ensure_ascii=False,
@@ -604,6 +724,27 @@ def _replay_configuration_entry(
         if mismatch is not None:
             raise ReproMismatchError(
                 f"configuration corpus replay {name} diverged from captured reference: {mismatch}"
+            )
+
+
+def _replay_compiler_entry(
+    entry: VerificationCorpusEntry,
+    runner: CompilerRunner,
+) -> None:
+    repro = entry.repros[0]
+    case = load_repro_case(repro)
+    names = [entry.baseline_compiler]
+    if entry.failing_compiler != entry.baseline_compiler:
+        names.append(entry.failing_compiler)
+
+    for name in names:
+        assert name is not None
+        configuration = _COMPILER_BY_NAME[name]
+        actual = runner(configuration, case.module, case.inputs)
+        mismatch = _compare_results(actual, case.expected_outputs)
+        if mismatch is not None:
+            raise ReproMismatchError(
+                f"compiler corpus replay {name} diverged from captured reference: {mismatch}"
             )
 
 
