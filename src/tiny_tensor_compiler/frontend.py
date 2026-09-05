@@ -18,6 +18,7 @@ from .inference import (
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 _ALIAS_OPCODES = frozenset({"view", "slice", "reverse", "transpose"})
+_EFFECT_OPCODES = frozenset({"copy_into", "relu_into"})
 
 
 class Tensor:
@@ -72,6 +73,10 @@ class Tensor:
     def copy_into(self, target: Tensor, source: Tensor) -> Tensor:
         """Copy ``source`` into one alias region of this fresh internal root generation."""
         return self._builder.copy_into(self, target, source)
+
+    def relu_into(self, target: Tensor) -> Tensor:
+        """Apply ReLU in-place to one alias region and return the fresh root generation."""
+        return self._builder.relu_into(self, target)
 
 
 class GraphBuilder:
@@ -250,17 +255,33 @@ class GraphBuilder:
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
         if _storage_root(source.value) is owner:
-            # Same-root writes have explicit snapshot semantics at the public builder
-            # boundary. Materialize the logical source in C order before mutating the
-            # owning root, so overlapping, interleaved, reversed, transposed, and
-            # unresolved-symbolic layouts all reduce to the existing different-root
-            # copy_into contract. The lower verifier/backend invariant therefore stays
-            # fail-closed rather than acquiring hidden memmove behavior.
             source = self.reshape(source, source.type.shape)
 
         op = self.function.add_op(
             "copy_into",
             operands=[root.value, target.value, source.value],
+            result_types=[root.type],
+        )
+        return Tensor(self, op.results[0])
+
+    def relu_into(self, root: Tensor, target: Tensor) -> Tensor:
+        self._ensure_open()
+        for tensor in (root, target):
+            self._check_tensor_owner(tensor)
+
+        owner = _storage_root(root.value)
+        if not _is_full_root_handle(root.value):
+            raise ValueError("relu_into root must be an owning tensor or fresh full-root result")
+        producer = owner.producer
+        if producer is None or producer.opcode in {"input", "const"}:
+            raise ValueError("relu_into root must use internal computed storage")
+        if _storage_root(target.value) is not owner:
+            raise ValueError("relu_into target must alias the supplied root storage")
+        infer_relu(target.type)
+
+        op = self.function.add_op(
+            "relu_into",
+            operands=[root.value, target.value],
             result_types=[root.type],
         )
         return Tensor(self, op.results[0])
@@ -294,8 +315,6 @@ class GraphBuilder:
         if rhs_tensor is not None:
             self._check_tensor_owner(rhs_tensor)
 
-        # Python scalar literals are coerced to the peer tensor's dtype. This keeps
-        # tensor<float32> * 2 as float32 while tensor-vs-tensor promotion remains explicit.
         if lhs_tensor is None:
             peer_dtype = (
                 rhs_tensor.type.dtype if rhs_tensor is not None and np.isscalar(lhs) else None
@@ -322,7 +341,7 @@ def _is_full_root_handle(value: Value) -> bool:
     producer = value.producer
     return (
         producer is not None
-        and producer.opcode == "copy_into"
+        and producer.opcode in _EFFECT_OPCODES
         and producer.results[0] is value
         and value.type == owner.type
     )
@@ -341,7 +360,7 @@ def _storage_root(value: Value) -> Value:
         if producer.opcode in _ALIAS_OPCODES:
             current = producer.operands[0]
             continue
-        if producer.opcode == "copy_into":
+        if producer.opcode in _EFFECT_OPCODES:
             current = producer.operands[0]
             continue
         return current
