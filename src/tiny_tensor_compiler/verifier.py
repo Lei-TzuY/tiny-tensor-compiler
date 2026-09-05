@@ -9,6 +9,7 @@ from .inference import (
     infer_binary,
     infer_relu,
     infer_reshape,
+    infer_reverse,
     infer_slice,
     infer_transpose,
 )
@@ -55,6 +56,8 @@ def verify(module: Module) -> None:
             _verify_shape_transform(op_index, op)
         elif op.opcode == "slice":
             _verify_slice(op_index, op)
+        elif op.opcode == "reverse":
+            _verify_reverse(op_index, op)
         elif op.opcode == "transpose":
             _verify_transpose(op_index, op)
         elif op.opcode == "return":
@@ -173,6 +176,22 @@ def _verify_slice(op_index: int, op: Operation) -> None:
             op_index,
             op,
             f"slice result type {op.results[0].type} does not match inferred type {expected_type}",
+        )
+
+
+def _verify_reverse(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=1, results=1)
+    if set(op.attrs) != {"axis"}:
+        _fail(op_index, op, "reverse requires exactly one 'axis' attribute")
+    try:
+        expected_type = infer_reverse(op.operands[0].type, op.attrs["axis"])
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if op.results[0].type != expected_type:
+        _fail(
+            op_index,
+            op,
+            f"reverse result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
