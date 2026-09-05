@@ -25,12 +25,15 @@ def persistent_cache_lease(library_path: Path) -> Iterator[None]:
     except OSError as error:
         raise RuntimeError(f"failed to open persistent native cache lease: {error}") from error
 
+    locked = False
     try:
         _lock_stream(stream)
+        locked = True
         yield
     finally:
         try:
-            _unlock_stream(stream)
+            if locked:
+                _unlock_stream(stream)
         finally:
             stream.close()
 
