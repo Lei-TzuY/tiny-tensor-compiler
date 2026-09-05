@@ -33,6 +33,7 @@ from .native import (
 _BUNDLE_SCHEMA = "native-bundle-v1"
 _MANIFEST_NAME = "manifest.json"
 _SOURCE_NAME = "program.c"
+_ABI_SYMBOL = "tiny_tensor_bundle_abi_sha256"
 
 
 class NativeBundleError(RuntimeError):
@@ -126,10 +127,13 @@ def compile_native_bundle(
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
 
     command = _compiler_command(compiler)
-    source = generate_c(program)
     input_types = tuple(program.input_types)
     output_types = _return_types(program)
     _require_static_types((*input_types, *output_types))
+    encoded_inputs = [_encode_tensor_type(type_) for type_ in input_types]
+    encoded_outputs = [_encode_tensor_type(type_) for type_ in output_types]
+    abi_sha256 = _abi_sha256(encoded_inputs, encoded_outputs)
+    source = _append_bundle_abi_export(generate_c(program), abi_sha256)
 
     build_directory = Path(
         tempfile.mkdtemp(prefix=f".{bundle_path.name}.build-", dir=bundle_path.parent)
@@ -148,8 +152,9 @@ def compile_native_bundle(
             "source_sha256": _sha256_file(source_path),
             "library": library_path.name,
             "library_sha256": _sha256_file(library_path),
-            "inputs": [_encode_tensor_type(type_) for type_ in input_types],
-            "outputs": [_encode_tensor_type(type_) for type_ in output_types],
+            "abi_sha256": abi_sha256,
+            "inputs": encoded_inputs,
+            "outputs": encoded_outputs,
         }
         _write_manifest(build_directory / _MANIFEST_NAME, manifest)
 
@@ -176,6 +181,7 @@ def load_native_bundle(
         "source_sha256",
         "library",
         "library_sha256",
+        "abi_sha256",
         "inputs",
         "outputs",
     }
@@ -199,6 +205,15 @@ def load_native_bundle(
     output_types = _decode_type_sequence(manifest["outputs"], label="output ABI")
     if not output_types:
         raise NativeBundleError("native bundle output ABI must contain at least one tensor")
+    abi_sha256 = manifest["abi_sha256"]
+    if not isinstance(abi_sha256, str) or not _is_sha256(abi_sha256):
+        raise NativeBundleError("native bundle ABI hash is malformed")
+    expected_abi_sha256 = _abi_sha256(
+        [_encode_tensor_type(type_) for type_ in input_types],
+        [_encode_tensor_type(type_) for type_ in output_types],
+    )
+    if abi_sha256 != expected_abi_sha256:
+        raise NativeBundleError("native bundle ABI hash does not match manifest ABI")
 
     staging_directory = Path(tempfile.mkdtemp(prefix="tiny_tensor_compiler_bundle_"))
     staged_library = staging_directory / _library_name()
@@ -208,9 +223,18 @@ def load_native_bundle(
         artifact = _NativeArtifact(staging_directory, library)
         try:
             _ = library.tiny_tensor_run
-        except AttributeError as error:
+            abi_runner = getattr(library, _ABI_SYMBOL)
+            abi_runner.argtypes = []
+            abi_runner.restype = ctypes.c_char_p
+            embedded_abi = abi_runner()
+            if embedded_abi is None or embedded_abi.decode("ascii") != abi_sha256:
+                raise NativeBundleError("native bundle embedded ABI hash does not match manifest")
+        except (AttributeError, UnicodeDecodeError) as error:
             artifact.close()
-            raise NativeBundleError("native bundle is missing tiny_tensor_run") from error
+            raise NativeBundleError("native bundle is missing a valid ABI identity export") from error
+        except NativeBundleError:
+            artifact.close()
+            raise
     except Exception:
         shutil.rmtree(staging_directory, ignore_errors=True)
         raise
@@ -266,6 +290,27 @@ def _decode_tensor_type(value: object, *, label: str) -> TensorType:
     ):
         raise NativeBundleError(f"native bundle {label} shape is malformed")
     return TensorType(tuple(shape_value), dtype)
+
+
+def _abi_sha256(
+    inputs: Sequence[dict[str, object]],
+    outputs: Sequence[dict[str, object]],
+) -> str:
+    payload = json.dumps(
+        {"inputs": list(inputs), "outputs": list(outputs)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _append_bundle_abi_export(source: str, abi_sha256: str) -> str:
+    return (
+        source
+        + "\nTINY_TENSOR_EXPORT const char *tiny_tensor_bundle_abi_sha256(void) {\n"
+        + f'    return "{abi_sha256}";\n'
+        + "}\n"
+    )
 
 
 def _target_identity() -> dict[str, object]:
