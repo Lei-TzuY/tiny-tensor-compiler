@@ -11,6 +11,10 @@ _PERSISTENT_CACHE_LEASE_POLL_SECONDS = 0.05
 _PERSISTENT_CACHE_LEASE_TIMEOUT_SECONDS = 300.0
 
 
+class PersistentCacheLeaseError(RuntimeError):
+    """Raised when a persistent-cache cross-process lease cannot be acquired."""
+
+
 @contextmanager
 def persistent_cache_lease(library_path: Path) -> Iterator[None]:
     """Hold one cross-process lease for a persistent-cache digest.
@@ -23,7 +27,9 @@ def persistent_cache_lease(library_path: Path) -> Iterator[None]:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         stream = lock_path.open("a+b")
     except OSError as error:
-        raise RuntimeError(f"failed to open persistent native cache lease: {error}") from error
+        raise PersistentCacheLeaseError(
+            f"failed to open persistent native cache lease: {error}"
+        ) from error
 
     locked = False
     try:
@@ -52,7 +58,9 @@ def _lock_stream(stream) -> None:
 
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         return
-    raise RuntimeError(f"persistent native cache leases are unsupported on platform: {os.name}")
+    raise PersistentCacheLeaseError(
+        f"persistent native cache leases are unsupported on platform: {os.name}"
+    )
 
 
 def _unlock_stream(stream) -> None:
@@ -67,7 +75,9 @@ def _unlock_stream(stream) -> None:
 
         fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         return
-    raise RuntimeError(f"persistent native cache leases are unsupported on platform: {os.name}")
+    raise PersistentCacheLeaseError(
+        f"persistent native cache leases are unsupported on platform: {os.name}"
+    )
 
 
 def _lock_stream_windows(stream) -> None:
@@ -86,7 +96,7 @@ def _lock_stream_windows(stream) -> None:
             return
         except OSError as error:
             if time.monotonic() >= deadline:
-                raise RuntimeError(
+                raise PersistentCacheLeaseError(
                     "timed out waiting for persistent native cache lease"
                 ) from error
             time.sleep(_PERSISTENT_CACHE_LEASE_POLL_SECONDS)
