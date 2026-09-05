@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -20,6 +21,15 @@ def _program():
 
 def _input() -> np.ndarray:
     return np.array([[-2.0, 0.0, 3.0], [4.0, -5.0, 1.5]], dtype=np.float32)
+
+
+def _manifest_abi_hash(manifest: dict[str, object]) -> str:
+    payload = json.dumps(
+        {"inputs": manifest["inputs"], "outputs": manifest["outputs"]},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def test_native_bundle_round_trips_without_compiler(tmp_path: Path, monkeypatch) -> None:
@@ -56,6 +66,8 @@ def test_native_bundle_manifest_is_self_describing(tmp_path: Path) -> None:
         {"dtype": "f32", "shape": [2, 3]},
         {"dtype": "f32", "shape": [2, 3]},
     ]
+    assert len(manifest["abi_sha256"]) == 64
+    assert manifest["abi_sha256"] == _manifest_abi_hash(manifest)
     assert len(manifest["library_sha256"]) == 64
     assert len(manifest["source_sha256"]) == 64
     assert (bundle / manifest["library"]).is_file()
@@ -130,6 +142,25 @@ def test_native_bundle_rejects_malformed_abi_type(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(NativeBundleError, match="ABI"):
+        load_native_bundle(bundle)
+
+
+def test_native_bundle_rejects_valid_but_rewritten_abi_contract(tmp_path: Path) -> None:
+    from tiny_tensor_compiler.native_bundle import (
+        NativeBundleError,
+        compile_native_bundle,
+        load_native_bundle,
+    )
+
+    bundle = tmp_path / "program.ttcbundle"
+    compile_native_bundle(_program(), bundle)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["inputs"][0]["shape"] = [6]
+    manifest["abi_sha256"] = _manifest_abi_hash(manifest)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(NativeBundleError, match="embedded ABI"):
         load_native_bundle(bundle)
 
 
