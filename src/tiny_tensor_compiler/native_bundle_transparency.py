@@ -17,7 +17,7 @@ from .native_bundle_attestation import (
     publisher_id_from_public_key,
     publisher_public_key_from_private_key,
 )
-from .native_bundle_release import _canonical_json, _state_lock
+from .native_bundle_release import NativeBundleReleaseError, _canonical_json, _state_lock
 
 _CHECKPOINT_SCHEMA = "ttc-release-transparency-checkpoint-v1"
 _CHECKPOINT_DOMAIN = b"tiny-tensor-compiler\x00release-transparency-checkpoint-v1\x00"
@@ -31,7 +31,7 @@ _MAX_PROOF_NODES = 64
 _HASH_SIZE = 32
 
 
-class NativeBundleTransparencyError(ValueError):
+class NativeBundleTransparencyError(NativeBundleReleaseError):
     """Raised when transparency metadata, proofs, or local state are invalid."""
 
 
