@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import reduce
+from operator import mul
+
+
+@dataclass(frozen=True)
+class StorageLayout:
+    """Logical tensor layout in element offsets relative to one storage root."""
+
+    offset: int
+    strides: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.offset, int) or isinstance(self.offset, bool) or self.offset < 0:
+            raise ValueError("storage layout offset must be a non-negative integer")
+        if any(
+            not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0
+            for stride in self.strides
+        ):
+            raise ValueError("storage layout strides must be positive integers")
+
+    @classmethod
+    def contiguous(cls, shape: tuple[int, ...], *, offset: int = 0) -> StorageLayout:
+        return cls(offset=offset, strides=contiguous_strides(shape))
+
+    def is_contiguous(self, shape: tuple[int, ...]) -> bool:
+        return self.strides == contiguous_strides(shape)
+
+    def validate_bounds(self, shape: tuple[int, ...], storage_elements: int) -> None:
+        if len(shape) != len(self.strides):
+            raise ValueError("storage layout rank does not match logical tensor rank")
+        if storage_elements < 0:
+            raise ValueError("storage element count must be non-negative")
+        if any(dim < 0 for dim in shape):
+            raise ValueError("storage layout requires a concrete non-negative shape")
+        if any(dim == 0 for dim in shape):
+            if self.offset > storage_elements:
+                raise ValueError("empty storage view offset exceeds storage bounds")
+            return
+        maximum = self.offset + sum(
+            (dim - 1) * stride for dim, stride in zip(shape, self.strides, strict=True)
+        )
+        if maximum >= storage_elements:
+            raise ValueError("storage layout exceeds backing storage bounds")
+
+    def reshaped(self, source_shape: tuple[int, ...], target_shape: tuple[int, ...]) -> StorageLayout:
+        if element_count(source_shape) != element_count(target_shape):
+            raise ValueError("contiguous view reshape requires equal element counts")
+        if not self.is_contiguous(source_shape):
+            raise ValueError("cannot reshape a non-contiguous storage view without copying")
+        return StorageLayout.contiguous(target_shape, offset=self.offset)
+
+    def sliced(
+        self,
+        source_shape: tuple[int, ...],
+        *,
+        axis: int,
+        start: int,
+        stop: int,
+        step: int,
+    ) -> tuple[StorageLayout, tuple[int, ...]]:
+        _validate_slice(source_shape, axis=axis, start=start, stop=stop, step=step)
+        length = (stop - start + step - 1) // step
+        shape = list(source_shape)
+        shape[axis] = length
+        strides = list(self.strides)
+        offset = self.offset + start * strides[axis]
+        strides[axis] *= step
+        return StorageLayout(offset=offset, strides=tuple(strides)), tuple(shape)
+
+
+def contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
+    if any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape):
+        raise ValueError("contiguous strides require a concrete non-negative shape")
+    strides = [1] * len(shape)
+    running = 1
+    for axis in range(len(shape) - 1, -1, -1):
+        strides[axis] = running
+        running *= shape[axis]
+    return tuple(strides)
+
+
+def element_count(shape: tuple[int, ...]) -> int:
+    return reduce(mul, shape, 1)
+
+
+def validate_slice_bounds(
+    shape: tuple[int, ...],
+    *,
+    axis: int,
+    start: int,
+    stop: int,
+    step: int,
+) -> None:
+    _validate_slice(shape, axis=axis, start=start, stop=stop, step=step)
+
+
+def _validate_slice(
+    shape: tuple[int, ...],
+    *,
+    axis: int,
+    start: int,
+    stop: int,
+    step: int,
+) -> None:
+    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(shape):
+        raise ValueError("slice axis is out of range")
+    for name, value in (("start", start), ("stop", stop), ("step", step)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeError(f"slice {name} must be an integer")
+    if step <= 0:
+        raise ValueError("slice step must be a positive integer")
+    extent = shape[axis]
+    if not isinstance(extent, int) or isinstance(extent, bool):
+        raise ValueError("slice axis extent must be concrete")
+    if start < 0 or stop < 0 or start > stop or stop > extent:
+        raise ValueError(
+            f"slice bounds must satisfy 0 <= start <= stop <= extent ({extent})"
+        )
