@@ -6,22 +6,22 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from .differential import (
-    CandidateRunner,
     _CANDIDATE_FAILURE_EXCEPTIONS,
+    CandidateRunner,
     _CaseSpec,
-    _SplitMix64,
     _compare_results,
     _freeze_array,
     _generate_spec,
     _native_runner,
     _require_seed,
+    _SplitMix64,
     _with_input,
     _with_side,
 )
 from .frontend import GraphBuilder, Tensor
 from .ir import Module
 from .repro import capture_repro_case
-from .runtime import ExecutionResult, execute_reference
+from .runtime import execute_reference
 
 METAMORPHIC_RELATIONS = (
     "double_reverse_axis0",
