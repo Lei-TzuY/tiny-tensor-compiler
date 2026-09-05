@@ -87,6 +87,12 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             source = values[op.operands[2]]
             np.copyto(target, source)
             values[op.results[0]] = root
+        elif op.opcode == "relu_into":
+            root = values[op.operands[0]]
+            target = values[op.operands[1]]
+            dtype = target.dtype
+            np.maximum(target, np.array(0, dtype=dtype), out=target)
+            values[op.results[0]] = root
         elif op.opcode == "return":
             outputs = tuple(np.array(values[operand], copy=True) for operand in op.operands)
             return outputs[0] if len(outputs) == 1 else outputs
