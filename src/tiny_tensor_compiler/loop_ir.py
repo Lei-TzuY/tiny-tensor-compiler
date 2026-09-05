@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from . import fused_expr
-from .inference import infer_binary, infer_relu, infer_reshape, infer_sum
+from .inference import infer_binary, infer_reduction, infer_relu, infer_reshape
 from .ir import DType, TensorType
 from .layout import StorageLayout, element_count
 from .lowering import (
@@ -18,6 +18,7 @@ from .lowering import (
     CPUProgram,
     plan_memory,
 )
+from .reduction import REDUCTION_OPCODES, ReductionPlan
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,12 @@ class LoopKernel:
     literal: np.ndarray[Any, Any] | None = None
     fused_expression: fused_expr.FusedExpression | None = None
     reduction_axis: int | None = None
+
+    @property
+    def reduction(self) -> ReductionPlan | None:
+        if self.opcode not in REDUCTION_OPCODES:
+            return None
+        return ReductionPlan.from_opcode(self.opcode, self.reduction_axis)
 
 
 @dataclass(frozen=True)
@@ -227,11 +234,15 @@ class LoopProgram:
                 rhs = f"const {literal}{literal_index}"
             elif op.opcode == "reshape":
                 rhs = f"reshape p{op.inputs[0]}[linear]"
-            elif op.opcode == "sum":
-                if op.reduction_axis is None:
-                    rhs = f"sum p{op.inputs[0]}[logical-c-order]"
+            elif op.reduction is not None:
+                plan = op.reduction
+                if plan.axis is None:
+                    rhs = f"{plan.opcode} p{op.inputs[0]}[logical-c-order]"
                 else:
-                    rhs = f"sum(axis={op.reduction_axis}) p{op.inputs[0]}[logical-axis-order]"
+                    rhs = (
+                        f"{plan.opcode}(axis={plan.axis}) "
+                        f"p{op.inputs[0]}[logical-axis-order]"
+                    )
             else:
                 operands = ", ".join(
                     f"p{buffer}{_format_index(index_map.axes)}"
@@ -305,7 +316,7 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
         input_types = tuple(virtual_types[buffer] for buffer in op.inputs)
         input_maps = (
             ()
-            if op.opcode in {"reshape", "sum"}
+            if op.opcode == "reshape" or op.reduction is not None
             else tuple(
                 _broadcast_index_map(input_type.shape, output_type.shape)
                 for input_type in input_types
@@ -479,8 +490,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             if any(roots[buffer] == output_root for buffer in op.inputs):
                 raise ValueError("loop kernels do not permit output/input storage aliasing")
 
-            if op.opcode != "sum" and op.reduction_axis is not None:
-                raise ValueError("only sum loop kernels may carry a reduction axis")
+            if op.opcode not in REDUCTION_OPCODES and op.reduction_axis is not None:
+                raise ValueError("only reduction loop kernels may carry a reduction axis")
             output_type = types[op.output]
             if op.iteration_shape != output_type.shape:
                 raise ValueError("loop iteration shape must match output buffer shape")
@@ -512,12 +523,23 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if expected != output_type:
                     raise ValueError("relu loop output buffer type does not match inference")
                 _verify_index_maps(op, types)
-            elif op.opcode == "sum":
+            elif op.opcode in REDUCTION_OPCODES:
                 if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
-                    raise ValueError("sum loop requires one input, no index maps, and no literal")
-                expected = infer_sum(types[op.inputs[0]], op.reduction_axis)
+                    raise ValueError(
+                        f"{op.opcode} loop requires one input, no index maps, and no literal"
+                    )
+                reduction = op.reduction
+                if reduction is None:
+                    raise RuntimeError("verified reduction loop unexpectedly has no plan")
+                expected = infer_reduction(
+                    types[op.inputs[0]],
+                    reduction.operator,
+                    reduction.axis,
+                )
                 if expected != output_type:
-                    raise ValueError("sum loop output buffer type does not match inference")
+                    raise ValueError(
+                        f"{op.opcode} loop output buffer type does not match inference"
+                    )
             elif op.opcode == "reshape":
                 if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
                     raise ValueError("reshape loop requires one input, no index maps, and no literal")
