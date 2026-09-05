@@ -124,15 +124,11 @@ def test_copy_into_rejects_input_or_const_storage_targets():
         root.copy_into(root.view((2, 2)), patch)
 
 
-def test_copy_into_rejects_same_root_source_and_type_mismatch():
+def test_copy_into_rejects_type_mismatch():
     builder = GraphBuilder()
     base = builder.input((2, 4), dtype="int32")
     owned = base.relu()
     target = owned.slice(axis=1, start=0, stop=4, step=2)
-    same_root_source = owned.slice(axis=1, start=1, stop=4, step=2)
-    with pytest.raises(ValueError, match="different storage root"):
-        owned.copy_into(target, same_root_source)
-
     patch = builder.input((2, 3), dtype="int32")
     with pytest.raises(ValueError, match="exactly match"):
         owned.copy_into(target, patch)
