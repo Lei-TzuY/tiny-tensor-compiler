@@ -46,6 +46,7 @@ class LoopKernel:
     iteration_shape: tuple[int, ...]
     input_maps: tuple[IndexMap, ...]
     literal: np.ndarray[Any, Any] | None = None
+    fused_expression: fused_expr.FusedExpression | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,15 @@ class LoopProgram:
         return "\n".join(lines)
 
 
+def fused_expression_for_kernel(op: LoopKernel) -> fused_expr.FusedExpression | None:
+    """Return structured fused semantics, decoding legacy spelling only as fallback."""
+    if op.fused_expression is None:
+        return fused_expr.describe_fused_opcode(op.opcode)
+    if fused_expr.encode_fused_opcode(op.fused_expression) != op.opcode:
+        raise ValueError("loop fused expression metadata does not match opcode")
+    return op.fused_expression
+
+
 def lower_to_loops(program: CPUProgram) -> LoopProgram:
     """Lower verified virtual-buffer operations to explicit physical-buffer loops."""
     plan = plan_memory(program)
@@ -196,12 +206,17 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
                     binary_tree,
                     consumer,
                 ):
+                    expression = fused_expression_for_kernel(binary_tree)
+                    if expression is None:
+                        raise RuntimeError("fused binary tree is missing structured semantics")
+                    expression = fused_expr.with_terminal_relu(expression)
                     binary_tree = LoopKernel(
-                        opcode=f"relu_{binary_tree.opcode}",
+                        opcode=fused_expr.encode_fused_opcode(expression),
                         output=consumer.output,
                         inputs=binary_tree.inputs,
                         iteration_shape=consumer.iteration_shape,
                         input_maps=binary_tree.input_maps,
+                        fused_expression=expression,
                     )
                     next_index += 1
             fused.append(binary_tree)
@@ -237,14 +252,19 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
                 break
 
             opcode = current.opcode
-            if opcode in {"add", "mul"} or opcode in fused_expr.BINARY_CHAIN_OPCODES:
+            expression = fused_expression_for_kernel(current)
+            if opcode in {"add", "mul"}:
                 opcode = f"relu_{opcode}"
+            elif expression is not None and not expression.terminal_relu:
+                expression = fused_expr.with_terminal_relu(expression)
+                opcode = fused_expr.encode_fused_opcode(expression)
             current = LoopKernel(
                 opcode=opcode,
                 output=consumer.output,
                 inputs=current.inputs,
                 iteration_shape=consumer.iteration_shape,
                 input_maps=current.input_maps,
+                fused_expression=expression,
             )
             next_index += 1
 
@@ -313,8 +333,14 @@ def _fuse_integer_chain_tree(
     if any(types[buffer].dtype != output_type.dtype for buffer in fused_inputs):
         return None
 
+    expression = fused_expr.chain_tree_expression(
+        inner.opcode,
+        left.opcode,
+        right.opcode,
+        root.opcode,
+    )
     return LoopKernel(
-        opcode=f"chain_tree_{inner.opcode}_{left.opcode}_{right.opcode}_{root.opcode}",
+        opcode=fused_expr.encode_fused_opcode(expression),
         output=root.output,
         inputs=fused_inputs,
         iteration_shape=root.iteration_shape,
@@ -323,6 +349,7 @@ def _fuse_integer_chain_tree(
             left.input_maps[other_position],
             *right.input_maps,
         ),
+        fused_expression=expression,
     )
 
 
@@ -368,12 +395,18 @@ def _fuse_integer_binary_tree(
     if any(types[buffer].dtype != output_type.dtype for buffer in fused_inputs):
         return None
 
+    expression = fused_expr.binary_tree_expression(
+        left.opcode,
+        right.opcode,
+        root.opcode,
+    )
     return LoopKernel(
-        opcode=f"tree_{left.opcode}_{right.opcode}_{root.opcode}",
+        opcode=fused_expr.encode_fused_opcode(expression),
         output=root.output,
         inputs=fused_inputs,
         iteration_shape=root.iteration_shape,
         input_maps=(*left.input_maps, *right.input_maps),
+        fused_expression=expression,
     )
 
 
@@ -417,12 +450,14 @@ def _fuse_integer_binary_consumer(
     if any(types[buffer].dtype != output_type.dtype for buffer in fused_inputs):
         return None
 
+    expression = fused_expr.binary_chain_expression(producer.opcode, consumer.opcode)
     return LoopKernel(
-        opcode=f"chain_{producer.opcode}_{consumer.opcode}",
+        opcode=fused_expr.encode_fused_opcode(expression),
         output=consumer.output,
         inputs=fused_inputs,
         iteration_shape=consumer.iteration_shape,
         input_maps=(*producer.input_maps, consumer.input_maps[other_position]),
+        fused_expression=expression,
     )
 
 
@@ -547,6 +582,9 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             if op.iteration_shape != output_type.shape:
                 raise ValueError("loop iteration shape must match output buffer shape")
 
+            if op.fused_expression is not None:
+                fused_expression_for_kernel(op)
+
             if op.opcode == "const":
                 if op.inputs or op.input_maps:
                     raise ValueError("const loop must not have inputs or index maps")
@@ -582,7 +620,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
                 _verify_index_maps(op, allocated)
             else:
-                expression = fused_expr.describe_fused_opcode(op.opcode)
+                expression = fused_expression_for_kernel(op)
                 if expression is None:
                     raise ValueError(f"unsupported loop kernel: {op.opcode}")
                 _verify_fused_expression(op, expression, allocated, output_type)
