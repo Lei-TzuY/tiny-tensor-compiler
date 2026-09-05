@@ -22,6 +22,8 @@ finally:
 
 Packing still happens after compilation: `pack_dynamic_bundle_set_archive()` never invokes a compiler. Loading and dispatch are likewise compiler-free.
 
+Verified archive bytes may also be distributed through the separate content-addressed registry layer documented in `content-addressed-bundle-registry.md`. That layer pins the exact archive SHA-256, streams/downloads with explicit transport bounds, and then reuses this archive loader unchanged for complete payload verification.
+
 ## Transport schema
 
 `native-bundle-archive-v1` is a ZIP container with a deliberately narrow profile:
@@ -70,7 +72,9 @@ Archive validation composes existing internal consistency checks:
 - ABI identity exported by the loaded shared library;
 - current target identity.
 
-These checks detect corruption, partial replacement, path-confusion attempts, and incoherent package substitution. They do **not** authenticate who produced the archive. There is no signature, trusted publisher key, certificate chain, transparency log, or remote-registry trust policy in this phase. A party able to replace an entire coherent archive can still construct another internally consistent package.
+These checks detect corruption, partial replacement, path-confusion attempts, and incoherent package substitution. They do **not** authenticate who produced the archive. There is no signature, trusted publisher key, certificate chain, transparency log, or publisher-trust policy in this phase. A party able to replace an entire coherent archive can still construct another internally consistent package.
+
+The content-addressed registry layer narrows remote substitution by requiring a caller-pinned SHA-256 for the exact archive bytes and by reusing this full verifier after download. It still does not establish publisher identity: a caller who is persuaded to trust a different digest can be directed to a different coherent archive.
 
 ## Evidence scope
 
@@ -80,4 +84,6 @@ No compression-ratio, deployment-size, network-transfer, or runtime-performance 
 
 ## Next promotion
 
-This closes the first local single-file transport phase. Further ZIP metadata or compression-method variants would be low-value format farming. A later deployment phase should add a genuinely new trust or distribution boundary—such as signed provenance/trusted publisher semantics or a controlled remote registry—or the compiler should promote on a separate executable frontier such as bounded in-place elementwise effects.
+The local single-file transport and the first controlled content-addressed HTTP(S) distribution boundary are now separate completed layers. Further ZIP metadata/compression variants or mutable registry naming would be low-value format farming.
+
+A later trust phase should add genuine publisher authenticity/provenance using a standard reviewable mechanism with explicit key/trust/revocation semantics. Until such a mechanism can be validated cross-platform without inventing a bespoke cryptographic stack, other independent compiler/runtime frontiers remain preferable to fake signing claims.
