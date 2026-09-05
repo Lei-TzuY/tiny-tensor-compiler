@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from .inference import infer_binary, infer_relu, infer_reshape, infer_slice
+from .inference import infer_binary, infer_relu, infer_reshape, infer_slice, infer_transpose
 from .ir import Module, TensorType, Value
 from .layout import StorageLayout, element_count
 from .verifier import verify
@@ -31,6 +31,7 @@ class BufferView:
     start: int = 0
     stop: int = 0
     step: int = 1
+    permutation: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -188,7 +189,11 @@ class CPUProgram:
             elif isinstance(op, BufferInput):
                 lines.append(f"b{op.output} = input {op.index}")
             elif isinstance(op, BufferView):
-                if op.slice_axis is None:
+                if op.permutation is not None:
+                    lines.append(
+                        f"b{op.output} = transpose b{op.source} axes={op.permutation}"
+                    )
+                elif op.slice_axis is None:
                     lines.append(f"b{op.output} = view b{op.source}")
                 else:
                     lines.append(
@@ -240,6 +245,15 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                     start=op.attrs["start"],
                     stop=op.attrs["stop"],
                     step=op.attrs["step"],
+                )
+            )
+            continue
+        if op.opcode == "transpose":
+            operations.append(
+                BufferView(
+                    output=buffer,
+                    source=buffers[op.operands[0]],
+                    permutation=op.attrs["axes"],
                 )
             )
             continue
@@ -330,7 +344,13 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
             source_layout = layouts[op.source]
             source_type = types[op.source]
             output_type = types[op.output]
-            if op.slice_axis is None:
+            if op.permutation is not None:
+                layout, inferred_shape = source_layout.permuted(
+                    source_type.shape, op.permutation
+                )
+                if inferred_shape != output_type.shape:
+                    raise ValueError("buffer transpose layout shape does not match inferred output")
+            elif op.slice_axis is None:
                 layout = source_layout.reshaped(source_type.shape, output_type.shape)
             else:
                 layout, inferred_shape = source_layout.sliced(
@@ -404,8 +424,12 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 raise ValueError(f"buffer b{op.output} is written more than once")
             if op.source not in written:
                 raise ValueError(f"buffer b{op.source} is viewed before being written")
+            if op.permutation is not None and op.slice_axis is not None:
+                raise ValueError("buffer view cannot be both a transpose and a slice")
             output_type = allocated[op.output]
-            if op.slice_axis is None:
+            if op.permutation is not None:
+                expected = infer_transpose(allocated[op.source], op.permutation)
+            elif op.slice_axis is None:
                 expected = infer_reshape(allocated[op.source], output_type.shape)
             else:
                 expected = infer_slice(
