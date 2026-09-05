@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
 
-from .ir import AffineDim, Function, Module, SymbolicDim, TensorType, Value
+from .ir import (
+    AffineDim,
+    Function,
+    LinearDim,
+    Module,
+    SymbolicDim,
+    TensorType,
+    Value,
+)
 from .verifier import verify
 
 
@@ -27,7 +36,7 @@ def symbolic_dims(module: Module) -> frozenset[SymbolicDim]:
 
 
 def validate_dynamic_module(module: Module) -> tuple[SymbolicDim, ...]:
-    """Verify that every runtime symbol can be bound by the module inputs."""
+    """Verify that every runtime symbol can be constrained by the module inputs."""
     verify(module)
     symbols = tuple(sorted(symbolic_dims(module)))
     if not symbols:
@@ -58,7 +67,7 @@ def bind_dynamic_shapes(
     module: Module,
     inputs: Sequence[Any] = (),
 ) -> dict[SymbolicDim, int]:
-    """Resolve every named runtime dimension from exact runtime input shapes."""
+    """Resolve named dimensions from exact runtime input-shape constraints."""
     symbols = validate_dynamic_module(module)
     expected_types = _input_types(module)
     provided = tuple(inputs)
@@ -68,6 +77,7 @@ def bind_dynamic_shapes(
         )
 
     bindings: dict[SymbolicDim, int] = {}
+    equations: list[tuple[dict[SymbolicDim, int], int]] = []
     symbol_set = frozenset(symbols)
     for index, (value, expected_type) in enumerate(
         zip(provided, expected_types, strict=True)
@@ -102,6 +112,18 @@ def bind_dynamic_shapes(
                         f"input {index} shape {actual_shape} does not satisfy symbolic "
                         f"contract {expected_type.shape} at axis {axis}: {exc}"
                     ) from exc
+            elif isinstance(expected_dim, LinearDim):
+                if actual_dim < expected_dim.offset:
+                    raise ValueError(
+                        f"input {index} shape {actual_shape} does not satisfy symbolic "
+                        f"contract {expected_type.shape} at axis {axis}: runtime extent "
+                        f"{actual_dim} is smaller than linear offset {expected_dim.offset} "
+                        f"for {expected_dim}"
+                    )
+                equations.append(
+                    (dict(expected_dim.terms), actual_dim - expected_dim.offset)
+                )
+                continue
 
             if symbol is not None:
                 if symbol not in symbol_set:
@@ -123,6 +145,7 @@ def bind_dynamic_shapes(
                     f"contract {expected_type.shape}: axis {axis} requires {expected_dim}"
                 )
 
+    _solve_relational_bindings(symbols, bindings, equations)
     missing = symbol_set - bindings.keys()
     if missing:
         names = ", ".join(sorted(symbol.name for symbol in missing))
@@ -183,6 +206,92 @@ def specialize_module(
     if has_symbolic_shapes(specialized):
         raise SymbolicShapeError("specialization left unresolved symbolic dimensions")
     return specialized
+
+
+def _solve_relational_bindings(
+    symbols: tuple[SymbolicDim, ...],
+    bindings: dict[SymbolicDim, int],
+    equations: Sequence[tuple[dict[SymbolicDim, int], int]],
+) -> None:
+    if not equations:
+        return
+
+    unknowns = tuple(symbol for symbol in symbols if symbol not in bindings)
+    rows: list[list[Fraction]] = []
+    for coefficients, rhs in equations:
+        adjusted_rhs = rhs - sum(
+            coefficient * bindings[symbol]
+            for symbol, coefficient in coefficients.items()
+            if symbol in bindings
+        )
+        row = [
+            Fraction(coefficients.get(symbol, 0))
+            for symbol in unknowns
+        ]
+        if not any(row):
+            if adjusted_rhs != 0:
+                raise ValueError("runtime symbolic constraints are inconsistent")
+            continue
+        rows.append([*row, Fraction(adjusted_rhs)])
+
+    if unknowns:
+        pivot_rows: dict[int, int] = {}
+        next_pivot_row = 0
+        for column in range(len(unknowns)):
+            pivot = next(
+                (
+                    row_index
+                    for row_index in range(next_pivot_row, len(rows))
+                    if rows[row_index][column] != 0
+                ),
+                None,
+            )
+            if pivot is None:
+                continue
+            rows[next_pivot_row], rows[pivot] = rows[pivot], rows[next_pivot_row]
+            pivot_value = rows[next_pivot_row][column]
+            rows[next_pivot_row] = [
+                value / pivot_value for value in rows[next_pivot_row]
+            ]
+            for row_index, row in enumerate(rows):
+                if row_index == next_pivot_row or row[column] == 0:
+                    continue
+                factor = row[column]
+                rows[row_index] = [
+                    value - factor * pivot_entry
+                    for value, pivot_entry in zip(
+                        row, rows[next_pivot_row], strict=True
+                    )
+                ]
+            pivot_rows[column] = next_pivot_row
+            next_pivot_row += 1
+
+        for row in rows:
+            if not any(row[:-1]) and row[-1] != 0:
+                raise ValueError("runtime symbolic constraints are inconsistent")
+
+        if len(pivot_rows) != len(unknowns):
+            names = ", ".join(symbol.name for symbol in unknowns)
+            raise SymbolicShapeError(
+                "runtime shape equations do not uniquely determine symbolic "
+                f"dimensions: {names}"
+            )
+
+        for column, symbol in enumerate(unknowns):
+            solved = rows[pivot_rows[column]][-1]
+            if solved.denominator != 1 or solved.numerator < 0:
+                raise ValueError(
+                    f"symbolic dimension {symbol} solved to {solved}, but runtime "
+                    "bindings must be non-negative integers"
+                )
+            bindings[symbol] = solved.numerator
+
+    for coefficients, rhs in equations:
+        if sum(
+            coefficient * bindings[symbol]
+            for symbol, coefficient in coefficients.items()
+        ) != rhs:
+            raise ValueError("runtime symbolic constraints are inconsistent")
 
 
 def _clone_module(
@@ -257,11 +366,13 @@ def _specialize_type(
 
 
 def _specialize_dim(
-    dim: int | SymbolicDim | AffineDim,
+    dim: int | SymbolicDim | AffineDim | LinearDim,
     bindings: Mapping[SymbolicDim, int],
 ) -> int:
     if isinstance(dim, SymbolicDim):
         return bindings[dim]
     if isinstance(dim, AffineDim):
         return dim.evaluate(bindings[dim.symbol])
+    if isinstance(dim, LinearDim):
+        return dim.evaluate(bindings)
     return dim
