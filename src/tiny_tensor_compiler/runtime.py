@@ -40,6 +40,13 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]].astype(dtype, copy=False)
             values[op.results[0]] = np.maximum(operand, np.array(0, dtype=dtype))
+        elif op.opcode == "sum":
+            dtype = op.results[0].type.dtype.to_numpy()
+            operand = values[op.operands[0]]
+            accumulator = dtype.type(0)
+            for index in np.ndindex(operand.shape):
+                accumulator = dtype.type(np.add(accumulator, operand[index]))
+            values[op.results[0]] = np.array(accumulator, dtype=dtype)
         elif op.opcode == "reshape":
             operand = values[op.operands[0]]
             values[op.results[0]] = np.array(

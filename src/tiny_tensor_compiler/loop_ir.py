@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from . import fused_expr
-from .inference import infer_binary, infer_relu, infer_reshape
+from .inference import infer_binary, infer_relu, infer_reshape, infer_sum
 from .ir import DType, TensorType
 from .layout import StorageLayout, element_count
 from .lowering import (
@@ -226,6 +226,8 @@ class LoopProgram:
                 rhs = f"const {literal}{literal_index}"
             elif op.opcode == "reshape":
                 rhs = f"reshape p{op.inputs[0]}[linear]"
+            elif op.opcode == "sum":
+                rhs = f"sum p{op.inputs[0]}[logical-c-order]"
             else:
                 operands = ", ".join(
                     f"p{buffer}{_format_index(index_map.axes)}"
@@ -299,7 +301,7 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
         input_types = tuple(virtual_types[buffer] for buffer in op.inputs)
         input_maps = (
             ()
-            if op.opcode == "reshape"
+            if op.opcode in {"reshape", "sum"}
             else tuple(
                 _broadcast_index_map(input_type.shape, output_type.shape)
                 for input_type in input_types
@@ -503,6 +505,12 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if expected != output_type:
                     raise ValueError("relu loop output buffer type does not match inference")
                 _verify_index_maps(op, types)
+            elif op.opcode == "sum":
+                if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
+                    raise ValueError("sum loop requires one input, no index maps, and no literal")
+                expected = infer_sum(types[op.inputs[0]])
+                if expected != output_type:
+                    raise ValueError("sum loop output buffer type does not match inference")
             elif op.opcode == "reshape":
                 if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
                     raise ValueError("reshape loop requires one input, no index maps, and no literal")
