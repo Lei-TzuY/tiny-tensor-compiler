@@ -50,8 +50,92 @@ class SymbolicDim:
     def __str__(self) -> str:
         return self.name
 
+    def __mul__(self, scale: int) -> SymbolicDim | AffineDim:
+        _validate_positive_scale(scale)
+        if scale == 1:
+            return self
+        return AffineDim(self, scale=scale)
 
-ShapeDim: TypeAlias = int | SymbolicDim
+    def __rmul__(self, scale: int) -> SymbolicDim | AffineDim:
+        return self * scale
+
+    def __add__(self, offset: int) -> SymbolicDim | AffineDim:
+        _validate_non_negative_offset(offset)
+        if offset == 0:
+            return self
+        return AffineDim(self, offset=offset)
+
+    def __radd__(self, offset: int) -> SymbolicDim | AffineDim:
+        return self + offset
+
+
+@dataclass(frozen=True, order=True)
+class AffineDim:
+    """One-variable positive affine tensor dimension ``scale * symbol + offset``."""
+
+    symbol: SymbolicDim
+    scale: int = 1
+    offset: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, SymbolicDim):
+            raise TypeError("affine dimension requires a SymbolicDim")
+        _validate_positive_scale(self.scale)
+        _validate_non_negative_offset(self.offset)
+
+    def __str__(self) -> str:
+        base = str(self.symbol) if self.scale == 1 else f"{self.scale}*{self.symbol}"
+        return f"{base}+{self.offset}" if self.offset else base
+
+    def __mul__(self, factor: int) -> AffineDim:
+        _validate_positive_scale(factor)
+        if factor == 1:
+            return self
+        return AffineDim(
+            self.symbol,
+            scale=self.scale * factor,
+            offset=self.offset * factor,
+        )
+
+    def __rmul__(self, factor: int) -> AffineDim:
+        return self * factor
+
+    def __add__(self, offset: int) -> AffineDim:
+        _validate_non_negative_offset(offset)
+        if offset == 0:
+            return self
+        return AffineDim(
+            self.symbol,
+            scale=self.scale,
+            offset=self.offset + offset,
+        )
+
+    def __radd__(self, offset: int) -> AffineDim:
+        return self + offset
+
+    def evaluate(self, binding: int) -> int:
+        if not isinstance(binding, int) or isinstance(binding, bool) or binding < 0:
+            raise ValueError("affine dimension binding must be a non-negative integer")
+        return self.scale * binding + self.offset
+
+    def solve(self, extent: int) -> int:
+        if not isinstance(extent, int) or isinstance(extent, bool) or extent < 0:
+            raise ValueError("affine runtime extent must be a non-negative integer")
+        if extent < self.offset:
+            raise ValueError(
+                f"runtime extent {extent} is smaller than affine offset {self.offset} "
+                f"for {self}"
+            )
+        residual = extent - self.offset
+        if residual % self.scale:
+            raise ValueError(
+                f"runtime extent {extent} minus offset {self.offset} is not divisible "
+                f"by scale {self.scale} for {self}"
+            )
+        return residual // self.scale
+
+
+ShapeDim: TypeAlias = int | SymbolicDim | AffineDim
 
 
 @dataclass(frozen=True)
@@ -61,7 +145,7 @@ class TensorType:
 
     def __post_init__(self) -> None:
         for dim in self.shape:
-            if isinstance(dim, SymbolicDim):
+            if isinstance(dim, (SymbolicDim, AffineDim)):
                 continue
             if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
                 raise ValueError(f"invalid tensor shape: {self.shape}")
@@ -72,7 +156,13 @@ class TensorType:
 
     @property
     def symbolic_dims(self) -> frozenset[SymbolicDim]:
-        return frozenset(dim for dim in self.shape if isinstance(dim, SymbolicDim))
+        symbols: set[SymbolicDim] = set()
+        for dim in self.shape:
+            if isinstance(dim, SymbolicDim):
+                symbols.add(dim)
+            elif isinstance(dim, AffineDim):
+                symbols.add(dim.symbol)
+        return frozenset(symbols)
 
     def __str__(self) -> str:
         dims = "x".join(str(dim) for dim in self.shape)
@@ -239,6 +329,16 @@ class Module:
                 lines.append(f"  {lhs}{op.opcode} {operands}".rstrip())
         lines.append("}")
         return "\n".join(lines)
+
+
+def _validate_positive_scale(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError("affine dimension requires a positive integer scale")
+
+
+def _validate_non_negative_offset(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("affine dimension requires a non-negative integer offset")
 
 
 def _format_literal(value: Any) -> str:
