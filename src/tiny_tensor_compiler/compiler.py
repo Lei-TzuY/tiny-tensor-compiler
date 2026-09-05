@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .fusion_planner import fuse_elementwise
@@ -12,16 +12,18 @@ from .loop_ir import lower_to_loops
 from .lowering import lower_to_cpu
 from .native import NativeExecutable, compile_native
 from .symbolic import (
-    bind_dynamic_batch,
+    SymbolicShapeError,
+    bind_dynamic_shapes,
     clone_module,
     has_symbolic_shapes,
+    normalize_symbolic_bindings,
     specialize_module,
-    validate_dynamic_batch_module,
+    validate_dynamic_module,
 )
 
 
 class DynamicExecutable:
-    """Reusable runtime-specialized executable for one shared leading symbolic dimension."""
+    """Reusable native executable specialized by complete runtime symbolic bindings."""
 
     def __init__(
         self,
@@ -32,37 +34,78 @@ class DynamicExecutable:
         borrow_inputs: bool = False,
     ) -> None:
         self._module = clone_module(module)
-        self._symbol = validate_dynamic_batch_module(self._module)
+        self._symbols = validate_dynamic_module(self._module)
         self._compiler = compiler
         self._cache_dir = cache_dir
         self._borrow_inputs = borrow_inputs
-        self._specializations: dict[int, NativeExecutable] = {}
+        self._specializations: dict[tuple[int, ...], NativeExecutable] = {}
         self._lock = threading.RLock()
 
     @property
+    def symbolic_dims(self) -> tuple[SymbolicDim, ...]:
+        return self._symbols
+
+    @property
     def symbolic_dim(self) -> SymbolicDim:
-        return self._symbol
+        if len(self._symbols) != 1:
+            raise SymbolicShapeError(
+                "symbolic_dim is available only for a single symbolic dimension"
+            )
+        return self._symbols[0]
+
+    @property
+    def cached_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        with self._lock:
+            return tuple(
+                tuple(
+                    (symbol.name, size)
+                    for symbol, size in zip(self._symbols, key, strict=True)
+                )
+                for key in sorted(self._specializations)
+            )
 
     @property
     def cached_batch_sizes(self) -> tuple[int, ...]:
+        if len(self._symbols) != 1:
+            raise SymbolicShapeError(
+                "cached_batch_sizes is available only for a single symbolic dimension"
+            )
         with self._lock:
-            return tuple(sorted(self._specializations))
+            return tuple(sorted(key[0] for key in self._specializations))
 
-    def specialize(self, batch_size: int) -> NativeExecutable:
-        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 0:
-            raise ValueError("batch size must be a non-negative integer")
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> NativeExecutable:
+        if isinstance(bindings, int) and not isinstance(bindings, bool):
+            if len(self._symbols) != 1:
+                raise SymbolicShapeError(
+                    "integer specialization requires a single symbolic dimension"
+                )
+            explicit: Mapping[SymbolicDim | str, int] = {
+                self._symbols[0]: bindings
+            }
+        elif isinstance(bindings, Mapping):
+            explicit = bindings
+        else:
+            raise TypeError(
+                "specialization requires an integer for one symbol or a binding mapping"
+            )
+
+        normalized = normalize_symbolic_bindings(self._module, explicit)
+        key = tuple(normalized[symbol] for symbol in self._symbols)
         with self._lock:
-            executable = self._specializations.get(batch_size)
+            executable = self._specializations.get(key)
             if executable is not None:
                 return executable
-            concrete = specialize_module(self._module, {self._symbol: batch_size})
+            concrete = specialize_module(self._module, normalized)
             executable = compile_module(
                 concrete,
                 compiler=self._compiler,
                 cache_dir=self._cache_dir,
                 borrow_inputs=self._borrow_inputs,
             )
-            self._specializations[batch_size] = executable
+            self._specializations[key] = executable
             return executable
 
     def execute(
@@ -70,8 +113,8 @@ class DynamicExecutable:
         inputs: Sequence[Any] = (),
         out: Any = None,
     ):
-        _, batch_size = bind_dynamic_batch(self._module, inputs)
-        return self.specialize(batch_size)(inputs=inputs, out=out)
+        bindings = bind_dynamic_shapes(self._module, inputs)
+        return self.specialize(bindings)(inputs=inputs, out=out)
 
     def __call__(
         self,
@@ -92,7 +135,7 @@ def compile_module(
     if has_symbolic_shapes(module):
         raise ValueError(
             "compile_module requires concrete tensor shapes; use compile_dynamic_module "
-            "for runtime symbolic batch specialization"
+            "for runtime symbolic specialization"
         )
     loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
     if borrow_inputs:
@@ -107,7 +150,7 @@ def compile_dynamic_module(
     *,
     borrow_inputs: bool = False,
 ) -> DynamicExecutable:
-    """Prepare lazy native specializations for one shared leading symbolic batch dimension."""
+    """Prepare lazy native specializations for runtime symbolic dimensions."""
     return DynamicExecutable(
         module,
         compiler=compiler,
