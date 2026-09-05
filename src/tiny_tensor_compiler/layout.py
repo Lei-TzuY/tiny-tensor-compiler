@@ -60,6 +60,8 @@ class StorageLayout:
     def reshaped(self, source_shape: tuple[int, ...], target_shape: tuple[int, ...]) -> StorageLayout:
         if element_count(source_shape) != element_count(target_shape):
             raise ValueError("contiguous view reshape requires equal element counts")
+        if source_shape == target_shape:
+            return self
         if not self.is_contiguous(source_shape):
             raise ValueError("cannot reshape a non-contiguous storage view without copying")
         offset = 0 if any(dim == 0 for dim in target_shape) else self.offset
