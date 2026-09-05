@@ -11,6 +11,7 @@ from .loop_ir import (
     LoopOperation,
     LoopProgram,
     LoopReturn,
+    LoopView,
     fused_expression_for_kernel,
 )
 
@@ -29,8 +30,6 @@ class _FusionCost:
 
     @property
     def rank(self) -> tuple[int, int, int]:
-        # Prefer eliminating more intermediate materializations, then a smaller
-        # external-input footprint, then the larger coherent binary window.
         return (
             self.eliminated_intermediates,
             -self.external_inputs,
@@ -48,7 +47,7 @@ class _BinaryFusionPlan:
 def fuse_elementwise(program: LoopProgram) -> LoopProgram:
     """Fuse verified elementwise subgraphs through one bounded DAG planner."""
     operations = program.operations
-    types = {alloc.buffer: alloc.type for alloc in program.allocations}
+    types = program.value_types
     fused: list[LoopOperation] = []
     index = 0
 
@@ -149,8 +148,6 @@ def _plan_binary_window(
             internal_uses[producer_index] += 1
             internal_consumers[producer_index] = node_index
         edges.append((node_edges[0], node_edges[1]))
-        # A physical slot may be legally reused after the prior logical value's
-        # unique consumer. From this point onward the slot names this new value.
         prior_outputs[kernel.output] = node_index
 
     if internal_uses[-1] != 0 or any(count != 1 for count in internal_uses[:-1]):
@@ -463,6 +460,11 @@ def _producer_value_has_no_later_use(
         if isinstance(operation, LoopInput):
             if operation.output == buffer:
                 return True
+        elif isinstance(operation, LoopView):
+            if operation.output == buffer:
+                return True
+            if operation.source == buffer:
+                return False
         elif isinstance(operation, LoopKernel):
             if operation.output == buffer:
                 return True
