@@ -13,6 +13,7 @@ from .lowering import (
     BufferAlloc,
     BufferCopyInto,
     BufferInput,
+    BufferReluInto,
     BufferReturn,
     BufferView,
     CPUProgram,
@@ -66,6 +67,15 @@ class LoopCopyInto:
 
 
 @dataclass(frozen=True)
+class LoopReluInto:
+    output: int
+    root: int
+    target: int
+    type: TensorType
+    layout: StorageLayout
+
+
+@dataclass(frozen=True)
 class LoopKernel:
     opcode: str
     output: int
@@ -81,7 +91,15 @@ class LoopReturn:
     buffer: int
 
 
-LoopOperation = LoopAlloc | LoopInput | LoopView | LoopCopyInto | LoopKernel | LoopReturn
+LoopOperation = (
+    LoopAlloc
+    | LoopInput
+    | LoopView
+    | LoopCopyInto
+    | LoopReluInto
+    | LoopKernel
+    | LoopReturn
+)
 
 
 @dataclass(frozen=True)
@@ -108,13 +126,17 @@ class LoopProgram:
         return tuple(op for op in self.operations if isinstance(op, LoopCopyInto))
 
     @property
+    def relu_writes(self) -> tuple[LoopReluInto, ...]:
+        return tuple(op for op in self.operations if isinstance(op, LoopReluInto))
+
+    @property
     def value_types(self) -> dict[int, TensorType]:
         types = {alloc.buffer: alloc.type for alloc in self.allocations}
         types.update(
             {
                 op.output: op.type
                 for op in self.operations
-                if isinstance(op, (LoopView, LoopCopyInto))
+                if isinstance(op, (LoopView, LoopCopyInto, LoopReluInto))
             }
         )
         return types
@@ -139,12 +161,12 @@ class LoopProgram:
                 layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
                 layouts[op.output] = layout
                 roots[op.output] = root
-            elif isinstance(op, LoopCopyInto):
+            elif isinstance(op, (LoopCopyInto, LoopReluInto)):
                 if op.root not in roots:
-                    raise ValueError("copy_into root handle has no storage root")
+                    raise ValueError(f"{type(op).__name__} root handle has no storage root")
                 root = roots[op.root]
                 if types[op.root] != root_types[root] or layouts[op.root] != layouts[root]:
-                    raise ValueError("copy_into root handle must expose the full owning root")
+                    raise ValueError("write-effect root handle must expose the full owning root")
                 op.layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
                 layouts[op.output] = op.layout
                 roots[op.output] = root
@@ -180,9 +202,9 @@ class LoopProgram:
                 if op.source not in roots:
                     raise KeyError(f"view source p{op.source} has no storage root")
                 roots[op.output] = roots[op.source]
-            elif isinstance(op, LoopCopyInto):
+            elif isinstance(op, (LoopCopyInto, LoopReluInto)):
                 if op.root not in roots:
-                    raise KeyError(f"copy_into root handle p{op.root} has no storage root")
+                    raise KeyError(f"write-effect root handle p{op.root} has no storage root")
                 roots[op.output] = roots[op.root]
         try:
             return roots[buffer]
@@ -210,6 +232,11 @@ class LoopProgram:
                 lines.append(
                     f"p{op.output} = copy_into root=p{op.root} target=p{op.target} "
                     f"source=p{op.source} : {op.type}"
+                )
+                continue
+            if isinstance(op, LoopReluInto):
+                lines.append(
+                    f"p{op.output} = relu_into root=p{op.root} target=p{op.target} : {op.type}"
                 )
                 continue
             if isinstance(op, LoopReturn):
@@ -288,6 +315,23 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                     root=virtual_handles[op.root],
                     target=virtual_handles[op.target],
                     source=virtual_handles[op.source],
+                    type=virtual_types[op.output],
+                    layout=alias.layout,
+                )
+            )
+            continue
+        if isinstance(op, BufferReluInto):
+            handle = next_handle
+            next_handle += 1
+            virtual_handles[op.output] = handle
+            alias = plan.alias_for(op.output)
+            if alias is None:
+                raise RuntimeError("planned relu_into result unexpectedly has no alias descriptor")
+            operations.append(
+                LoopReluInto(
+                    output=handle,
+                    root=virtual_handles[op.root],
+                    target=virtual_handles[op.target],
                     type=virtual_types[op.output],
                     layout=alias.layout,
                 )
@@ -460,6 +504,43 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             written.add(op.output)
             continue
 
+        if isinstance(op, LoopReluInto):
+            saw_execution = True
+            if op.output < 0:
+                raise ValueError(f"invalid negative relu_into result id p{op.output}")
+            if op.output in types:
+                raise ValueError(f"relu_into result p{op.output} collides with an existing loop value")
+            for buffer in (op.root, op.target):
+                if buffer not in types:
+                    raise ValueError(f"relu_into input p{buffer} is not defined")
+                if buffer not in written:
+                    raise ValueError(f"relu_into input p{buffer} is not written")
+                _verify_fresh_value(buffer, roots, root_generations, value_generations)
+            root = roots[op.root]
+            if root not in allocated:
+                raise ValueError("relu_into root handle has no owning storage")
+            if root in input_roots:
+                raise ValueError("relu_into cannot mutate borrowed or copied runtime input storage")
+            if types[op.root] != allocated[root] or layouts[op.root] != layouts[root]:
+                raise ValueError("relu_into root must be a fresh full-root handle")
+            if roots[op.target] != root:
+                raise ValueError("relu_into target must alias its owning root")
+            if infer_relu(types[op.target]) != types[op.target]:
+                raise ValueError("relu_into target type is not ReLU-preserving")
+            if op.type != allocated[root]:
+                raise ValueError("relu_into fresh result type must match its owning root")
+            if op.layout != layouts[root]:
+                raise ValueError("relu_into fresh result must expose the full owning root layout")
+            op.layout.validate_bounds(op.type.shape, element_count(allocated[root].shape))
+
+            root_generations[root] += 1
+            types[op.output] = op.type
+            layouts[op.output] = op.layout
+            roots[op.output] = root
+            value_generations[op.output] = root_generations[root]
+            written.add(op.output)
+            continue
+
         if isinstance(op, LoopKernel):
             saw_execution = True
             if op.output not in allocated:
@@ -489,7 +570,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 literal = np.asarray(op.literal)
                 if tuple(literal.shape) != output_type.shape:
                     raise ValueError("const loop literal shape does not match output buffer")
-                if literal.dtype != output_type.dtype.to_numpy():
+                if op.literal.dtype != output_type.dtype.to_numpy():
                     raise ValueError("const loop literal dtype does not match output buffer")
             elif op.opcode in {"add", "mul"}:
                 if len(op.inputs) != 2 or len(op.input_maps) != 2 or op.literal is not None:
