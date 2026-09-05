@@ -27,6 +27,12 @@ def _fail_clang(configuration, module, inputs):
     return result
 
 
+def _fail_clang_exception(configuration, module, inputs):
+    if configuration.name == "clang":
+        raise RuntimeError("synthetic candidate compiler failure")
+    return execute_reference(module, inputs=inputs)
+
+
 def _fail_gcc(configuration, module, inputs):
     if configuration.name == "gcc":
         raise RuntimeError("synthetic baseline compiler failure")
@@ -77,7 +83,7 @@ def test_compiler_pair_participates_in_failure_identity_and_merge():
     clang_failure = collect_cross_compiler_corpus(
         start_seed=5,
         cases=1,
-        compiler_runner=_fail_clang,
+        compiler_runner=_fail_clang_exception,
     )
 
     assert gcc_failure.entries[0].repros == clang_failure.entries[0].repros
