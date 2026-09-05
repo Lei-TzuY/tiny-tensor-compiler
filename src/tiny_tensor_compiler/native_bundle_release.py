@@ -313,11 +313,13 @@ def publish_release_channel(
             raise NativeBundleReleaseError(
                 "release channel sequence must advance beyond the current head"
             )
-        if normalized_sequence == current_checkpoint.sequence:
-            if digest != current_checkpoint.archive_digest:
-                raise NativeBundleReleaseError(
-                    "release channel cannot bind the same sequence to a different digest"
-                )
+        if (
+            normalized_sequence == current_checkpoint.sequence
+            and digest != current_checkpoint.archive_digest
+        ):
+            raise NativeBundleReleaseError(
+                "release channel cannot bind the same sequence to a different digest"
+            )
 
     published_digest, published_id = publish_attested_dynamic_bundle_set_archive(
         archive,
