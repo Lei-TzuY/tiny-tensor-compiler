@@ -50,6 +50,36 @@ def infer_reshape(input_type: TensorType, shape: Iterable[ShapeDim]) -> TensorTy
     return result_type
 
 
+def infer_slice(
+    input_type: TensorType,
+    *,
+    axis: int,
+    start: int,
+    stop: int,
+    step: int,
+) -> TensorType:
+    """Infer one bounded positive-stride slice along a concrete source axis."""
+    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(input_type.shape):
+        raise TypeInferenceError("slice axis is out of range")
+    for name, value in (("start", start), ("stop", stop), ("step", step)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise TypeInferenceError(f"slice {name} must be an integer")
+    if step <= 0:
+        raise TypeInferenceError("slice step must be a positive integer")
+
+    extent = input_type.shape[axis]
+    if not isinstance(extent, int) or isinstance(extent, bool):
+        raise TypeInferenceError("slice axis extent must be concrete before slicing")
+    if start < 0 or stop < 0 or start > stop or stop > extent:
+        raise TypeInferenceError(
+            f"slice bounds must satisfy 0 <= start <= stop <= extent ({extent})"
+        )
+
+    shape = list(input_type.shape)
+    shape[axis] = (stop - start + step - 1) // step
+    return TensorType(tuple(shape), input_type.dtype)
+
+
 Monomial = tuple[tuple[SymbolicDim, int], ...]
 Polynomial = dict[Monomial, int]
 
