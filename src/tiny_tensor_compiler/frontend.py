@@ -47,11 +47,21 @@ class Tensor:
     def relu(self) -> Tensor:
         return self._builder.relu(self)
 
-    def sum(self, axis: int | Iterable[int] | None = None) -> Tensor:
-        return self._builder.sum(self, axis=axis)
+    def sum(
+        self,
+        axis: int | Iterable[int] | None = None,
+        *,
+        keepdims: bool = False,
+    ) -> Tensor:
+        return self._builder.sum(self, axis=axis, keepdims=keepdims)
 
-    def prod(self, axis: int | Iterable[int] | None = None) -> Tensor:
-        return self._builder.prod(self, axis=axis)
+    def prod(
+        self,
+        axis: int | Iterable[int] | None = None,
+        *,
+        keepdims: bool = False,
+    ) -> Tensor:
+        return self._builder.prod(self, axis=axis, keepdims=keepdims)
 
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.reshape(self, shape)
@@ -141,10 +151,15 @@ class GraphBuilder:
         return Tensor(self, op.results[0])
 
     def sum(
-        self, tensor: Tensor, axis: int | Iterable[int] | None = None
+        self,
+        tensor: Tensor,
+        axis: int | Iterable[int] | None = None,
+        *,
+        keepdims: bool = False,
     ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
+        _validate_keepdims(keepdims)
         normalized_axis = normalize_sum_axes(tensor.type, axis)
         result_type = infer_sum(tensor.type, normalized_axis)
         attrs = {} if normalized_axis is None else {"axis": normalized_axis}
@@ -154,13 +169,19 @@ class GraphBuilder:
             result_types=[result_type],
             attrs=attrs,
         )
-        return Tensor(self, op.results[0])
+        result = Tensor(self, op.results[0])
+        return self._retain_reduced_dimensions(tensor, result, normalized_axis) if keepdims else result
 
     def prod(
-        self, tensor: Tensor, axis: int | Iterable[int] | None = None
+        self,
+        tensor: Tensor,
+        axis: int | Iterable[int] | None = None,
+        *,
+        keepdims: bool = False,
     ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
+        _validate_keepdims(keepdims)
         normalized_axis = normalize_prod_axes(tensor.type, axis)
         result_type = infer_prod(tensor.type, normalized_axis)
         attrs = {} if normalized_axis is None else {"axis": normalized_axis}
@@ -170,7 +191,30 @@ class GraphBuilder:
             result_types=[result_type],
             attrs=attrs,
         )
-        return Tensor(self, op.results[0])
+        result = Tensor(self, op.results[0])
+        return self._retain_reduced_dimensions(tensor, result, normalized_axis) if keepdims else result
+
+    def _retain_reduced_dimensions(
+        self,
+        source: Tensor,
+        reduced: Tensor,
+        normalized_axis: int | tuple[int, ...] | None,
+    ) -> Tensor:
+        rank = len(source.type.shape)
+        if rank == 0:
+            return reduced
+        axes = (
+            set(range(rank))
+            if normalized_axis is None
+            else {normalized_axis}
+            if isinstance(normalized_axis, int)
+            else set(normalized_axis)
+        )
+        retained_shape = tuple(
+            1 if axis in axes else dim
+            for axis, dim in enumerate(source.type.shape)
+        )
+        return self.view(reduced, retained_shape)
 
     def reshape(self, tensor: Tensor, shape: Iterable[ShapeDim]) -> Tensor:
         self._ensure_open()
@@ -342,6 +386,11 @@ class GraphBuilder:
     def _ensure_open(self) -> None:
         if self._finished:
             raise RuntimeError("graph has already been finished")
+
+
+def _validate_keepdims(keepdims: bool) -> None:
+    if not isinstance(keepdims, bool):
+        raise TypeInferenceError("reduction keepdims must be a bool")
 
 
 def _is_full_root_handle(value: Value) -> bool:
