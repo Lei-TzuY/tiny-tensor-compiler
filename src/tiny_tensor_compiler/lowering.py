@@ -5,7 +5,14 @@ from typing import Any
 
 import numpy as np
 
-from .inference import infer_binary, infer_relu, infer_reshape, infer_slice, infer_transpose
+from .inference import (
+    infer_binary,
+    infer_relu,
+    infer_reshape,
+    infer_reverse,
+    infer_slice,
+    infer_transpose,
+)
 from .ir import Module, TensorType, Value
 from .layout import StorageLayout, element_count
 from .verifier import verify
@@ -31,6 +38,7 @@ class BufferView:
     start: int = 0
     stop: int = 0
     step: int = 1
+    reverse_axis: int | None = None
     permutation: tuple[int, ...] | None = None
 
 
@@ -193,6 +201,10 @@ class CPUProgram:
                     lines.append(
                         f"b{op.output} = transpose b{op.source} axes={op.permutation}"
                     )
+                elif op.reverse_axis is not None:
+                    lines.append(
+                        f"b{op.output} = reverse b{op.source} axis={op.reverse_axis}"
+                    )
                 elif op.slice_axis is None:
                     lines.append(f"b{op.output} = view b{op.source}")
                 else:
@@ -248,6 +260,15 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 )
             )
             continue
+        if op.opcode == "reverse":
+            operations.append(
+                BufferView(
+                    output=buffer,
+                    source=buffers[op.operands[0]],
+                    reverse_axis=op.attrs["axis"],
+                )
+            )
+            continue
         if op.opcode == "transpose":
             operations.append(
                 BufferView(
@@ -275,7 +296,7 @@ def lower_to_cpu(module: Module) -> CPUProgram:
 
 
 def plan_memory(program: CPUProgram) -> MemoryPlan:
-    """Reuse storage while preserving transitive positive-stride alias lifetimes."""
+    """Reuse storage while preserving transitive signed-stride alias lifetimes."""
     allocation_positions: dict[int, int] = {}
     types: dict[int, TensorType] = {}
     last_uses: dict[int, int] = {}
@@ -350,6 +371,10 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
                 )
                 if inferred_shape != output_type.shape:
                     raise ValueError("buffer transpose layout shape does not match inferred output")
+            elif op.reverse_axis is not None:
+                layout = source_layout.reversed(source_type.shape, op.reverse_axis)
+                if output_type != source_type:
+                    raise ValueError("buffer reverse layout type does not match inferred output")
             elif op.slice_axis is None:
                 layout = source_layout.reshaped(source_type.shape, output_type.shape)
             else:
@@ -424,11 +449,17 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 raise ValueError(f"buffer b{op.output} is written more than once")
             if op.source not in written:
                 raise ValueError(f"buffer b{op.source} is viewed before being written")
-            if op.permutation is not None and op.slice_axis is not None:
-                raise ValueError("buffer view cannot be both a transpose and a slice")
+            mode_count = sum(
+                transform is not None
+                for transform in (op.slice_axis, op.reverse_axis, op.permutation)
+            )
+            if mode_count > 1:
+                raise ValueError("buffer view cannot combine slice, reverse, and transpose transforms")
             output_type = allocated[op.output]
             if op.permutation is not None:
                 expected = infer_transpose(allocated[op.source], op.permutation)
+            elif op.reverse_axis is not None:
+                expected = infer_reverse(allocated[op.source], op.reverse_axis)
             elif op.slice_axis is None:
                 expected = infer_reshape(allocated[op.source], output_type.shape)
             else:
