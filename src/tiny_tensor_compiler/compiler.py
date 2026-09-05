@@ -12,6 +12,7 @@ from .lowering import lower_to_cpu
 from .native import NativeExecutable, compile_native
 from .symbolic import (
     bind_dynamic_batch,
+    clone_module,
     has_symbolic_shapes,
     specialize_module,
     validate_dynamic_batch_module,
@@ -29,8 +30,8 @@ class DynamicExecutable:
         *,
         borrow_inputs: bool = False,
     ) -> None:
-        self._module = module
-        self._symbol = validate_dynamic_batch_module(module)
+        self._module = clone_module(module)
+        self._symbol = validate_dynamic_batch_module(self._module)
         self._compiler = compiler
         self._cache_dir = cache_dir
         self._borrow_inputs = borrow_inputs
