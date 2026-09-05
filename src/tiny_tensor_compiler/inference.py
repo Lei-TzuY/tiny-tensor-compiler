@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import numpy as np
 
 from .ir import AffineDim, DType, LinearDim, ShapeDim, SymbolicDim, TensorType
@@ -22,6 +24,79 @@ def infer_relu(input_type: TensorType) -> TensorType:
     if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
         raise TypeInferenceError(f"relu requires a numeric tensor, got {input_type.dtype.value}")
     return input_type
+
+
+def infer_reshape(input_type: TensorType, shape: Iterable[ShapeDim]) -> TensorType:
+    """Infer a row-major reshape only when element-count equality is provable exactly."""
+    try:
+        result_type = TensorType(tuple(shape), input_type.dtype)
+    except (TypeError, ValueError) as exc:
+        raise TypeInferenceError(str(exc)) from exc
+
+    new_symbols = result_type.symbolic_dims - input_type.symbolic_dims
+    if new_symbols:
+        names = ", ".join(sorted(symbol.name for symbol in new_symbols))
+        raise TypeInferenceError(
+            f"reshape target introduces new symbolic dimension(s): {names}"
+        )
+
+    if _shape_element_polynomial(input_type.shape) != _shape_element_polynomial(
+        result_type.shape
+    ):
+        raise TypeInferenceError(
+            f"reshape element count cannot be proven equal for "
+            f"{input_type.shape} -> {result_type.shape}"
+        )
+    return result_type
+
+
+Monomial = tuple[tuple[SymbolicDim, int], ...]
+Polynomial = dict[Monomial, int]
+
+
+def _shape_element_polynomial(shape: tuple[ShapeDim, ...]) -> Polynomial:
+    polynomial: Polynomial = {(): 1}
+    for dim in shape:
+        polynomial = _multiply_polynomials(polynomial, _dim_polynomial(dim))
+    return polynomial
+
+
+def _dim_polynomial(dim: ShapeDim) -> Polynomial:
+    if isinstance(dim, bool):
+        raise TypeInferenceError("tensor dimensions must not be bool")
+    if isinstance(dim, int):
+        return {} if dim == 0 else {(): dim}
+    if isinstance(dim, SymbolicDim):
+        return {((dim, 1),): 1}
+    if isinstance(dim, AffineDim):
+        polynomial: Polynomial = {((dim.symbol, 1),): dim.scale}
+        if dim.offset:
+            polynomial[()] = dim.offset
+        return polynomial
+    if isinstance(dim, LinearDim):
+        polynomial = {
+            ((symbol, 1),): coefficient
+            for symbol, coefficient in dim.terms
+        }
+        if dim.offset:
+            polynomial[()] = dim.offset
+        return polynomial
+    raise TypeInferenceError(f"unsupported tensor dimension: {dim!r}")
+
+
+def _multiply_polynomials(lhs: Polynomial, rhs: Polynomial) -> Polynomial:
+    if not lhs or not rhs:
+        return {}
+    product: Polynomial = {}
+    for lhs_monomial, lhs_coefficient in lhs.items():
+        for rhs_monomial, rhs_coefficient in rhs.items():
+            powers: dict[SymbolicDim, int] = {}
+            for symbol, exponent in (*lhs_monomial, *rhs_monomial):
+                powers[symbol] = powers.get(symbol, 0) + exponent
+            monomial = tuple(sorted(powers.items(), key=lambda item: item[0].name))
+            coefficient = lhs_coefficient * rhs_coefficient
+            product[monomial] = product.get(monomial, 0) + coefficient
+    return {monomial: coefficient for monomial, coefficient in product.items() if coefficient}
 
 
 def _broadcast_shapes(
