@@ -45,9 +45,9 @@ result = executable(inputs=[values])
 
 Borrowed inputs must already be `numpy.ndarray` objects with the exact compiled shape and dtype, C-contiguous layout, and aligned storage. Python sequences, non-contiguous views, or misaligned arrays are rejected rather than silently materialized. The borrowing transform separates each external input's read-only lifetime from later scratch-buffer reuse and constructs a new verified loop program. Generated C then aliases the borrowed physical slot directly to the ABI input pointer and omits that input's materialization loop; the loop interpreter binds the caller array to the same slot directly.
 
-## Runtime symbolic batch specialization
+## Runtime symbolic-shape specialization
 
-`compile_dynamic_module()` is the separate entrypoint for the current bounded dynamic-shape contract. Tensor IR may contain exactly one shared leading `SymbolicDim`, conventionally `B`:
+`compile_dynamic_module()` is the separate entrypoint for runtime-specialized tensor shapes. Tensor IR may contain one or more named `SymbolicDim` values on arbitrary axes:
 
 ```python
 import numpy as np
@@ -55,23 +55,24 @@ import numpy as np
 from tiny_tensor_compiler import GraphBuilder, SymbolicDim, compile_dynamic_module
 
 B = SymbolicDim("B")
+W = SymbolicDim("W")
 builder = GraphBuilder()
-x = builder.input((B, 3), dtype="float32")
-bias = builder.input((3,), dtype="float32")
-module = builder.finish((x + bias).relu())
+lhs = builder.input((B, 1), dtype="float32")
+rhs = builder.input((1, W), dtype="float32")
+module = builder.finish((lhs + rhs).relu())
 
 executable = compile_dynamic_module(module)
 
-result2 = executable(
+result_2x3 = executable(
     inputs=[
-        np.zeros((2, 3), dtype=np.float32),
-        np.ones((3,), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((1, 3), dtype=np.float32),
     ]
 )
-result7 = executable(
+result_2x7 = executable(
     inputs=[
-        np.zeros((7, 3), dtype=np.float32),
-        np.ones((3,), dtype=np.float32),
+        np.zeros((2, 1), dtype=np.float32),
+        np.ones((1, 7), dtype=np.float32),
     ]
 )
 ```
@@ -81,19 +82,21 @@ The symbolic path does not introduce runtime-sized Buffer IR, Loop IR, C arrays,
 ```text
 symbolic tensor Module
 -> tensor IR verification
--> runtime input shape/dtype validation
--> bind one shared leading B
--> clone tensor IR and replace B with an integer
+-> exact runtime input rank/static-axis/dtype validation
+-> bind every named SymbolicDim from runtime input axes
+-> clone tensor IR and replace all symbols with concrete integers
 -> reverify the concrete tensor Module
 -> ordinary compile_module() pipeline
--> NativeExecutable cached by batch size
+-> NativeExecutable cached by the complete binding tuple
 ```
 
-Every input occurrence of `B` must resolve to the same non-negative runtime dimension. Static axes and dtypes remain exact. `B` may broadcast with the same `B` or with dimension `1`; a different symbol or a non-unit concrete dimension is not treated as an implicit equality constraint. `compile_module()` explicitly rejects unspecialized symbolic IR so the physical backend never accidentally receives unresolved dimensions.
+Every symbol must occur in at least one runtime input and every repeated occurrence of that symbol must resolve to the same non-negative dimension. Static axes and dtypes remain exact. A symbol may broadcast with the same symbol or dimension `1`. Distinct symbols may coexist on independent broadcast axes, such as `(B, 1)` with `(1, W)`, but a `B` aligned directly against `W` is not treated as an implicit equality constraint. `compile_module()` explicitly rejects unspecialized symbolic IR so the physical backend never accidentally receives unresolved dimensions.
 
-`DynamicExecutable` deep-clones the symbolic module when it is created, including constant payloads. Later caller mutation of the original `Module` therefore cannot make existing and future batch-size specializations represent different programs. Each observed batch size lazily creates one ordinary `NativeExecutable`; repeated calls with the same batch size reuse that specialization. `cache_dir=` and `borrow_inputs=True` are forwarded into each specialization, so persistent native caching, multi-output execution, and verified zero-copy inputs remain available.
+`bind_dynamic_shapes(module, inputs)` exposes the same runtime-binding validation and returns the complete `{SymbolicDim: int}` mapping. `DynamicExecutable.symbolic_dims` reports the deterministic symbol order, `cached_bindings` reports the concrete binding tuples already compiled, and `specialize({...})` accepts either `SymbolicDim` or string keys. For a one-symbol executable, the existing convenience surface remains compatible: `symbolic_dim`, integer `specialize(2)`, and `cached_batch_sizes` still work. Those single-symbol convenience properties deliberately reject multi-symbol executables rather than returning ambiguous data.
 
-The current dynamic contract intentionally stops at one shared leading symbolic dimension. Multiple independent symbols, symbolic non-leading axes, arbitrary symbolic arithmetic, reshape-style shape transforms, and runtime-sized physical buffers are not claimed.
+`DynamicExecutable` deep-clones the symbolic module when it is created, including constant payloads. Later caller mutation of the original `Module` therefore cannot make existing and future specializations represent different programs. Each distinct complete binding lazily creates one ordinary `NativeExecutable`; repeated calls with the same binding reuse that specialization. `cache_dir=` and `borrow_inputs=True` are forwarded into every specialization, so persistent native caching, multi-output execution, and verified zero-copy inputs remain available. Zero-valued symbolic dimensions are valid because the concrete compiler already defines zero-extent execution.
+
+The current dynamic contract intentionally stops at named integer dimensions. Arbitrary symbolic arithmetic or affine expressions, implicit equality solving between different symbols, reshape-style symbolic transforms, and runtime-sized physical buffers are not claimed.
 
 ## Outputs
 
