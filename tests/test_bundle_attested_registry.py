@@ -130,10 +130,10 @@ def test_attested_publish_fetch_and_compiler_free_load(tmp_path: Path, monkeypat
         PublisherTrustPolicy,
         fetch_attested_dynamic_bundle_set_archive,
         load_attested_dynamic_bundle_set_registry,
+        native_bundle,
         publish_attested_dynamic_bundle_set_archive,
         publisher_public_key_from_private_key,
     )
-    from tiny_tensor_compiler import native_bundle
 
     archive = _archive(tmp_path)
     secret = _key(0)
