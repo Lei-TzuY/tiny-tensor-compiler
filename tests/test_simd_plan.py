@@ -38,7 +38,41 @@ def test_add_tree_is_composed_from_three_fixed_width_add_steps():
     assert plan.result == "result"
 
 
-def test_plan_builder_does_not_expand_the_existing_sse2_capability_surface():
+def test_relu_add_tree_is_selected_from_expression_steps_without_opcode_whitelist():
+    plan = build_i32_sse2_plan(_kernel("relu_tree_add_add_add", (0, 1, 2, 3)))
+
+    assert plan is not None
+    assert [(step.opcode, step.output, step.inputs) for step in plan.steps] == [
+        ("add", "left", ("a", "b")),
+        ("add", "right", ("c", "d")),
+        ("add", "result", ("left", "right")),
+        ("relu", "relu", ("result",)),
+    ]
+    assert plan.result == "relu"
+
+
+def test_add_chain_tree_is_selected_from_expression_steps_without_opcode_whitelist():
+    plan = build_i32_sse2_plan(
+        _kernel("chain_tree_add_add_add_add", (0, 1, 2, 3, 4))
+    )
+
+    assert plan is not None
+    assert [(step.opcode, step.output, step.inputs) for step in plan.steps] == [
+        ("add", "inner", ("first_lhs", "first_rhs")),
+        ("add", "left", ("inner", "left_tail")),
+        ("add", "right", ("right_lhs", "right_rhs")),
+        ("add", "result", ("left", "right")),
+    ]
+    assert plan.result == "result"
+
+
+def test_plan_builder_rejects_expression_steps_outside_sse2_i32_surface():
     assert build_i32_sse2_plan(_kernel("relu_mul", (0, 1))) is None
     assert build_i32_sse2_plan(_kernel("chain_add_mul", (0, 1, 2))) is None
     assert build_i32_sse2_plan(_kernel("tree_add_mul_add", (0, 1, 2, 3))) is None
+    assert (
+        build_i32_sse2_plan(
+            _kernel("chain_tree_add_add_mul_add", (0, 1, 2, 3, 4))
+        )
+        is None
+    )
