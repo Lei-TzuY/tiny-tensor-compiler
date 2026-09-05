@@ -48,16 +48,18 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
     """Fuse verified elementwise subgraphs through one bounded DAG planner."""
     operations = program.operations
     types = program.value_types
+    storage_roots = {buffer: program.storage_root(buffer) for buffer in types}
     fused: list[LoopOperation] = []
     index = 0
 
     while index < len(operations):
-        plan = _plan_binary_subgraph(operations, index, types)
+        plan = _plan_binary_subgraph(operations, index, types, storage_roots)
         if plan is not None:
             kernel, next_index = _absorb_relu_tail(
                 operations,
                 index + plan.consumed,
                 plan.kernel,
+                storage_roots,
             )
             fused.append(kernel)
             index = next_index
@@ -65,7 +67,12 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
 
         operation = operations[index]
         if isinstance(operation, LoopKernel):
-            kernel, next_index = _absorb_relu_tail(operations, index + 1, operation)
+            kernel, next_index = _absorb_relu_tail(
+                operations,
+                index + 1,
+                operation,
+                storage_roots,
+            )
             if next_index != index + 1:
                 fused.append(kernel)
                 index = next_index
@@ -81,6 +88,7 @@ def _plan_binary_subgraph(
     operations: tuple[LoopOperation, ...],
     start_index: int,
     types: dict[int, TensorType],
+    storage_roots: dict[int, int],
 ) -> _BinaryFusionPlan | None:
     max_length = 0
     for offset in range(_MAX_BINARY_NODES):
@@ -94,7 +102,13 @@ def _plan_binary_subgraph(
 
     candidates: list[_BinaryFusionPlan] = []
     for length in range(2, max_length + 1):
-        kernel = _plan_binary_window(operations, start_index, length, types)
+        kernel = _plan_binary_window(
+            operations,
+            start_index,
+            length,
+            types,
+            storage_roots,
+        )
         if kernel is None:
             continue
         cost = _FusionCost(
@@ -116,6 +130,7 @@ def _plan_binary_window(
     start_index: int,
     length: int,
     types: dict[int, TensorType],
+    storage_roots: dict[int, int],
 ) -> LoopKernel | None:
     nodes = operations[start_index : start_index + length]
     if len(nodes) != length or not all(isinstance(node, LoopKernel) for node in nodes):
@@ -176,7 +191,7 @@ def _plan_binary_window(
         return None
     expression, fused_inputs, fused_maps = classified
 
-    if root.output in fused_inputs:
+    if _output_aliases_any_input(root.output, fused_inputs, storage_roots):
         return None
     if any(types[buffer].dtype != output_type.dtype for buffer in fused_inputs):
         return None
@@ -382,11 +397,17 @@ def _absorb_relu_tail(
     operations: tuple[LoopOperation, ...],
     start_index: int,
     producer: LoopKernel,
+    storage_roots: dict[int, int],
 ) -> tuple[LoopKernel, int]:
     next_index = start_index
     current = producer
     while True:
-        fused = _fuse_trailing_relu(operations, next_index, current)
+        fused = _fuse_trailing_relu(
+            operations,
+            next_index,
+            current,
+            storage_roots,
+        )
         if fused is None:
             return current, next_index
         current = fused
@@ -397,6 +418,7 @@ def _fuse_trailing_relu(
     operations: tuple[LoopOperation, ...],
     consumer_index: int,
     producer: LoopKernel,
+    storage_roots: dict[int, int],
 ) -> LoopKernel | None:
     if consumer_index >= len(operations):
         return None
@@ -410,7 +432,7 @@ def _fuse_trailing_relu(
     identity = IndexMap(tuple(range(len(consumer.iteration_shape))))
     if consumer.input_maps != (identity,):
         return None
-    if consumer.output in producer.inputs:
+    if _output_aliases_any_input(consumer.output, producer.inputs, storage_roots):
         return None
     if not _producer_value_has_no_later_use(
         operations,
@@ -449,6 +471,15 @@ def _fuse_trailing_relu(
         input_maps=producer.input_maps,
         fused_expression=producer.fused_expression,
     )
+
+
+def _output_aliases_any_input(
+    output: int,
+    inputs: tuple[int, ...],
+    storage_roots: dict[int, int],
+) -> bool:
+    output_root = storage_roots[output]
+    return any(storage_roots[buffer] == output_root for buffer in inputs)
 
 
 def _producer_value_has_no_later_use(
