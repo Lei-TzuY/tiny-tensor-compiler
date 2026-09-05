@@ -30,6 +30,18 @@ def tensor_abi_sha256(
     return hashlib.sha256(payload).hexdigest()
 
 
+def append_native_abi_export(source: str, abi_sha256: str) -> str:
+    """Append the ABI identity export without changing public generated-C semantics."""
+    if len(abi_sha256) != 64 or any(character not in "0123456789abcdef" for character in abi_sha256):
+        raise ValueError("native ABI fingerprint must be lowercase SHA-256 hex")
+    return (
+        source
+        + "\nTINY_TENSOR_EXPORT const char *tiny_tensor_abi_sha256(void) {\n"
+        + f'    return "{abi_sha256}";\n'
+        + "}\n"
+    )
+
+
 def _return_types(program: LoopProgram) -> tuple[TensorType, ...]:
     types = program.value_types
     try:
