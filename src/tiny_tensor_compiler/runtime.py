@@ -45,21 +45,21 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]]
             plan = ReductionPlan.from_opcode(op.opcode, op.attrs.get("axis"))
-            if plan.axis is None:
+            if plan.axes is None:
                 accumulator = plan.operator.identity(dtype)
                 for index in np.ndindex(operand.shape):
                     accumulator = plan.operator.combine(dtype, accumulator, operand[index])
                 values[op.results[0]] = np.array(accumulator, dtype=dtype)
             else:
-                axis = plan.axis
                 output = np.empty(op.results[0].type.shape, dtype=dtype)
+                reduction_shape = plan.reduction_shape(operand.shape)
                 for output_index in np.ndindex(output.shape):
                     accumulator = plan.operator.identity(dtype)
-                    for reduction_index in range(operand.shape[axis]):
-                        input_index = (
-                            output_index[:axis]
-                            + (reduction_index,)
-                            + output_index[axis:]
+                    for reduction_index in np.ndindex(reduction_shape):
+                        input_index = plan.input_index(
+                            operand.ndim,
+                            output_index,
+                            reduction_index,
                         )
                         accumulator = plan.operator.combine(
                             dtype,
