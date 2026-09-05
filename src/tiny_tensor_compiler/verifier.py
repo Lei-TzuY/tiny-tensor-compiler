@@ -22,6 +22,7 @@ class VerificationError(ValueError):
 
 
 _ALIAS_OPCODES = frozenset({"view", "slice", "reverse", "transpose"})
+_EFFECT_OPCODES = frozenset({"copy_into", "relu_into"})
 
 
 def verify(module: Module) -> None:
@@ -79,6 +80,8 @@ def verify(module: Module) -> None:
             _verify_transpose(op_index, op)
         elif op.opcode == "copy_into":
             _verify_copy_into(op_index, op)
+        elif op.opcode == "relu_into":
+            _verify_relu_into(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -276,6 +279,31 @@ def _verify_copy_into(op_index: int, op: Operation) -> None:
         _fail(op_index, op, "copy_into source must use a different storage root")
 
 
+def _verify_relu_into(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=2, results=1)
+    if op.attrs:
+        _fail(op_index, op, "relu_into does not accept attributes")
+
+    root, target = op.operands
+    result = op.results[0]
+    owner = _storage_root(root)
+    if result.type != root.type:
+        _fail(op_index, op, "relu_into result type must match the current root handle type")
+    if not _is_full_root_handle(root):
+        _fail(op_index, op, "relu_into root must be an owning value or fresh full-root result")
+    producer = owner.producer
+    if producer is None or producer.opcode in {"input", "const"}:
+        _fail(op_index, op, "relu_into root must use internal computed storage")
+    if _storage_root(target) is not owner:
+        _fail(op_index, op, "relu_into target must alias its owning root storage")
+    try:
+        expected_type = infer_relu(target.type)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if expected_type != target.type:
+        _fail(op_index, op, "relu_into target type is not ReLU-preserving")
+
+
 def _verify_return(op_index: int, op: Operation) -> None:
     if op.results:
         _fail(op_index, op, "return must not produce results")
@@ -300,7 +328,7 @@ def _record_storage_generation(
         storage_roots[result] = root
         value_generations[result] = value_generations[source]
         return
-    if op.opcode == "copy_into":
+    if op.opcode in _EFFECT_OPCODES:
         root = storage_roots[op.operands[0]]
         root_generations[root] += 1
         storage_roots[result] = root
@@ -338,7 +366,7 @@ def _is_full_root_handle(value: Value) -> bool:
     producer = value.producer
     return (
         producer is not None
-        and producer.opcode == "copy_into"
+        and producer.opcode in _EFFECT_OPCODES
         and producer.results[0] is value
         and value.type == owner.type
     )
@@ -357,7 +385,7 @@ def _storage_root(value: Value) -> Value:
         if producer.opcode in _ALIAS_OPCODES:
             current = producer.operands[0]
             continue
-        if producer.opcode == "copy_into":
+        if producer.opcode in _EFFECT_OPCODES:
             current = producer.operands[0]
             continue
         return current
