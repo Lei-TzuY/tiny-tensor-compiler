@@ -14,11 +14,15 @@ All notable project milestones are recorded here.
 - Ordered multi-output native results plus optional preallocated output sequences with exact shape, dtype, layout, alignment, mutability, input-alias, and cross-output alias validation.
 - Opt-in verified zero-copy external-input binding for loop CPU and native execution, including input-lifetime splitting when the original planned slot is reused later as scratch storage.
 - Strict borrowed-input contracts requiring exact NumPy arrays with compiled shape/dtype plus C-contiguous aligned storage, so the zero-copy path never hides a normalization copy.
+- `SymbolicDim` in typed tensor IR plus bounded symbolic broadcasting for one shared runtime batch dimension.
+- `compile_dynamic_module()` and reusable `DynamicExecutable` handles that bind a leading symbolic batch dimension from runtime inputs, clone/reverify a concrete specialization, and cache one `NativeExecutable` per batch size.
+- Dynamic reference execution plus native multi-output and verified borrowed-input coverage across multiple runtime batch sizes, including zero-sized batches.
 
 ### Compatibility
 
 - Single-output generated C and the existing `out=np.ndarray` native call contract remain unchanged.
 - External inputs still use the historical copied-buffer path by default; zero-copy binding is explicitly selected through `borrow_inputs()` or `compile_module(..., borrow_inputs=True)`.
+- `compile_module()` remains the eager concrete-shape entrypoint. Symbolic tensor IR must use the explicit `compile_dynamic_module()` specialization boundary before physical lowering.
 
 ## [0.1.0] - 2026-09-04
 
