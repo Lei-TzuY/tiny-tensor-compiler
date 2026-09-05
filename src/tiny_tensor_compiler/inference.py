@@ -27,11 +27,25 @@ def infer_relu(input_type: TensorType) -> TensorType:
     return input_type
 
 
-def infer_sum(input_type: TensorType) -> TensorType:
-    """Infer a deterministic full-tensor sum that preserves the input dtype."""
+def normalize_sum_axis(input_type: TensorType, axis: int) -> int:
+    """Normalize one Python-style reduction axis to canonical non-negative form."""
+    if not isinstance(axis, int) or isinstance(axis, bool):
+        raise TypeInferenceError("sum axis must be an integer")
+    rank = len(input_type.shape)
+    if axis < -rank or axis >= rank:
+        raise TypeInferenceError(f"sum axis {axis} is out of range for rank {rank}")
+    return axis + rank if axis < 0 else axis
+
+
+def infer_sum(input_type: TensorType, axis: int | None = None) -> TensorType:
+    """Infer a deterministic full-tensor or single-axis same-dtype sum."""
     if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
         raise TypeInferenceError(f"sum requires a numeric tensor, got {input_type.dtype.value}")
-    return TensorType((), input_type.dtype)
+    if axis is None:
+        return TensorType((), input_type.dtype)
+    normalized_axis = normalize_sum_axis(input_type, axis)
+    shape = input_type.shape[:normalized_axis] + input_type.shape[normalized_axis + 1 :]
+    return TensorType(shape, input_type.dtype)
 
 
 def infer_reshape(input_type: TensorType, shape: Iterable[ShapeDim]) -> TensorType:

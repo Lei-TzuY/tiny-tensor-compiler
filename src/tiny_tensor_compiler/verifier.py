@@ -175,10 +175,15 @@ def _verify_relu(op_index: int, op: Operation) -> None:
 
 def _verify_sum(op_index: int, op: Operation) -> None:
     _expect_arity(op_index, op, operands=1, results=1)
-    if op.attrs:
-        _fail(op_index, op, "sum does not accept attributes")
+    if set(op.attrs) not in (set(), {"axis"}):
+        _fail(op_index, op, "sum accepts only an optional canonical 'axis' attribute")
+    axis = op.attrs.get("axis")
+    if axis is not None:
+        rank = len(op.operands[0].type.shape)
+        if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= rank:
+            _fail(op_index, op, "sum axis must be a canonical non-negative in-range integer")
     try:
-        expected_type = infer_sum(op.operands[0].type)
+        expected_type = infer_sum(op.operands[0].type, axis)
     except TypeInferenceError as exc:
         _fail(op_index, op, str(exc))
     if op.results[0].type != expected_type:

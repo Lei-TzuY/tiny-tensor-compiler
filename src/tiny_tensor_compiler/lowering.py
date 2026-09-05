@@ -57,6 +57,7 @@ class BufferKernel:
     output: int
     inputs: tuple[int, ...]
     literal: np.ndarray[Any, Any] | None = None
+    reduction_axis: int | None = None
 
 
 @dataclass(frozen=True)
@@ -236,7 +237,12 @@ class CPUProgram:
                     lines.append(f"b{op.output} = const {_format_literal(op.literal)}")
                 else:
                     operands = ", ".join(f"b{buffer}" for buffer in op.inputs)
-                    lines.append(f"b{op.output} = {op.opcode} {operands}")
+                    suffix = (
+                        ""
+                        if op.opcode != "sum" or op.reduction_axis is None
+                        else f" axis={op.reduction_axis}"
+                    )
+                    lines.append(f"b{op.output} = {op.opcode} {operands}{suffix}")
             else:
                 lines.append(f"return b{op.buffer}")
         return "\n".join(lines)
@@ -316,6 +322,7 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 output=buffer,
                 inputs=tuple(buffers[operand] for operand in op.operands),
                 literal=literal,
+                reduction_axis=op.attrs.get("axis") if op.opcode == "sum" else None,
             )
         )
 
@@ -593,6 +600,8 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                     raise ValueError(f"buffer b{buffer} is read before being written")
                 require_fresh(buffer)
 
+            if op.opcode != "sum" and op.reduction_axis is not None:
+                raise ValueError("only sum kernels may carry a reduction axis")
             output_type = allocated[op.output]
             if op.opcode == "const":
                 if op.inputs:
@@ -619,7 +628,7 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             elif op.opcode == "sum":
                 if len(op.inputs) != 1 or op.literal is not None:
                     raise ValueError("sum kernel requires one input and no literal")
-                expected = infer_sum(allocated[op.inputs[0]])
+                expected = infer_sum(allocated[op.inputs[0]], op.reduction_axis)
                 if expected != output_type:
                     raise ValueError("sum kernel output buffer type does not match inference")
             elif op.opcode == "reshape":
