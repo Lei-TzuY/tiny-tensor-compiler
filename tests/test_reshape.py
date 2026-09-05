@@ -35,7 +35,7 @@ def test_static_reshape_is_typed_ir_and_reference_uses_c_order():
 
     assert reshaped.type.shape == (3, 2)
     assert reshaped.type.dtype == value.type.dtype
-    assert "reshape %0 : tensor<3x2xf32>" in module.dump()
+    assert "%1 = reshape %0" in module.dump()
 
     runtime = np.arange(6, dtype=np.float32).reshape(2, 3)
     actual = execute_reference(module, inputs=[runtime])
