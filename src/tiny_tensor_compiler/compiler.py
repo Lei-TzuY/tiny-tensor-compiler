@@ -5,6 +5,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .alias_views import alias_contiguous_reshapes
 from .fusion_planner import fuse_elementwise
 from .input_binding import borrow_inputs as bind_borrowed_inputs
 from .ir import Module, SymbolicDim
@@ -146,6 +147,7 @@ def compile_module(
     loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
     if borrow_inputs:
         loops = bind_borrowed_inputs(loops)
+    loops = alias_contiguous_reshapes(loops)
     if parallel:
         return compile_native(
             loops,
