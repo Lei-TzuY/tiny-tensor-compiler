@@ -11,6 +11,7 @@ from .ir import DType, TensorType
 from .layout import StorageLayout, element_count
 from .lowering import (
     BufferAlloc,
+    BufferCopyInto,
     BufferInput,
     BufferReturn,
     BufferView,
@@ -55,6 +56,16 @@ class LoopView:
 
 
 @dataclass(frozen=True)
+class LoopCopyInto:
+    output: int
+    root: int
+    target: int
+    source: int
+    type: TensorType
+    layout: StorageLayout
+
+
+@dataclass(frozen=True)
 class LoopKernel:
     opcode: str
     output: int
@@ -70,7 +81,7 @@ class LoopReturn:
     buffer: int
 
 
-LoopOperation = LoopAlloc | LoopInput | LoopView | LoopKernel | LoopReturn
+LoopOperation = LoopAlloc | LoopInput | LoopView | LoopCopyInto | LoopKernel | LoopReturn
 
 
 @dataclass(frozen=True)
@@ -93,9 +104,17 @@ class LoopProgram:
         return tuple(op for op in self.operations if isinstance(op, LoopView))
 
     @property
+    def copies(self) -> tuple[LoopCopyInto, ...]:
+        return tuple(op for op in self.operations if isinstance(op, LoopCopyInto))
+
+    @property
     def value_types(self) -> dict[int, TensorType]:
         types = {alloc.buffer: alloc.type for alloc in self.allocations}
-        types.update({view.output: view.type for view in self.views})
+        for op in self.operations:
+            if isinstance(op, LoopView):
+                types[op.output] = op.type
+            elif isinstance(op, LoopCopyInto):
+                types[op.output] = op.type
         return types
 
     @property
@@ -106,17 +125,25 @@ class LoopProgram:
         }
         roots = {alloc.buffer: alloc.buffer for alloc in self.allocations}
         root_types = {alloc.buffer: alloc.type for alloc in self.allocations}
-        for view in self.views:
-            source_layout = layouts[view.source]
-            root = roots[view.source]
-            layout = (
-                source_layout.reshaped(types[view.source].shape, view.type.shape)
-                if view.layout is None
-                else view.layout
-            )
-            layout.validate_bounds(view.type.shape, element_count(root_types[root].shape))
-            layouts[view.output] = layout
-            roots[view.output] = root
+        for op in self.operations:
+            if isinstance(op, LoopView):
+                source_layout = layouts[op.source]
+                root = roots[op.source]
+                layout = (
+                    source_layout.reshaped(types[op.source].shape, op.type.shape)
+                    if op.layout is None
+                    else op.layout
+                )
+                layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
+                layouts[op.output] = layout
+                roots[op.output] = root
+            elif isinstance(op, LoopCopyInto):
+                root = roots[op.root]
+                if root != op.root:
+                    raise ValueError("copy_into root must name owning storage")
+                op.layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
+                layouts[op.output] = op.layout
+                roots[op.output] = root
         return layouts
 
     @property
@@ -144,10 +171,15 @@ class LoopProgram:
 
     def storage_root(self, buffer: int) -> int:
         roots = {alloc.buffer: alloc.buffer for alloc in self.allocations}
-        for view in self.views:
-            if view.source not in roots:
-                raise KeyError(f"view source p{view.source} has no storage root")
-            roots[view.output] = roots[view.source]
+        for op in self.operations:
+            if isinstance(op, LoopView):
+                if op.source not in roots:
+                    raise KeyError(f"view source p{op.source} has no storage root")
+                roots[op.output] = roots[op.source]
+            elif isinstance(op, LoopCopyInto):
+                if op.root not in roots or roots[op.root] != op.root:
+                    raise KeyError(f"copy_into root p{op.root} has no owning storage root")
+                roots[op.output] = op.root
         try:
             return roots[buffer]
         except KeyError as exc:
@@ -169,6 +201,12 @@ class LoopProgram:
                     else f" offset={op.layout.offset} strides={op.layout.strides}"
                 )
                 lines.append(f"p{op.output} = view p{op.source}{suffix} : {op.type}")
+                continue
+            if isinstance(op, LoopCopyInto):
+                lines.append(
+                    f"p{op.output} = copy_into root=p{op.root} target=p{op.target} "
+                    f"source=p{op.source} : {op.type}"
+                )
                 continue
             if isinstance(op, LoopReturn):
                 lines.append(f"return p{op.buffer}")
@@ -231,6 +269,24 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                 raise RuntimeError("planned buffer view unexpectedly has no alias descriptor")
             operations.append(LoopView(handle, source, virtual_types[op.output], alias.layout))
             continue
+        if isinstance(op, BufferCopyInto):
+            handle = next_handle
+            next_handle += 1
+            virtual_handles[op.output] = handle
+            alias = plan.alias_for(op.output)
+            if alias is None:
+                raise RuntimeError("planned copy_into result unexpectedly has no alias descriptor")
+            operations.append(
+                LoopCopyInto(
+                    output=handle,
+                    root=virtual_handles[op.root],
+                    target=virtual_handles[op.target],
+                    source=virtual_handles[op.source],
+                    type=virtual_types[op.output],
+                    layout=alias.layout,
+                )
+            )
+            continue
         if isinstance(op, BufferReturn):
             operations.append(LoopReturn(virtual_handles[op.buffer]))
             continue
@@ -290,6 +346,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
     layouts: dict[int, StorageLayout] = {}
     roots: dict[int, int] = {}
     written: set[int] = set()
+    input_roots: set[int] = set()
     root_generations: dict[int, int] = {}
     value_generations: dict[int, int] = {}
     next_input_index = 0
@@ -325,6 +382,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             next_input_index += 1
             root_generations[op.output] += 1
             value_generations[op.output] = root_generations[op.output]
+            input_roots.add(op.output)
             written.add(op.output)
             continue
 
@@ -354,6 +412,42 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             layouts[op.output] = layout
             roots[op.output] = root
             value_generations[op.output] = value_generations[op.source]
+            written.add(op.output)
+            continue
+
+        if isinstance(op, LoopCopyInto):
+            saw_execution = True
+            if op.output < 0:
+                raise ValueError(f"invalid negative copy_into result id p{op.output}")
+            if op.output in types:
+                raise ValueError(f"copy_into result p{op.output} collides with an existing loop value")
+            if op.root not in allocated or roots.get(op.root) != op.root:
+                raise ValueError("copy_into root must name owning storage")
+            if op.root in input_roots:
+                raise ValueError("copy_into cannot mutate borrowed or copied runtime input storage")
+            for buffer in (op.root, op.target, op.source):
+                if buffer not in types:
+                    raise ValueError(f"copy_into input p{buffer} is not defined")
+                if buffer not in written:
+                    raise ValueError(f"copy_into input p{buffer} is not written")
+                _verify_fresh_value(buffer, roots, root_generations, value_generations)
+            if roots[op.target] != op.root:
+                raise ValueError("copy_into target must alias its owning root")
+            if roots[op.source] == op.root:
+                raise ValueError("copy_into source must use a different storage root")
+            if types[op.target] != types[op.source]:
+                raise ValueError("copy_into target and source types must exactly match")
+            if op.type != allocated[op.root]:
+                raise ValueError("copy_into fresh result type must match its owning root")
+            if op.layout != layouts[op.root]:
+                raise ValueError("copy_into fresh result must expose the full owning root layout")
+            op.layout.validate_bounds(op.type.shape, element_count(allocated[op.root].shape))
+
+            root_generations[op.root] += 1
+            types[op.output] = op.type
+            layouts[op.output] = op.layout
+            roots[op.output] = op.root
+            value_generations[op.output] = root_generations[op.root]
             written.add(op.output)
             continue
 
