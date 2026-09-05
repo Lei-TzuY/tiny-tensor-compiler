@@ -58,6 +58,13 @@ from .native_bundle_attestation import (
     publisher_public_key_from_private_key,
     verify_archive_attestation,
 )
+from .native_bundle_policy_rotation import (
+    NativeBundlePolicyRotationError,
+    ThresholdPolicyRotationStateStore,
+    ThresholdPolicyTransition,
+    create_threshold_policy_transition,
+    verify_threshold_policy_transition,
+)
 from .native_bundle_registry import (
     NativeBundleRegistryError,
     NativeBundleRegistryExecutable,
@@ -141,6 +148,7 @@ __all__ = [
     "LoopView",
     "MemoryPlan",
     "NativeBundleArchiveError",
+    "NativeBundlePolicyRotationError",
     "NativeBundleRegistryError",
     "NativeBundleRegistryExecutable",
     "NativeBundleReleaseError",
@@ -159,6 +167,8 @@ __all__ = [
     "SymbolicDim",
     "SymbolicShapeError",
     "Tensor",
+    "ThresholdPolicyRotationStateStore",
+    "ThresholdPolicyTransition",
     "ThresholdReleaseChannelRegistryExecutable",
     "ThresholdReleaseCheckpoint",
     "ThresholdReleasePolicy",
@@ -178,6 +188,7 @@ __all__ = [
     "constant_fold",
     "create_archive_attestation",
     "create_release_checkpoint",
+    "create_threshold_policy_transition",
     "create_threshold_release_checkpoint",
     "dead_code_eliminate",
     "digest_dynamic_bundle_set_archive",
@@ -211,5 +222,6 @@ __all__ = [
     "verify",
     "verify_archive_attestation",
     "verify_release_checkpoint",
+    "verify_threshold_policy_transition",
     "verify_threshold_release_checkpoint",
 ]
