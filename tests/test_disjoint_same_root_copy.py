@@ -68,6 +68,36 @@ def test_disjoint_same_root_copy_matches_reference_loop_and_native():
     )
 
 
+def test_disjoint_reverse_source_snapshots_logical_order_across_native():
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    base = builder.input((2, 4), dtype="int32")
+    owned = base.relu()
+    source = owned.slice(axis=0, start=0, stop=1).reverse(axis=1)
+    target = owned.slice(axis=0, start=1, stop=2)
+    updated = owned.copy_into(target, source)
+    module = builder.finish(updated)
+
+    copy_op = next(op for op in module.function.ops if op.opcode == "copy_into")
+    snapshot = copy_op.operands[2]
+    assert snapshot.producer is not None
+    assert snapshot.producer.opcode == "reshape"
+    assert snapshot.producer.operands[0].producer is not None
+    assert snapshot.producer.operands[0].producer.opcode == "reverse"
+
+    base_value = np.array([[-4, 2, 7, 1], [20, 21, 22, 23]], dtype=np.int32)
+    expected = np.maximum(base_value, 0)
+    expected[1, :] = expected[0, ::-1]
+
+    reference = execute_reference(module, inputs=[base_value])
+    loop = execute_loop(lower_to_loops(lower_to_cpu(module)), inputs=[base_value])
+    native = compile_module(module, borrow_inputs=True, parallel=True)(inputs=[base_value])
+
+    np.testing.assert_array_equal(reference, expected)
+    np.testing.assert_array_equal(loop, expected)
+    np.testing.assert_array_equal(native, expected)
+
+
 def test_interleaved_same_root_regions_remain_fail_closed():
     builder = GraphBuilder()
     base = builder.input((2, 4), dtype="int32")
