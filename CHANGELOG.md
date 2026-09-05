@@ -46,6 +46,9 @@ All notable project milestones are recorded here.
 - Optional caller-pinned Ed25519 publisher attestations for exact content-addressed bundle archives, using the standard `cryptography` primitive, canonical domain-separated detached signatures, stable public-key fingerprints, and explicit local revocation policy.
 - Publisher-authenticated registry publish/fetch/load APIs that compose the existing SHA-256/archive verifier with immutable attestation read-back and fail-closed staging; a downloaded archive is not published to the caller destination until both byte integrity and pinned publisher authorization succeed.
 - Cross-platform regression coverage for deterministic signatures, modified/wrong-digest refusal, untrusted/revoked publishers, real Bearer-authenticated loopback transport, and compiler-free execution of an attested finite symbolic native bundle family.
+- Publisher-signed release-channel checkpoints that bind one normalized channel and monotonic integer sequence to an exact attested archive digest under the existing caller-pinned Ed25519 trust policy.
+- Caller-owned `ReleaseStateStore` rollback floors with canonical persistent state, POSIX/Windows cross-process file locking, atomic replace, lower-sequence refusal, and same-sequence/different-digest equivocation rejection.
+- Conditional-HTTP channel publication plus rollback-protected fetch/load APIs that verify the signed channel head and local floor before archive transfer, then retain the existing SHA-256, archive-verifier, and publisher-attestation layers for compiler-free execution.
 
 ### Compatibility
 
@@ -69,6 +72,7 @@ All notable project milestones are recorded here.
 - OpenMP input materialization and terminal output copies remain serial. Only verified kernel iteration is scheduled in parallel, and each emitted `parallel for` retains its implicit barrier; this phase does not introduce asynchronous kernel execution or graph-level reordering.
 - The OpenMP phase establishes executable scheduling semantics and cross-platform correctness only. It does not claim wall-clock speedup, optimal thread count, grain-size selection, or benchmark superiority.
 - Historical unsigned bundle archive/registry APIs retain their integrity-only contract. Publisher authentication is opt-in through the attested APIs and a caller-owned `PublisherTrustPolicy`; a valid Ed25519 signature does not imply freshness, rollback protection, PKI/organizational identity, transparency, trusted timestamps, global revocation distribution, or cross-target portability.
+- Rollback protection is also opt-in and local-state dependent: after a successful channel observation is persisted, the same `ReleaseStateStore` rejects an older valid signed sequence before archive download. A first-time caller has no external freshness oracle, and hostile deletion/modification of caller rollback state, global registry consistency, transparency, timestamps, TUF-style delegation/threshold signing, and general supply-chain security remain out of scope.
 
 ## [0.1.0] - 2026-09-04
 
