@@ -5,10 +5,10 @@
 ```mermaid
 flowchart LR
     A[Python tensor expressions\n+ typed inputs]
-    B[Typed tensor IR\nstatic or named SymbolicDim values]
+    B[Typed tensor IR\nstatic, named, or affine symbolic dims]
     C[Verifier]
     D[Optimization passes\nfold / simplify / DCE / canonicalize / CSE]
-    S[Runtime symbolic binding\nconcrete clone + reverify]
+    S[Runtime symbolic solving\nconcrete clone + reverify]
     E[Virtual-buffer CPU IR]
     F[Liveness memory planner]
     G[Loop / kernel IR\nexplicit broadcast maps]
@@ -29,11 +29,12 @@ flowchart LR
 The project treats verification and explicit semantics as compiler features, not test-only conveniences.
 
 - Tensor IR verifies operation arity, ordering/dominance, inferred result types, return structure, legal opcodes, constants, input indices, and use-def consistency.
-- Runtime-dynamic tensor IR may contain one or more named `SymbolicDim` values on arbitrary axes. Every declared symbol must occur in at least one runtime input, and every occurrence of the same symbol must bind to one identical non-negative runtime size.
-- Symbolic broadcasting remains conservative. A symbol may broadcast with the same symbol or dimension `1`; two distinct symbols on the same aligned axis, or a symbol against a different non-unit concrete dimension, are not silently unified.
-- Runtime symbolic binding validates exact input count, rank, static axes, and dtypes while collecting a complete binding for every symbol. The compiler then clones the tensor module, substitutes concrete integers for all symbols, and reruns the existing verifier before any physical lowering.
+- Runtime-dynamic tensor IR may contain one or more named `SymbolicDim` values on arbitrary axes plus bounded one-variable affine terms `a*B+b`, where `a` is a positive integer and `b` is non-negative.
+- Every declared symbol must occur in at least one runtime input. A direct occurrence binds the runtime extent to the symbol; an affine occurrence solves `(extent-b)/a` and requires the residual to be non-negative and exactly divisible by `a`. Every direct or affine occurrence of the same symbol must resolve to one identical non-negative runtime size.
+- Symbolic broadcasting remains conservative. A symbol may broadcast with the same symbol or dimension `1`, and structurally identical affine terms may align. Distinct symbols on the same aligned axis, a direct symbol against a different affine term, or any other symbolic relation is not silently unified.
+- Runtime symbolic binding validates exact input count, rank, static axes, and dtypes while collecting a complete binding for every symbol. The compiler then clones the tensor module, evaluates every direct/affine symbolic dimension to a concrete integer, and reruns the existing verifier before any physical lowering.
 - `DynamicExecutable` owns a deep-cloned symbolic template, including copied constant payloads, so caller mutation after compilation cannot make old and new binding specializations represent different programs.
-- A dynamic native specialization cache key contains the complete ordered symbolic binding tuple. Different bindings such as `B=2,W=3` and `B=2,W=7` therefore cannot reuse the wrong concrete executable.
+- A dynamic native specialization cache key contains the complete ordered symbolic binding tuple. Different bindings such as `B=2,W=3` and `B=2,W=7` therefore cannot reuse the wrong concrete executable, independent of whether those bindings came from direct or affine input axes.
 - Buffer IR keeps virtual values single-write and separates virtual liveness from physical slot reuse.
 - Memory reuse is allowed only after the previous value's last use and only for an exact `TensorType` match.
 - Multiple returned tensors remain live through the terminal return block, so simultaneously returned same-typed values cannot be accidentally assigned one physical slot.
@@ -47,14 +48,14 @@ The project treats verification and explicit semantics as compiler features, not
 - Borrowed runtime arrays must match exact shape/dtype and already be NumPy, C-contiguous, and aligned; the zero-copy contract rejects any input that would require hidden normalization.
 - Integer lowering preserves fixed-width wrapping semantics across the scalar and generated-C paths.
 - Floating-point ReLU preserves NaN behavior and canonicalizes negative zero to match the reference semantics.
-- Runtime inputs are exact: concrete execution requires exact count, shape, and dtype; dynamic execution relaxes only explicitly declared symbolic axes and resolves every symbol before physical lowering. There is no silent cast.
+- Runtime inputs are exact: concrete execution requires exact count, shape, and dtype; dynamic execution relaxes only explicitly declared direct/affine symbolic axes and resolves every symbol before physical lowering. There is no silent cast.
 - Native outputs are exact: every returned tensor has its own typed ABI pointer, and preallocated outputs must match shape/dtype/layout/alignment/mutability while remaining disjoint from runtime inputs and from one another.
 
 ## Execution paths
 
 There are intentionally separate execution paths so optimized lowering can be checked against a simpler semantic baseline.
 
-1. **Reference** — executes verified tensor IR with NumPy and defines the semantic baseline. For a symbolic module it first applies the same runtime binding and concrete specialization rules used by dynamic native execution. Supports one or multiple returned tensors.
+1. **Reference** — executes verified tensor IR with NumPy and defines the semantic baseline. For a symbolic module it first applies the same runtime binding/affine-solving and concrete specialization rules used by dynamic native execution. Supports one or multiple returned tensors.
 2. **Loop interpreter** — executes explicit planned loop IR one output index at a time. Supports one or multiple returned tensors after memory planning and fusion. A `BorrowedLoopProgram` binds verified external input slots directly to caller NumPy arrays instead of materializing `LoopInput` copies. Loop IR itself remains concrete-shape IR.
 3. **Native** — emits deterministic C11, compiles a shared library, and invokes one stable output-first ABI entrypoint through `ctypes`. A program with `N` returned tensors exposes `N` ordered typed output pointers followed by its input pointers; single-output programs retain the historical one-`out` signature. Borrowed inputs become typed `const` aliases to those ABI input pointers, so generated input-copy loops disappear while kernel code continues to read the same physical-buffer names. Dynamic execution compiles this same concrete native pipeline separately for each observed complete symbolic binding.
 
@@ -70,7 +71,7 @@ The compiler is correctness-first and conservative by design.
 - Contiguous-loop linearization happens only when identity indexing proves a row-major flat loop equivalent.
 - Compiler vectorization hints do not select a vector width or change fallback semantics.
 - SSE2 selection is semantic-step-driven for exact contiguous `int32` kernels: primitive or fused expressions are eligible only when the required fixed-width operations are representable by the backend's current `add`/ReLU plan. Multiplication, broadcast indexing, scalar/zero-extent shapes, other dtypes, and unsupported forms fall back to the general generated-C path.
-- Symbolic dimensions are resolved before Buffer/Loop IR instead of introducing variable-length physical storage, symbolic loop arithmetic, or platform-dependent VLA behavior into the existing backend.
+- Symbolic and affine dimensions are fully resolved before Buffer/Loop IR instead of introducing variable-length physical storage, symbolic loop arithmetic, or platform-dependent VLA behavior into the existing backend.
 
 ## Phase boundaries
 
@@ -96,15 +97,17 @@ When an input's original physical slot is never written by another input or kern
 
 The historical copied-input path remains the default compatibility behavior. Borrowed mode deliberately rejects Python sequences, non-contiguous views, wrong dtypes/shapes, or misaligned arrays rather than materializing a copy while claiming zero-copy execution.
 
-### Post-v0.1 — runtime symbolic-shape phase
+### Post-v0.1 — runtime symbolic and affine-shape phase
 
-Named `SymbolicDim` values extend typed tensor shapes without making the physical backend symbolic. The runtime contract now accepts one or more symbols on arbitrary axes. Each symbol must be bound by at least one runtime input, every repeated occurrence must agree on one size, and all static axes/dtypes remain exact. Distinct symbols remain distinct constraints: they can coexist on independent broadcast axes through dimension `1`, but they are not implicitly equated when aligned against one another.
+Named `SymbolicDim` values extend typed tensor shapes without making the physical backend symbolic. The runtime contract accepts one or more symbols on arbitrary axes and bounded one-variable affine expressions `a*B+b` with positive integer `a` and non-negative integer `b`. Each symbol must be solvable from at least one runtime input axis, every repeated direct or affine occurrence must agree on one integer value, and all static axes/dtypes remain exact.
 
-`compile_dynamic_module()` validates and deep-clones the symbolic tensor module into a `DynamicExecutable`. Each call derives a complete `{symbol: size}` binding from runtime inputs, then clones the tensor IR, replaces every symbolic occurrence with its integer binding, reruns the normal verifier, and only then enters the existing concrete `compile_module()` pipeline. The dynamic executable caches ordinary `NativeExecutable` values by the complete deterministic binding tuple, so `B=2,W=3`, `B=2,W=7`, and a later `B=2,W=3` select two concrete programs and reuse the first one on the third call.
+For an affine occurrence, runtime binding solves `(extent-b)/a`; extents below the offset or residuals not divisible by the scale are deterministic shape errors rather than rounded/guessed bindings. Distinct symbols remain distinct constraints. Structurally identical affine terms may align through symbolic broadcasting, but `B`, `2*B`, and another symbol `W` are not implicitly equated even if selected runtime values could make their concrete extents equal.
 
-The public `bind_dynamic_shapes()` helper exposes the same exact runtime binding rules. `DynamicExecutable.symbolic_dims` and `cached_bindings` expose the generalized contract. Existing single-symbol callers keep `symbolic_dim`, integer `specialize(2)`, and `cached_batch_sizes`; those convenience APIs deliberately reject multi-symbol executables rather than returning ambiguous data.
+`compile_dynamic_module()` validates and deep-clones the symbolic tensor module into a `DynamicExecutable`. Each call derives a complete `{symbol: size}` binding from runtime inputs, then clones the tensor IR, evaluates every direct/affine dimension to an integer, reruns the normal verifier, and only then enters the existing concrete `compile_module()` pipeline. The dynamic executable caches ordinary `NativeExecutable` values by the complete deterministic binding tuple, so direct and affine runtime contracts share one specialization/cache architecture rather than parallel execution paths.
 
-Zero-sized symbolic bindings are valid because the concrete compiler already has explicit zero-extent semantics. Multi-output and `borrow_inputs=True` cross the same specialization boundary. Arbitrary symbolic arithmetic or affine expressions, implicit equality solving between distinct symbols, reshape-style symbolic transforms, and runtime-sized Buffer/Loop IR remain explicitly outside this phase.
+The public `bind_dynamic_shapes()` helper exposes the same exact runtime solving rules. `DynamicExecutable.symbolic_dims` and `cached_bindings` expose the generalized contract. Existing single-symbol callers keep `symbolic_dim`, integer `specialize(2)`, and `cached_batch_sizes`; those convenience APIs deliberately reject multi-symbol executables rather than returning ambiguous data.
+
+Zero-valued bindings are valid when the affine expression evaluates to a legal zero extent, such as `2*B` at `B=0`. Multi-output and `borrow_inputs=True` cross the same specialization boundary. Multi-variable expressions, subtraction, division, implicit equality solving between distinct symbols, reshape-style symbolic transforms, and runtime-sized Buffer/Loop IR remain explicitly outside this bounded phase.
 
 ### Post-v0.1 — structured fusion phase
 
@@ -124,4 +127,4 @@ This is not a generalized SIMD or performance claim. The backend remains SSE2-sp
 
 ### Next architectural frontier
 
-With dynamic specialization generalized to complete named bindings and fused/SSE2 selection driven by structured semantics, the next high-value frontiers are symbolic shape expressions/constraints beyond plain named dimensions, an ISA-neutral vector-plan layer justified by a second executable ISA/backend capability, larger structured DAG representation with an explicit cost model, parallel scheduling, or accelerator backends. The next phase should be selected by executable cross-layer value rather than by naming abstractions or enumerating another opcode/shape corner case.
+With bounded one-variable affine runtime constraints now executable and the physical backend still strictly concrete, the next high-value frontiers are a richer multi-variable/relational shape constraint system only if it can remain uniquely solvable and verifier-backed, an ISA-neutral vector-plan layer justified by a second executable ISA/backend capability, larger structured DAG representation with an explicit cost model, parallel scheduling, or accelerator backends. The next phase should be selected by executable cross-layer value rather than by naming abstractions or enumerating another affine/shape corner case.
