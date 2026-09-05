@@ -11,6 +11,8 @@ from tiny_tensor_compiler import (
     SymbolicDim,
     compile_dynamic_module,
     compile_module,
+    compile_native,
+    execute_native,
     execute_reference,
     generate_c,
     lower_to_cpu,
@@ -102,6 +104,41 @@ def test_parallel_compiler_mode_adds_platform_openmp_flag():
     expected = "/openmp" if os.name == "nt" else "-fopenmp"
     assert enabled[-1] == expected
     assert parallel_native_module._enable_openmp(enabled) == enabled
+
+
+def test_public_native_parallel_facade_executes_verified_loop_program():
+    _default_compiler_or_skip()
+    module = _same_shape_float_module((129,))
+    loops = lower_to_loops(lower_to_cpu(module))
+    lhs = np.linspace(-7.0, 8.0, 129, dtype=np.float32)
+    rhs = np.linspace(5.0, -2.0, 129, dtype=np.float32)
+    expected = execute_reference(module, inputs=[lhs, rhs])
+
+    executable = compile_native(loops, parallel=True)
+    compiled_actual = executable(inputs=[lhs, rhs])
+    one_shot_actual = execute_native(loops, inputs=[lhs, rhs], parallel=True)
+
+    np.testing.assert_array_equal(compiled_actual, expected)
+    np.testing.assert_array_equal(one_shot_actual, expected)
+
+
+def test_parallel_executable_survives_native_cache_clear():
+    _default_compiler_or_skip()
+    module = _same_shape_float_module((193,))
+    loops = lower_to_loops(lower_to_cpu(module))
+    lhs = np.linspace(-6.0, 9.0, 193, dtype=np.float32)
+    rhs = np.linspace(4.0, -3.0, 193, dtype=np.float32)
+    expected = execute_reference(module, inputs=[lhs, rhs])
+    executable = compile_native(loops, parallel=True)
+
+    first = executable(inputs=[lhs, rhs])
+    native_module.clear_native_cache()
+    second = executable(inputs=[lhs, rhs])
+
+    np.testing.assert_array_equal(first, expected)
+    np.testing.assert_array_equal(second, expected)
+    if os.name == "nt":
+        assert parallel_native_module._WINDOWS_PINNED_ARTIFACTS
 
 
 def test_compile_module_parallel_native_matches_reference():
