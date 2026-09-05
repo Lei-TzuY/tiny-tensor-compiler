@@ -159,6 +159,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
                     iteration_shape=op.iteration_shape,
                     input_maps=op.input_maps,
                     literal=op.literal,
+                    fused_expression=op.fused_expression,
                 )
             )
             active_aliases.pop(op.output, None)
