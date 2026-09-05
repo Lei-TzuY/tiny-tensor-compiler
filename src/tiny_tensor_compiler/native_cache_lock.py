@@ -6,7 +6,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-
 _PERSISTENT_CACHE_LEASE_POLL_SECONDS = 0.05
 _PERSISTENT_CACHE_LEASE_TIMEOUT_SECONDS = 300.0
 
