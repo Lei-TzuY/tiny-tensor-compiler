@@ -427,7 +427,7 @@ def _shape_expression_parts(
     dim: int | SymbolicDim | AffineDim | LinearDim,
 ) -> tuple[dict[SymbolicDim, int], int]:
     if isinstance(dim, bool):
-        raise ValueError("symbolic shape offsets must be non-negative integers")
+        raise TypeError("symbolic shape offsets must be non-negative integers")
     if isinstance(dim, int):
         _validate_non_negative_offset(dim)
         return {}, dim
