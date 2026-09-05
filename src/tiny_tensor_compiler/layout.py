@@ -26,7 +26,15 @@ class StorageLayout:
         return cls(offset=offset, strides=contiguous_strides(shape))
 
     def is_contiguous(self, shape: tuple[int, ...]) -> bool:
-        return self.strides == contiguous_strides(shape)
+        canonical = contiguous_strides(shape)
+        if len(self.strides) != len(shape):
+            return False
+        if any(dim == 0 for dim in shape):
+            return True
+        return all(
+            dim == 1 or stride == expected
+            for dim, stride, expected in zip(shape, self.strides, canonical, strict=True)
+        )
 
     def validate_bounds(self, shape: tuple[int, ...], storage_elements: int) -> None:
         if len(shape) != len(self.strides):
@@ -64,7 +72,7 @@ class StorageLayout:
         axis: int,
         start: int,
         stop: int,
-        step: int,
+        step: int = 1,
     ) -> tuple[StorageLayout, tuple[int, ...]]:
         _validate_slice(source_shape, axis=axis, start=start, stop=stop, step=step)
         length = (stop - start + step - 1) // step
