@@ -26,43 +26,40 @@ def symbolic_dims(module: Module) -> frozenset[SymbolicDim]:
     )
 
 
-def validate_dynamic_batch_module(module: Module) -> SymbolicDim:
-    """Verify the current dynamic contract: one shared symbolic leading dimension."""
+def validate_dynamic_module(module: Module) -> tuple[SymbolicDim, ...]:
+    """Verify that every runtime symbol can be bound by the module inputs."""
     verify(module)
-    symbols = symbolic_dims(module)
+    symbols = tuple(sorted(symbolic_dims(module)))
+    if not symbols:
+        raise SymbolicShapeError(
+            "dynamic compilation requires at least one symbolic dimension"
+        )
+
+    input_types = _input_types(module)
+    for symbol in symbols:
+        if not any(symbol in type_.symbolic_dims for type_ in input_types):
+            raise SymbolicShapeError(
+                f"symbolic dimension {symbol} must be bound by at least one runtime input"
+            )
+    return symbols
+
+
+def validate_dynamic_batch_module(module: Module) -> SymbolicDim:
+    """Compatibility helper for callers that require exactly one runtime symbol."""
+    symbols = validate_dynamic_module(module)
     if len(symbols) != 1:
         raise SymbolicShapeError(
             "dynamic batch compilation requires exactly one symbolic dimension"
         )
-    symbol = next(iter(symbols))
-
-    for op in module.function.ops:
-        for result in op.results:
-            for axis, dim in enumerate(result.type.shape):
-                if isinstance(dim, SymbolicDim) and axis != 0:
-                    raise SymbolicShapeError(
-                        f"symbolic dimension {dim} must be the leading axis; "
-                        f"got {result.type}"
-                    )
-                if isinstance(dim, SymbolicDim) and dim != symbol:
-                    raise SymbolicShapeError(
-                        "dynamic batch compilation supports one shared symbolic dimension"
-                    )
-
-    input_types = _input_types(module)
-    if not any(symbol in type_.symbolic_dims for type_ in input_types):
-        raise SymbolicShapeError(
-            f"symbolic dimension {symbol} must be bound by at least one runtime input"
-        )
-    return symbol
+    return symbols[0]
 
 
-def bind_dynamic_batch(
+def bind_dynamic_shapes(
     module: Module,
     inputs: Sequence[Any] = (),
-) -> tuple[SymbolicDim, int]:
-    """Resolve and validate the one shared leading runtime batch dimension."""
-    symbol = validate_dynamic_batch_module(module)
+) -> dict[SymbolicDim, int]:
+    """Resolve every named runtime dimension from exact runtime input shapes."""
+    symbols = validate_dynamic_module(module)
     expected_types = _input_types(module)
     provided = tuple(inputs)
     if len(provided) != len(expected_types):
@@ -70,7 +67,8 @@ def bind_dynamic_batch(
             f"expected {len(expected_types)} runtime inputs, got {len(provided)}"
         )
 
-    batch_size: int | None = None
+    bindings: dict[SymbolicDim, int] = {}
+    symbol_set = frozenset(symbols)
     for index, (value, expected_type) in enumerate(
         zip(provided, expected_types, strict=True)
     ):
@@ -91,16 +89,17 @@ def bind_dynamic_batch(
             zip(expected_type.shape, actual_shape, strict=True)
         ):
             if isinstance(expected_dim, SymbolicDim):
-                if expected_dim != symbol:
+                if expected_dim not in symbol_set:
                     raise SymbolicShapeError(
-                        f"unexpected symbolic dimension {expected_dim}; expected {symbol}"
+                        f"unexpected symbolic dimension {expected_dim}"
                     )
-                if batch_size is None:
-                    batch_size = actual_dim
-                elif batch_size != actual_dim:
+                previous = bindings.get(expected_dim)
+                if previous is None:
+                    bindings[expected_dim] = actual_dim
+                elif previous != actual_dim:
                     raise ValueError(
-                        f"input {index} binds symbolic dimension {symbol} to {actual_dim}, "
-                        f"but the existing binding is {batch_size}"
+                        f"input {index} binds symbolic dimension {expected_dim} to "
+                        f"{actual_dim}, but the existing binding is {previous}"
                     )
                 continue
             if actual_dim != expected_dim:
@@ -109,11 +108,23 @@ def bind_dynamic_batch(
                     f"contract {expected_type.shape}: axis {axis} requires {expected_dim}"
                 )
 
-    if batch_size is None:
+    missing = symbol_set - bindings.keys()
+    if missing:
+        names = ", ".join(sorted(symbol.name for symbol in missing))
         raise SymbolicShapeError(
-            f"symbolic dimension {symbol} was not bound by the runtime inputs"
+            f"symbolic dimensions were not bound by runtime inputs: {names}"
         )
-    return symbol, batch_size
+    return {symbol: bindings[symbol] for symbol in symbols}
+
+
+def bind_dynamic_batch(
+    module: Module,
+    inputs: Sequence[Any] = (),
+) -> tuple[SymbolicDim, int]:
+    """Compatibility helper for one runtime symbolic dimension."""
+    symbol = validate_dynamic_batch_module(module)
+    bindings = bind_dynamic_shapes(module, inputs)
+    return symbol, bindings[symbol]
 
 
 def clone_module(module: Module) -> Module:
@@ -127,10 +138,18 @@ def clone_module(module: Module) -> Module:
 def specialize_for_inputs(
     module: Module,
     inputs: Sequence[Any] = (),
-) -> tuple[Module, int]:
-    """Bind the runtime batch size, clone the module, and reverify the concrete IR."""
-    symbol, batch_size = bind_dynamic_batch(module, inputs)
-    return specialize_module(module, {symbol: batch_size}), batch_size
+) -> tuple[Module, dict[SymbolicDim, int]]:
+    """Bind runtime symbols, clone the module, and reverify the concrete IR."""
+    bindings = bind_dynamic_shapes(module, inputs)
+    return specialize_module(module, bindings), bindings
+
+
+def normalize_symbolic_bindings(
+    module: Module,
+    bindings: Mapping[SymbolicDim | str, int],
+) -> dict[SymbolicDim, int]:
+    """Normalize explicit bindings against the symbols declared by a module."""
+    return _normalize_bindings(symbolic_dims(module), bindings)
 
 
 def specialize_module(
