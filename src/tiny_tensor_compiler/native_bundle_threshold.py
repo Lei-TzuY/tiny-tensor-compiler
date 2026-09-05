@@ -7,9 +7,10 @@ import re
 import shutil
 import tempfile
 import weakref
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
@@ -75,9 +76,7 @@ class ThresholdReleasePolicy:
         if isinstance(self.threshold, bool) or not isinstance(self.threshold, int):
             raise TypeError("threshold must be an integer")
         base = PublisherTrustPolicy(self.public_keys, self.revoked_signers)
-        ordered = tuple(
-            sorted(base.public_keys, key=publisher_id_from_public_key)
-        )
+        ordered = tuple(sorted(base.public_keys, key=publisher_id_from_public_key))
         if len(ordered) > _MAX_SIGNERS:
             raise ValueError(f"threshold policy supports at most {_MAX_SIGNERS} signer keys")
         if self.threshold < 2 or self.threshold > len(ordered):
@@ -104,9 +103,7 @@ class ThresholdReleasePolicy:
 
     @property
     def eligible_signers(self) -> tuple[str, ...]:
-        return tuple(
-            signer for signer in self.signer_ids if signer not in self.revoked_signers
-        )
+        return tuple(signer for signer in self.signer_ids if signer not in self.revoked_signers)
 
     def public_key_for(self, signer_id: str) -> bytes:
         normalized = normalize_publisher_id(signer_id)
