@@ -60,6 +60,8 @@ The loader stages the shared library instead of loading it directly from the use
 
 ## Deliberate first-phase limits
 
-`native-bundle-v1` accepts a concrete serial `LoopProgram`. It does not yet package unresolved symbolic/dynamic templates, `BorrowedLoopProgram` runtime alias contracts, OpenMP bundle mode, cross-platform binaries, signatures, archive/container transport, or a fleet-oriented artifact registry.
+`native-bundle-v1` accepts a concrete serial `LoopProgram`. It does not yet package unresolved symbolic/dynamic templates, `BorrowedLoopProgram` runtime alias contracts, OpenMP bundle mode, cross-platform binaries, signatures, or a fleet-oriented artifact registry.
 
-Those are separate milestones because each needs new executable metadata or lifecycle guarantees. In particular, authentication/signing must not be implied by the existing SHA-256 integrity fields, and dynamic-specialization bundles would need an explicit specialization/dispatch format rather than smuggling compiler state into this schema.
+Finite symbolic deployment families are handled by the separate `native-bundle-set-v1` layer. Those verified bundle-set directories can now be wrapped in the deterministic `native-bundle-archive-v1` single-file transport described in `docs/dynamic-bundle-archives.md`; the concrete child-bundle schema itself remains an ordinary directory and is unchanged by that transport layer.
+
+These are separate milestones because each needs new executable metadata or lifecycle guarantees. In particular, authentication/signing must not be implied by the existing SHA-256 integrity fields, and archive transport does not make platform-specific native code cross-target portable.
