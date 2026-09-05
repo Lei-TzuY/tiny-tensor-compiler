@@ -11,6 +11,7 @@ from .inference import (
     infer_reshape,
     infer_reverse,
     infer_slice,
+    infer_sum,
     infer_transpose,
 )
 from .ir import Module, TensorType, Value
@@ -615,6 +616,12 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 expected = infer_relu(allocated[op.inputs[0]])
                 if expected != output_type:
                     raise ValueError("relu kernel output buffer type does not match inference")
+            elif op.opcode == "sum":
+                if len(op.inputs) != 1 or op.literal is not None:
+                    raise ValueError("sum kernel requires one input and no literal")
+                expected = infer_sum(allocated[op.inputs[0]])
+                if expected != output_type:
+                    raise ValueError("sum kernel output buffer type does not match inference")
             elif op.opcode == "reshape":
                 if len(op.inputs) != 1 or op.literal is not None:
                     raise ValueError("reshape kernel requires one input and no literal")
