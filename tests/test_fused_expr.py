@@ -5,7 +5,12 @@ from tiny_tensor_compiler.fused_expr import (
     FUSED_EXPRESSION_OPCODES,
     RELU_BINARY_CHAIN_OPCODES,
     RELU_BINARY_TREE_OPCODES,
+    binary_chain_expression,
+    binary_tree_expression,
+    chain_tree_expression,
     describe_fused_opcode,
+    encode_fused_opcode,
+    with_terminal_relu,
 )
 
 
@@ -24,10 +29,23 @@ def test_canonical_fused_expression_surface_is_complete_and_disjoint() -> None:
     for opcode in FUSED_EXPRESSION_OPCODES:
         expression = describe_fused_opcode(opcode)
         assert expression is not None
-        assert expression.opcode == opcode
+        assert encode_fused_opcode(expression) == opcode
         assert expression.input_count in {3, 4, 5}
         assert expression.result == expression.steps[-1].output
         assert expression.terminal_relu == (expression.steps[-1].opcode == "relu")
+
+
+def test_expression_builders_encode_legacy_spelling_only_at_boundary() -> None:
+    chain = binary_chain_expression("add", "mul")
+    assert encode_fused_opcode(chain) == "chain_add_mul"
+    assert encode_fused_opcode(with_terminal_relu(chain)) == "relu_chain_add_mul"
+
+    tree = binary_tree_expression("mul", "add", "mul")
+    assert encode_fused_opcode(tree) == "tree_mul_add_mul"
+    assert encode_fused_opcode(with_terminal_relu(tree)) == "relu_tree_mul_add_mul"
+
+    chain_tree = chain_tree_expression("add", "mul", "add", "mul")
+    assert encode_fused_opcode(chain_tree) == "chain_tree_add_mul_add_mul"
 
 
 def test_relu_binary_chain_descriptor_preserves_fixed_width_step_order() -> None:
