@@ -10,7 +10,7 @@ from .input_binding import borrow_inputs as bind_borrowed_inputs
 from .ir import Module, SymbolicDim
 from .loop_ir import lower_to_loops
 from .lowering import lower_to_cpu
-from .native import NativeExecutable, compile_native
+from .native_api import NativeExecutable, compile_native
 from .symbolic import (
     SymbolicShapeError,
     bind_dynamic_shapes,
@@ -32,12 +32,14 @@ class DynamicExecutable:
         cache_dir: str | os.PathLike[str] | None = None,
         *,
         borrow_inputs: bool = False,
+        parallel: bool = False,
     ) -> None:
         self._module = clone_module(module)
         self._symbols = validate_dynamic_module(self._module)
         self._compiler = compiler
         self._cache_dir = cache_dir
         self._borrow_inputs = borrow_inputs
+        self._parallel = parallel
         self._specializations: dict[tuple[int, ...], NativeExecutable] = {}
         self._lock = threading.RLock()
 
@@ -106,6 +108,7 @@ class DynamicExecutable:
                 compiler=self._compiler,
                 cache_dir=self._cache_dir,
                 borrow_inputs=self._borrow_inputs,
+                parallel=self._parallel,
             )
             self._specializations[key] = executable
             return executable
@@ -132,6 +135,7 @@ def compile_module(
     cache_dir: str | os.PathLike[str] | None = None,
     *,
     borrow_inputs: bool = False,
+    parallel: bool = False,
 ) -> NativeExecutable:
     """Lower verified concrete tensor IR through the native pipeline and compile eagerly."""
     if has_symbolic_shapes(module):
@@ -142,7 +146,12 @@ def compile_module(
     loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
     if borrow_inputs:
         loops = bind_borrowed_inputs(loops)
-    return compile_native(loops, compiler=compiler, cache_dir=cache_dir)
+    return compile_native(
+        loops,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        parallel=parallel,
+    )
 
 
 def compile_dynamic_module(
@@ -151,6 +160,7 @@ def compile_dynamic_module(
     cache_dir: str | os.PathLike[str] | None = None,
     *,
     borrow_inputs: bool = False,
+    parallel: bool = False,
 ) -> DynamicExecutable:
     """Prepare lazy native specializations for runtime symbolic dimensions."""
     return DynamicExecutable(
@@ -158,4 +168,5 @@ def compile_dynamic_module(
         compiler=compiler,
         cache_dir=cache_dir,
         borrow_inputs=borrow_inputs,
+        parallel=parallel,
     )
