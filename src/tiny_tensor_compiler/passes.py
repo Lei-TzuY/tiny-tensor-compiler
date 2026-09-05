@@ -121,13 +121,17 @@ def common_subexpression_eliminate(module: Module) -> int:
     removed = 0
 
     for op in list(function.ops):
-        if op.opcode not in _CSE_OPCODES or op.attrs or not op.results:
+        if op.opcode not in _CSE_OPCODES or not op.results:
+            continue
+        if op.attrs and op.opcode != "sum":
             continue
 
+        attrs_key = tuple(sorted(op.attrs.items())) if op.opcode == "sum" else ()
         key = (
             op.opcode,
             tuple(op.operands),
             tuple(result.type for result in op.results),
+            attrs_key,
         )
         canonical = seen.get(key)
         if canonical is None:
