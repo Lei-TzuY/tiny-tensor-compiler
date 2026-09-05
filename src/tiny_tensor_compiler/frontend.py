@@ -36,6 +36,9 @@ class Tensor:
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.reshape(self, shape)
 
+    def view(self, shape: Iterable[ShapeDim]) -> Tensor:
+        return self._builder.view(self, shape)
+
 
 class GraphBuilder:
     def __init__(self, name: str = "main") -> None:
@@ -103,6 +106,17 @@ class GraphBuilder:
         result_type = infer_reshape(tensor.type, shape)
         op = self.function.add_op(
             "reshape",
+            operands=[tensor.value],
+            result_types=[result_type],
+        )
+        return Tensor(self, op.results[0])
+
+    def view(self, tensor: Tensor, shape: Iterable[ShapeDim]) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        result_type = infer_reshape(tensor.type, shape)
+        op = self.function.add_op(
+            "view",
             operands=[tensor.value],
             result_types=[result_type],
         )
