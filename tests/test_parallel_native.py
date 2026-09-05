@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import tiny_tensor_compiler.native as native_module
+import tiny_tensor_compiler.parallel_native as parallel_native_module
 from tiny_tensor_compiler import (
     GraphBuilder,
     SymbolicDim,
@@ -75,14 +76,27 @@ def test_parallel_codegen_keeps_scalar_and_zero_extent_kernels_serial():
     assert "#pragma omp parallel for schedule(static)" not in source
 
 
+def test_parallel_codegen_preserves_existing_sse2_kernel_body():
+    builder = GraphBuilder()
+    lhs = builder.input((16,), dtype="int32")
+    rhs = builder.input((16,), dtype="int32")
+    loops = lower_to_loops(lower_to_cpu(builder.finish(lhs + rhs)))
+
+    source = generate_c(loops, parallel=True)
+
+    assert "TINY_TENSOR_HAS_SSE2" in source
+    assert "_mm_add_epi32" in source
+    assert "#pragma omp parallel for schedule(static)" not in source
+
+
 def test_parallel_compiler_mode_adds_platform_openmp_flag():
     command = ["cl"] if os.name == "nt" else ["cc"]
 
-    enabled = native_module._enable_openmp(command)
+    enabled = parallel_native_module._enable_openmp(command)
 
     expected = "/openmp" if os.name == "nt" else "-fopenmp"
     assert enabled[-1] == expected
-    assert native_module._enable_openmp(enabled) == enabled
+    assert parallel_native_module._enable_openmp(enabled) == enabled
 
 
 def test_compile_module_parallel_native_matches_reference():
