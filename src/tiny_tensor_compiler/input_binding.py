@@ -10,6 +10,7 @@ from .loop_ir import (
     LoopInput,
     LoopKernel,
     LoopProgram,
+    LoopReluInto,
     LoopReturn,
     LoopView,
 )
@@ -105,6 +106,10 @@ class BorrowedLoopProgram:
         return self.program.copies
 
     @property
+    def relu_writes(self):
+        return self.program.relu_writes
+
+    @property
     def value_types(self):
         return self.program.value_types
 
@@ -145,7 +150,7 @@ class BorrowedLoopProgram:
 
 
 def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
-    """Split reused input lifetimes while preserving logical view and copy handles."""
+    """Split reused input lifetimes while preserving logical view and effect handles."""
     types = {alloc.buffer: alloc.type for alloc in program.allocations}
     storage_count = len(types)
     operations = program.operations
@@ -213,6 +218,18 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
             )
             continue
 
+        if isinstance(op, LoopReluInto):
+            transformed_operations.append(
+                LoopReluInto(
+                    output=op.output + split_count,
+                    root=remap_handle(op.root),
+                    target=remap_handle(op.target),
+                    type=op.type,
+                    layout=op.layout,
+                )
+            )
+            continue
+
         if isinstance(op, LoopKernel):
             transformed_operations.append(
                 LoopKernel(
@@ -254,6 +271,6 @@ def _has_other_write(operations, position: int, buffer: int) -> bool:
             return True
         if isinstance(other, LoopKernel) and other.output == buffer:
             return True
-        if isinstance(other, LoopCopyInto) and other.root == buffer:
+        if isinstance(other, (LoopCopyInto, LoopReluInto)) and other.root == buffer:
             return True
     return False
