@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from .ir import Function, Module, SymbolicDim, TensorType, Value
+from .ir import AffineDim, Function, Module, SymbolicDim, TensorType, Value
 from .verifier import verify
 
 
@@ -88,20 +88,35 @@ def bind_dynamic_shapes(
         for axis, (expected_dim, actual_dim) in enumerate(
             zip(expected_type.shape, actual_shape, strict=True)
         ):
+            symbol: SymbolicDim | None = None
+            candidate: int | None = None
             if isinstance(expected_dim, SymbolicDim):
-                if expected_dim not in symbol_set:
-                    raise SymbolicShapeError(
-                        f"unexpected symbolic dimension {expected_dim}"
-                    )
-                previous = bindings.get(expected_dim)
-                if previous is None:
-                    bindings[expected_dim] = actual_dim
-                elif previous != actual_dim:
+                symbol = expected_dim
+                candidate = actual_dim
+            elif isinstance(expected_dim, AffineDim):
+                symbol = expected_dim.symbol
+                try:
+                    candidate = expected_dim.solve(actual_dim)
+                except ValueError as exc:
                     raise ValueError(
-                        f"input {index} binds symbolic dimension {expected_dim} to "
-                        f"{actual_dim}, but the existing binding is {previous}"
+                        f"input {index} shape {actual_shape} does not satisfy symbolic "
+                        f"contract {expected_type.shape} at axis {axis}: {exc}"
+                    ) from exc
+
+            if symbol is not None:
+                if symbol not in symbol_set:
+                    raise SymbolicShapeError(f"unexpected symbolic dimension {symbol}")
+                assert candidate is not None
+                previous = bindings.get(symbol)
+                if previous is None:
+                    bindings[symbol] = candidate
+                elif previous != candidate:
+                    raise ValueError(
+                        f"input {index} binds symbolic dimension {symbol} to {candidate}, "
+                        f"but the existing binding is {previous}"
                     )
                 continue
+
             if actual_dim != expected_dim:
                 raise ValueError(
                     f"input {index} shape {actual_shape} does not match symbolic "
@@ -237,8 +252,16 @@ def _specialize_type(
     type_: TensorType,
     bindings: Mapping[SymbolicDim, int],
 ) -> TensorType:
-    shape = tuple(
-        bindings[dim] if isinstance(dim, SymbolicDim) else dim
-        for dim in type_.shape
-    )
+    shape = tuple(_specialize_dim(dim, bindings) for dim in type_.shape)
     return TensorType(shape, type_.dtype)
+
+
+def _specialize_dim(
+    dim: int | SymbolicDim | AffineDim,
+    bindings: Mapping[SymbolicDim, int],
+) -> int:
+    if isinstance(dim, SymbolicDim):
+        return bindings[dim]
+    if isinstance(dim, AffineDim):
+        return dim.evaluate(bindings[dim.symbol])
+    return dim
