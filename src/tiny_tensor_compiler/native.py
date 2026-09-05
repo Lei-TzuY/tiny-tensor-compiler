@@ -22,6 +22,10 @@ from .c_abi_codegen import generate_c
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
+from .native_cache_lock import (
+    PersistentCacheLeaseError,
+    persistent_cache_lease as _persistent_cache_lease,
+)
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 NativeOutput = np.ndarray | Sequence[np.ndarray] | None
@@ -144,7 +148,9 @@ def clear_native_cache() -> None:
                 if first_error is None:
                     first_error = error
         if first_error is not None:
-            raise NativeCompilationError(f"failed to clear native artifact cache: {first_error}") from first_error
+            raise NativeCompilationError(
+                f"failed to clear native artifact cache: {first_error}"
+            ) from first_error
 
 
 def _prepare_native_outputs(
@@ -291,40 +297,45 @@ def _get_or_compile_persistent_artifact(
     command: list[str],
     library_path: Path,
 ) -> _NativeArtifact:
-    cached = _stage_existing_persistent_artifact(library_path)
-    if cached is not None:
-        return cached
-
-    schema_root = library_path.parent.parent
-    build_directory = Path(tempfile.mkdtemp(prefix=".build-", dir=schema_root))
     try:
-        compiled_library = _compile_source(source, command, build_directory)
-        compiled_manifest = build_directory / _PERSISTENT_MANIFEST_NAME
-        _write_persistent_manifest(
-            compiled_manifest,
-            library_path,
-            _sha256_file(compiled_library),
-        )
-        library_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path = _persistent_manifest_path(library_path)
-        try:
-            os.replace(compiled_library, library_path)
-            os.replace(compiled_manifest, manifest_path)
-        except OSError as error:
-            concurrent = _stage_existing_persistent_artifact(library_path)
-            if concurrent is not None:
-                return concurrent
-            _invalidate_persistent_entry(library_path)
-            raise NativeCompilationError(
-                f"failed to publish persistent native artifact: {error}"
-            ) from error
+        with _persistent_cache_lease(library_path):
+            cached = _stage_existing_persistent_artifact(library_path)
+            if cached is not None:
+                return cached
 
-        staged = _stage_existing_persistent_artifact(library_path)
-        if staged is None:
-            raise NativeCompilationError("newly compiled persistent native artifact could not be loaded")
-        return staged
-    finally:
-        shutil.rmtree(build_directory, ignore_errors=True)
+            schema_root = library_path.parent.parent
+            build_directory = Path(tempfile.mkdtemp(prefix=".build-", dir=schema_root))
+            try:
+                compiled_library = _compile_source(source, command, build_directory)
+                compiled_manifest = build_directory / _PERSISTENT_MANIFEST_NAME
+                _write_persistent_manifest(
+                    compiled_manifest,
+                    library_path,
+                    _sha256_file(compiled_library),
+                )
+                library_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path = _persistent_manifest_path(library_path)
+                try:
+                    os.replace(compiled_library, library_path)
+                    os.replace(compiled_manifest, manifest_path)
+                except OSError as error:
+                    _invalidate_persistent_entry(library_path)
+                    raise NativeCompilationError(
+                        f"failed to publish persistent native artifact: {error}"
+                    ) from error
+
+                staged = _stage_existing_persistent_artifact(library_path)
+                if staged is None:
+                    raise NativeCompilationError(
+                        "newly compiled persistent native artifact could not be loaded"
+                    )
+                return staged
+            finally:
+                shutil.rmtree(build_directory, ignore_errors=True)
+    except PersistentCacheLeaseError as error:
+        raise NativeCompilationError(
+            f"failed to acquire persistent native cache lease: {error}"
+        ) from error
 
 
 def _compile_source(source: str, command: list[str], directory_path: Path) -> Path:
@@ -505,7 +516,12 @@ def _persistent_cache_digest(source: str, command: list[str]) -> str:
             "library_name": _library_name(),
         },
     }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -571,7 +587,9 @@ def _release_library(library: ctypes.CDLL) -> None:
     free_library.restype = ctypes.c_int
     if free_library(ctypes.c_void_p(library._handle)) == 0:
         error = ctypes.get_last_error()
-        raise NativeCompilationError(f"failed to unload native shared library: Windows error {error}")
+        raise NativeCompilationError(
+            f"failed to unload native shared library: Windows error {error}"
+        )
 
 
 def _return_types(program: LoopProgram) -> tuple[TensorType, ...]:
