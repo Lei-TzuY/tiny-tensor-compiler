@@ -104,11 +104,10 @@ def pack_dynamic_bundle_set_archive(
     if archive_path.is_relative_to(bundle_path):
         raise ValueError("native bundle archive destination must be outside the source bundle")
 
-    try:
-        executable = load_dynamic_bundle_set(bundle_path)
-    except (NativeBundleError, NativeBundleSetError) as exc:
-        raise NativeBundleArchiveError("source bundle set failed verification") from exc
-    executable.close()
+    _fully_validate_bundle_set_tree(
+        bundle_path,
+        error_message="source bundle set failed verification",
+    )
 
     files = _collect_payload_files(bundle_path)
     archive_path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,6 +128,14 @@ def pack_dynamic_bundle_set_archive(
                     f"{_PAYLOAD_ROOT}/{relative_path}",
                     source.read_bytes(),
                 )
+
+        # Validate the exact bytes that are about to be published. Besides reusing the
+        # full bundle/ABI checks, this closes the source-validation/read TOCTOU window:
+        # any mutation while the archive is being assembled produces a rejected temp
+        # artifact rather than a published archive that only fails later at load time.
+        verified = load_dynamic_bundle_set_archive(temporary_path)
+        verified.close()
+
         if archive_path.exists():
             raise FileExistsError(
                 f"native bundle archive destination already exists: {archive_path}"
@@ -164,15 +171,39 @@ def load_dynamic_bundle_set_archive(
                 with packed.open(entry, mode="r") as source, destination.open("wb") as target:
                     shutil.copyfileobj(source, target)
 
-        bundle_path = extraction_root
+        # The ordinary bundle-set loader intentionally validates child libraries lazily.
+        # A transport boundary must be fail-closed before it is handed to the caller, so
+        # force-load every packaged child once, close those validation handles, then
+        # construct a fresh dispatcher whose normal execution remains lazy.
+        _fully_validate_bundle_set_tree(
+            extraction_root,
+            error_message="archive payload failed bundle verification",
+        )
         try:
-            executable = load_dynamic_bundle_set(bundle_path)
+            executable = load_dynamic_bundle_set(extraction_root)
         except (NativeBundleError, NativeBundleSetError) as exc:
             raise NativeBundleArchiveError("archive payload failed bundle verification") from exc
         return NativeBundleSetArchiveExecutable(executable, extraction_root)
     except Exception:
         shutil.rmtree(extraction_root, ignore_errors=True)
         raise
+
+
+def _fully_validate_bundle_set_tree(
+    bundle_path: Path,
+    *,
+    error_message: str,
+) -> None:
+    executable: NativeBundleSetExecutable | None = None
+    try:
+        executable = load_dynamic_bundle_set(bundle_path)
+        for binding in executable.available_bindings:
+            executable.specialize(dict(binding))
+    except (NativeBundleError, NativeBundleSetError, OSError) as exc:
+        raise NativeBundleArchiveError(error_message) from exc
+    finally:
+        if executable is not None:
+            executable.close()
 
 
 def _collect_payload_files(bundle_path: Path) -> tuple[tuple[str, Path], ...]:
@@ -185,7 +216,7 @@ def _collect_payload_files(bundle_path: Path) -> tuple[tuple[str, Path], ...]:
         if not path.is_file():
             raise NativeBundleArchiveError("source bundle contains a non-regular entry")
         relative = path.relative_to(bundle_path).as_posix()
-        _validate_relative_name(relative, allow_archive_manifest=True)
+        _validate_relative_name(relative)
         files.append((relative, path))
     if not files:
         raise NativeBundleArchiveError("source bundle contains no files")
@@ -203,7 +234,7 @@ def _validate_archive_entries(archive: zipfile.ZipFile) -> tuple[zipfile.ZipInfo
     payload_prefix = f"{_PAYLOAD_ROOT}/"
     payload_entries = 0
     for entry in entries:
-        _validate_relative_name(entry.filename, allow_archive_manifest=True)
+        _validate_relative_name(entry.filename)
         if entry.is_dir():
             raise NativeBundleArchiveError("native bundle archive must not contain directory entries")
         if entry.flag_bits & 0x1:
@@ -226,14 +257,12 @@ def _validate_archive_entries(archive: zipfile.ZipFile) -> tuple[zipfile.ZipInfo
     return entries
 
 
-def _validate_relative_name(name: str, *, allow_archive_manifest: bool) -> None:
+def _validate_relative_name(name: str) -> None:
     if not name or "\\" in name:
         raise NativeBundleArchiveError("native bundle archive entry name is not canonical")
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise NativeBundleArchiveError("native bundle archive entry escapes its payload root")
-    if not allow_archive_manifest and name == _ARCHIVE_MANIFEST:
-        raise NativeBundleArchiveError("payload may not shadow archive.json")
 
 
 def _archive_manifest_bytes() -> bytes:
