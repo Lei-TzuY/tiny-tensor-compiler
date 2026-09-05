@@ -49,6 +49,11 @@ def test_parallel_codegen_is_opt_in_for_verified_non_scalar_kernel():
     assert "#pragma omp parallel for schedule(static)" in parallel
     assert "TINY_TENSOR_VECTORIZE_LOOP\n        for" in serial
     assert "TINY_TENSOR_VECTORIZE_LOOP\n        for" not in parallel
+    assert (
+        "int64_t n;\n"
+        "        #pragma omp parallel for schedule(static)\n"
+        "        for (n = 0;"
+    ) in parallel
 
 
 def test_parallel_codegen_schedules_outer_loop_for_broadcast_kernel():
@@ -61,7 +66,7 @@ def test_parallel_codegen_schedules_outer_loop_for_broadcast_kernel():
 
     marker = "#pragma omp parallel for schedule(static)"
     assert source.count(marker) == 1
-    assert f"{marker}\n        for (int64_t i0 = 0; i0 < 4; ++i0)" in source
+    assert f"int64_t i0;\n        {marker}\n        for (i0 = 0; i0 < 4; ++i0)" in source
     assert "for (int64_t i1 = 0; i1 < 3; ++i1)" in source
 
 
