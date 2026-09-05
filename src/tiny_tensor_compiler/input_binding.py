@@ -4,7 +4,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from .ir import TensorType
-from .loop_ir import LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
+from .loop_ir import LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn, LoopView
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,14 @@ class BorrowedLoopProgram:
         return self.program.inputs
 
     @property
+    def views(self):
+        return self.program.views
+
+    @property
+    def value_types(self):
+        return self.program.value_types
+
+    @property
     def input_types(self) -> InputTypeContract:
         types = tuple(self.program.input_types)
         return InputTypeContract(types=types, borrow_mask=(True,) * len(types))
@@ -105,6 +113,9 @@ class BorrowedLoopProgram:
     def return_slot(self):
         return self.program.return_slot
 
+    def storage_root(self, buffer: int) -> int:
+        return self.program.storage_root(buffer)
+
     @property
     def borrowed_input_indices(self) -> frozenset[int]:
         return frozenset(binding.index for binding in self.borrowed_inputs)
@@ -118,14 +129,26 @@ class BorrowedLoopProgram:
 
 
 def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
-    """Split reused input lifetimes so every runtime input can be bound zero-copy."""
+    """Split reused input lifetimes while preserving logical view handles."""
     types = {alloc.buffer: alloc.type for alloc in program.allocations}
-    next_buffer = len(types)
+    storage_count = len(types)
+    operations = program.operations
+    split_positions = {
+        position
+        for position, op in enumerate(operations)
+        if isinstance(op, LoopInput) and _has_other_write(operations, position, op.output)
+    }
+    split_count = len(split_positions)
+    next_buffer = storage_count
     extra_allocations: list[LoopAlloc] = []
     transformed_operations = []
     active_aliases: dict[int, int] = {}
     bindings: list[BorrowedInput] = []
-    operations = program.operations
+
+    def remap_handle(buffer: int) -> int:
+        if buffer >= storage_count:
+            return buffer + split_count
+        return active_aliases.get(buffer, buffer)
 
     for position, op in enumerate(operations):
         if isinstance(op, LoopAlloc):
@@ -134,7 +157,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
         if isinstance(op, LoopInput):
             active_aliases.pop(op.output, None)
             destination = op.output
-            if _has_other_write(operations, position, op.output):
+            if position in split_positions:
                 destination = next_buffer
                 next_buffer += 1
                 extra_allocations.append(LoopAlloc(destination, types[op.output]))
@@ -150,12 +173,22 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
             )
             continue
 
+        if isinstance(op, LoopView):
+            transformed_operations.append(
+                LoopView(
+                    output=op.output + split_count,
+                    source=remap_handle(op.source),
+                    type=op.type,
+                )
+            )
+            continue
+
         if isinstance(op, LoopKernel):
             transformed_operations.append(
                 LoopKernel(
                     opcode=op.opcode,
                     output=op.output,
-                    inputs=tuple(active_aliases.get(buffer, buffer) for buffer in op.inputs),
+                    inputs=tuple(remap_handle(buffer) for buffer in op.inputs),
                     iteration_shape=op.iteration_shape,
                     input_maps=op.input_maps,
                     literal=op.literal,
@@ -166,9 +199,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
             continue
 
         if isinstance(op, LoopReturn):
-            transformed_operations.append(
-                LoopReturn(active_aliases.get(op.buffer, op.buffer))
-            )
+            transformed_operations.append(LoopReturn(remap_handle(op.buffer)))
             continue
 
         raise TypeError("unsupported Loop IR operation during input borrowing")
