@@ -4,7 +4,15 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from .ir import TensorType
-from .loop_ir import LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn, LoopView
+from .loop_ir import (
+    LoopAlloc,
+    LoopCopyInto,
+    LoopInput,
+    LoopKernel,
+    LoopProgram,
+    LoopReturn,
+    LoopView,
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,10 @@ class BorrowedLoopProgram:
         return self.program.views
 
     @property
+    def copies(self):
+        return self.program.copies
+
+    @property
     def value_types(self):
         return self.program.value_types
 
@@ -133,7 +145,7 @@ class BorrowedLoopProgram:
 
 
 def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
-    """Split reused input lifetimes while preserving logical view handles."""
+    """Split reused input lifetimes while preserving logical view and copy handles."""
     types = {alloc.buffer: alloc.type for alloc in program.allocations}
     storage_count = len(types)
     operations = program.operations
@@ -188,6 +200,19 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
             )
             continue
 
+        if isinstance(op, LoopCopyInto):
+            transformed_operations.append(
+                LoopCopyInto(
+                    output=op.output + split_count,
+                    root=remap_handle(op.root),
+                    target=remap_handle(op.target),
+                    source=remap_handle(op.source),
+                    type=op.type,
+                    layout=op.layout,
+                )
+            )
+            continue
+
         if isinstance(op, LoopKernel):
             transformed_operations.append(
                 LoopKernel(
@@ -228,5 +253,7 @@ def _has_other_write(operations, position: int, buffer: int) -> bool:
         if isinstance(other, LoopInput) and other.output == buffer:
             return True
         if isinstance(other, LoopKernel) and other.output == buffer:
+            return True
+        if isinstance(other, LoopCopyInto) and other.root == buffer:
             return True
     return False
