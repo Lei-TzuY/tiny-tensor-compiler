@@ -52,6 +52,13 @@ class BufferCopyInto:
 
 
 @dataclass(frozen=True)
+class BufferReluInto:
+    output: int
+    root: int
+    target: int
+
+
+@dataclass(frozen=True)
 class BufferKernel:
     opcode: str
     output: int
@@ -64,7 +71,15 @@ class BufferReturn:
     buffer: int
 
 
-BufferOperation = BufferAlloc | BufferInput | BufferView | BufferCopyInto | BufferKernel | BufferReturn
+BufferOperation = (
+    BufferAlloc
+    | BufferInput
+    | BufferView
+    | BufferCopyInto
+    | BufferReluInto
+    | BufferKernel
+    | BufferReturn
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +199,10 @@ class CPUProgram:
         return tuple(op for op in self.operations if isinstance(op, BufferCopyInto))
 
     @property
+    def relu_writes(self) -> tuple[BufferReluInto, ...]:
+        return tuple(op for op in self.operations if isinstance(op, BufferReluInto))
+
+    @property
     def instructions(self) -> tuple[BufferKernel, ...]:
         """Compatibility view containing only executable kernel operations."""
         return tuple(op for op in self.operations if isinstance(op, BufferKernel))
@@ -228,6 +247,10 @@ class CPUProgram:
             elif isinstance(op, BufferCopyInto):
                 lines.append(
                     f"b{op.output} = copy_into root=b{op.root} target=b{op.target} source=b{op.source}"
+                )
+            elif isinstance(op, BufferReluInto):
+                lines.append(
+                    f"b{op.output} = relu_into root=b{op.root} target=b{op.target}"
                 )
             elif isinstance(op, BufferKernel):
                 if op.opcode == "const":
@@ -305,6 +328,15 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 )
             )
             continue
+        if op.opcode == "relu_into":
+            operations.append(
+                BufferReluInto(
+                    output=buffer,
+                    root=buffers[op.operands[0]],
+                    target=buffers[op.operands[1]],
+                )
+            )
+            continue
 
         literal = None
         if op.opcode == "const":
@@ -342,6 +374,10 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         elif isinstance(op, BufferCopyInto):
             alias_sources[op.output] = op.root
             for buffer in (op.output, op.root, op.target, op.source):
+                last_uses[buffer] = max(last_uses.get(buffer, -1), index)
+        elif isinstance(op, BufferReluInto):
+            alias_sources[op.output] = op.root
+            for buffer in (op.output, op.root, op.target):
                 last_uses[buffer] = max(last_uses.get(buffer, -1), index)
         elif isinstance(op, BufferKernel):
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
@@ -419,7 +455,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
                 if inferred_shape != output_type.shape:
                     raise ValueError("buffer slice layout shape does not match inferred output")
             layouts[op.output] = layout
-        elif isinstance(op, BufferCopyInto):
+        elif isinstance(op, (BufferCopyInto, BufferReluInto)):
             layouts[op.output] = layouts[op.root]
 
     assignment_by_virtual = {assignment.virtual: assignment for assignment in assignments}
@@ -428,7 +464,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         if isinstance(op, BufferView):
             source = op.source
             output = op.output
-        elif isinstance(op, BufferCopyInto):
+        elif isinstance(op, (BufferCopyInto, BufferReluInto)):
             source = op.root
             output = op.output
         else:
@@ -461,16 +497,6 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
     input_roots: set[int] = set()
     next_input_index = 0
     saw_return = False
-
-    def root_virtual(buffer: int) -> int:
-        seen: set[int] = set()
-        current = buffer
-        while current in alias_sources:
-            if current in seen:
-                raise ValueError("buffer alias cycle detected")
-            seen.add(current)
-            current = alias_sources[current]
-        return current
 
     def require_fresh(buffer: int) -> None:
         root = roots.get(buffer)
@@ -573,6 +599,37 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 raise ValueError("copy_into result type must match its root handle type")
             if allocated[op.target] != allocated[op.source]:
                 raise ValueError("copy_into target and source types must exactly match")
+            alias_sources[op.output] = op.root
+            root_generations[owner] += 1
+            roots[op.output] = owner
+            value_generations[op.output] = root_generations[owner]
+            full_root_handles.add(op.output)
+            written.add(op.output)
+            continue
+
+        if isinstance(op, BufferReluInto):
+            for buffer in (op.output, op.root, op.target):
+                if buffer not in allocated:
+                    raise ValueError("relu_into requires allocated logical buffer values")
+            if op.output in written:
+                raise ValueError(f"buffer b{op.output} is written more than once")
+            for buffer in (op.root, op.target):
+                if buffer not in written:
+                    raise ValueError(f"relu_into reads b{buffer} before it is written")
+                require_fresh(buffer)
+            owner = roots[op.root]
+            if op.root not in full_root_handles:
+                raise ValueError("relu_into root must be a fresh full-root buffer handle")
+            if owner in input_roots:
+                raise ValueError("relu_into root must use internal computed storage")
+            if roots[op.target] != owner:
+                raise ValueError("relu_into target must alias its owning root storage")
+            if allocated[op.root] != allocated[owner]:
+                raise ValueError("relu_into root handle type must match owning storage")
+            if allocated[op.output] != allocated[op.root]:
+                raise ValueError("relu_into result type must match its root handle type")
+            if infer_relu(allocated[op.target]) != allocated[op.target]:
+                raise ValueError("relu_into target type is not ReLU-preserving")
             alias_sources[op.output] = op.root
             root_generations[owner] += 1
             roots[op.output] = owner
