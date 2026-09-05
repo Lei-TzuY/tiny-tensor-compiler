@@ -44,6 +44,12 @@ from .native_api import (
     compile_native,
     execute_native,
 )
+from .native_bundle_archive import (
+    NativeBundleArchiveError,
+    NativeBundleSetArchiveExecutable,
+    load_dynamic_bundle_set_archive,
+    pack_dynamic_bundle_set_archive,
+)
 from .passes import (
     algebraic_simplify,
     canonicalize,
@@ -86,6 +92,8 @@ __all__ = [
     "LoopReturn",
     "LoopView",
     "MemoryPlan",
+    "NativeBundleArchiveError",
+    "NativeBundleSetArchiveExecutable",
     "NativeCompilationError",
     "NativeExecutable",
     "StorageLayout",
@@ -113,8 +121,10 @@ __all__ = [
     "fuse_elementwise",
     "generate_c",
     "has_symbolic_shapes",
+    "load_dynamic_bundle_set_archive",
     "lower_to_cpu",
     "lower_to_loops",
+    "pack_dynamic_bundle_set_archive",
     "plan_memory",
     "specialize_module",
     "verify",

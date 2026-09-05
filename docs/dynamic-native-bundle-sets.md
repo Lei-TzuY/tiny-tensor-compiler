@@ -57,26 +57,38 @@ An input shape/dtype combination that was not explicitly packaged is an error. T
 
 `specialize({...})` may also select a packaged child by its exact symbolic binding. Bindings not present in the package are rejected.
 
+## Single-file archive transport
+
+A verified bundle-set directory can be wrapped with `pack_dynamic_bundle_set_archive()` and reopened with `load_dynamic_bundle_set_archive()` through schema `native-bundle-archive-v1`.
+
+The archive transport is deliberately layered above this directory format: it does not alter symbolic dispatch, child manifests, ABI hashes, target identity, or runtime input matching. Packing fully loads every child once to verify its source/library hashes and embedded ABI identity, writes a deterministic stored ZIP profile, then reloads the exact temporary archive before atomic publication. Loading safely extracts into a private temporary directory, fully verifies every child before returning, and then constructs a fresh dispatcher so ordinary runtime child loading remains lazy.
+
+Unsafe ZIP paths, duplicate names, symlinks, encrypted entries, unsupported compression, malformed transport metadata, and incoherent/tampered child artifacts are rejected before the archive executable is exposed. See `docs/dynamic-bundle-archives.md` for the complete transport and lifetime contract.
+
 ## Deliberate boundaries
 
-This first bundle-set phase is intentionally finite and serial:
+This bundle-set phase remains intentionally finite and serial:
 
 - no on-demand specialization compilation;
 - no unresolved symbolic physical storage or loop bounds;
 - no borrowed-input bundle ABI;
 - no OpenMP bundle mode;
-- no signed package/provenance claim;
-- no registry, remote artifact transport, or cross-target package;
+- no signed package/provenance or trusted-publisher claim;
+- no remote registry/fleet distribution protocol or cross-target package;
 - no compatibility fallback for an unpackaged runtime shape.
 
-The active writable-alias/storage work remains a separate subsystem. Bundle-set implementation is layered on existing verified concrete child bundles and does not modify storage-layout, view, input-binding, or mutability semantics.
+The deterministic archive is a local single-file transport boundary, not a network registry and not an authenticity mechanism. Its SHA-256 and embedded ABI checks establish internal consistency only.
+
+The writable-alias/storage subsystem remains separate. Bundle-set and archive implementation are layered on existing verified concrete child bundles and do not modify storage-layout, view, input-binding, or mutability semantics.
 
 ## Evidence scope
 
 Regression coverage includes compiler-free dispatch across multiple concrete symbolic bindings, lazy variant loading/reuse, explicit specialization selection, ordered multi-output with preallocated outputs, rejection of unpackaged runtime shapes, duplicate-binding and ambiguous-ABI refusal, binding-to-child-ABI verification, child-manifest substitution detection, malformed symbolic-template rejection, atomic outer publication, and destination-collision handling on both GCC-style and MSVC CI paths.
 
-No runtime performance or deployment-size claim is made from CI timing.
+The archive layer additionally covers deterministic byte-for-byte repacking, full child validation at pack/load boundaries, child-library tamper detection, safe path handling, duplicate-name and symlink rejection, transport-schema validation, and atomic archive publication.
+
+No runtime performance, deployment-size, or transfer-efficiency claim is made from CI timing.
 
 ## Next promotion
 
-After this finite AOT-family layer is sealed, deployment work should move to a genuinely new boundary rather than adding more manifest fields: examples include an explicit provenance/authenticity model, controlled transport/registry semantics, or a separately verified parallel/AOT compatibility phase. Storage mutability remains owned by its existing parallel branch until that work converges.
+With finite AOT-family compilation and local deterministic single-file transport both sealed, further ZIP metadata or manifest-field variants would be low-value farming. A later deployment phase should add a genuinely new trust/distribution boundary such as signed provenance/trusted publishers or a controlled remote registry, while the compiler may instead promote to a separate executable frontier such as bounded verifier-backed in-place elementwise effects.
