@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -116,6 +116,14 @@ def bind_dynamic_batch(
     return symbol, batch_size
 
 
+def clone_module(module: Module) -> Module:
+    """Deep-clone verified tensor IR so reusable executables own immutable-by-convention templates."""
+    verify(module)
+    cloned = _clone_module(module, lambda type_: type_)
+    verify(cloned)
+    return cloned
+
+
 def specialize_for_inputs(
     module: Module,
     inputs: Sequence[Any] = (),
@@ -133,14 +141,25 @@ def specialize_module(
     verify(module)
     symbols = symbolic_dims(module)
     normalized = _normalize_bindings(symbols, bindings)
+    specialized = _clone_module(
+        module,
+        lambda type_: _specialize_type(type_, normalized),
+    )
+    verify(specialized)
+    if has_symbolic_shapes(specialized):
+        raise SymbolicShapeError("specialization left unresolved symbolic dimensions")
+    return specialized
 
+
+def _clone_module(
+    module: Module,
+    transform_type: Callable[[TensorType], TensorType],
+) -> Module:
     function = Function(module.function.name)
     values: dict[Value, Value] = {}
     for op in module.function.ops:
         operands = tuple(values[operand] for operand in op.operands)
-        result_types = tuple(
-            _specialize_type(result.type, normalized) for result in op.results
-        )
+        result_types = tuple(transform_type(result.type) for result in op.results)
         attrs = dict(op.attrs)
         if op.opcode == "const":
             attrs["value"] = np.array(op.attrs["value"], copy=True)
@@ -152,12 +171,7 @@ def specialize_module(
         )
         for original, replacement in zip(op.results, cloned.results, strict=True):
             values[original] = replacement
-
-    specialized = Module(function)
-    verify(specialized)
-    if has_symbolic_shapes(specialized):
-        raise SymbolicShapeError("specialization left unresolved symbolic dimensions")
-    return specialized
+    return Module(function)
 
 
 def _input_types(module: Module) -> tuple[TensorType, ...]:
