@@ -396,11 +396,11 @@ def _encode_array(value: np.ndarray[Any, Any]) -> dict[str, Any]:
     except TypeError as exc:
         raise IRSerializationError(str(exc)) from exc
     canonical_dtype = _CANONICAL_DTYPES[dtype]
-    canonical = np.ascontiguousarray(array, dtype=canonical_dtype)
+    canonical = np.array(array, dtype=canonical_dtype, order="C", copy=True).reshape(array.shape)
     return {
         "kind": "ndarray",
         "dtype": dtype.value,
-        "shape": list(canonical.shape),
+        "shape": list(array.shape),
         "data": base64.b64encode(canonical.tobytes(order="C")).decode("ascii"),
     }
 
