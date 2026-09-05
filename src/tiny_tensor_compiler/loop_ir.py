@@ -140,9 +140,11 @@ class LoopProgram:
                 layouts[op.output] = layout
                 roots[op.output] = root
             elif isinstance(op, LoopCopyInto):
+                if op.root not in roots:
+                    raise ValueError("copy_into root handle has no storage root")
                 root = roots[op.root]
-                if root != op.root:
-                    raise ValueError("copy_into root must name owning storage")
+                if types[op.root] != root_types[root] or layouts[op.root] != layouts[root]:
+                    raise ValueError("copy_into root handle must expose the full owning root")
                 op.layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
                 layouts[op.output] = op.layout
                 roots[op.output] = root
@@ -179,9 +181,9 @@ class LoopProgram:
                     raise KeyError(f"view source p{op.source} has no storage root")
                 roots[op.output] = roots[op.source]
             elif isinstance(op, LoopCopyInto):
-                if op.root not in roots or roots[op.root] != op.root:
-                    raise KeyError(f"copy_into root p{op.root} has no owning storage root")
-                roots[op.output] = op.root
+                if op.root not in roots:
+                    raise KeyError(f"copy_into root handle p{op.root} has no storage root")
+                roots[op.output] = roots[op.root]
         try:
             return roots[buffer]
         except KeyError as exc:
@@ -423,33 +425,36 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 raise ValueError(f"invalid negative copy_into result id p{op.output}")
             if op.output in types:
                 raise ValueError(f"copy_into result p{op.output} collides with an existing loop value")
-            if op.root not in allocated or roots.get(op.root) != op.root:
-                raise ValueError("copy_into root must name owning storage")
-            if op.root in input_roots:
-                raise ValueError("copy_into cannot mutate borrowed or copied runtime input storage")
             for buffer in (op.root, op.target, op.source):
                 if buffer not in types:
                     raise ValueError(f"copy_into input p{buffer} is not defined")
                 if buffer not in written:
                     raise ValueError(f"copy_into input p{buffer} is not written")
                 _verify_fresh_value(buffer, roots, root_generations, value_generations)
-            if roots[op.target] != op.root:
+            root = roots[op.root]
+            if root not in allocated:
+                raise ValueError("copy_into root handle has no owning storage")
+            if root in input_roots:
+                raise ValueError("copy_into cannot mutate borrowed or copied runtime input storage")
+            if types[op.root] != allocated[root] or layouts[op.root] != layouts[root]:
+                raise ValueError("copy_into root must be a fresh full-root handle")
+            if roots[op.target] != root:
                 raise ValueError("copy_into target must alias its owning root")
-            if roots[op.source] == op.root:
+            if roots[op.source] == root:
                 raise ValueError("copy_into source must use a different storage root")
             if types[op.target] != types[op.source]:
                 raise ValueError("copy_into target and source types must exactly match")
-            if op.type != allocated[op.root]:
+            if op.type != allocated[root]:
                 raise ValueError("copy_into fresh result type must match its owning root")
-            if op.layout != layouts[op.root]:
+            if op.layout != layouts[root]:
                 raise ValueError("copy_into fresh result must expose the full owning root layout")
-            op.layout.validate_bounds(op.type.shape, element_count(allocated[op.root].shape))
+            op.layout.validate_bounds(op.type.shape, element_count(allocated[root].shape))
 
-            root_generations[op.root] += 1
+            root_generations[root] += 1
             types[op.output] = op.type
             layouts[op.output] = op.layout
-            roots[op.output] = op.root
-            value_generations[op.output] = root_generations[op.root]
+            roots[op.output] = root
+            value_generations[op.output] = root_generations[root]
             written.add(op.output)
             continue
 
