@@ -25,6 +25,9 @@ All notable project milestones are recorded here.
 - Structured `fused_dag` kernels for bounded five- and six-node integer `add`/`mul` DAGs. Candidate selection ranks already-legal windows by eliminated intermediate materializations and then external-input footprint; this is a static compiler heuristic rather than a wall-clock performance claim.
 - Fusion of safe mirrored producer order and reversed-root chain-tree layouts without reassociation or expansion of the existing legacy fused opcode families.
 - Expression-driven SSE2 selection for exact contiguous `int32` fused kernels whose canonical semantic steps use only addition and ReLU, including generic all-add DAGs without fused-opcode whitelists.
+- Opt-in native OpenMP loop scheduling through `compile_native(..., parallel=True)`, `execute_native(..., parallel=True)`, `compile_module(..., parallel=True)`, and dynamic specializations. Verified non-scalar, non-empty general-C kernels use static OpenMP scheduling while per-kernel barriers preserve existing producer/consumer ordering.
+- Cross-platform OpenMP compilation through `-fopenmp` on GCC-style toolchains and `/openmp` on MSVC, including MSVC-compatible canonical induction-variable emission for linearized and broadcast outer loops.
+- Windows OpenMP native artifacts use a process-pinned DLL lifetime so `clear_native_cache()` cannot unload generated code that the OpenMP worker runtime may still reference; marked staging directories are eligible for best-effort stale cleanup by a later process.
 
 ### Compatibility
 
@@ -39,6 +42,9 @@ All notable project milestones are recorded here.
 - Generic DAG fusion remains bounded to adjacent integer binary windows with single-consumer internal values, no later external use, identity internal indexing, compatible shapes/dtypes, and no final-output/leaf alias. Shared internal subexpressions, reassociation, kernel reordering, non-adjacent fusion, floating-point generic DAGs, and windows larger than six binary nodes remain out of scope.
 - `tiny_tensor_compiler.loop_ir.fuse_elementwise()` remains as a compatibility entry point but delegates to the sole topology-driven fusion planner; the former family-specific fusion engine has been retired.
 - SSE2 eligibility still requires exact contiguous `int32` storage. Expressions containing multiplication, broadcast indexing, scalar shapes, and other unsupported forms retain the general generated-C fallback.
+- Parallel native scheduling is opt-in; `parallel=False` retains the serial call shape and code-generation behavior. Scalar and zero-extent kernels remain serial, and the existing explicit SSE2 path keeps priority instead of stacking OpenMP onto its vector loop and scalar tail.
+- OpenMP input materialization and terminal output copies remain serial. Only verified kernel iteration is scheduled in parallel, and each emitted `parallel for` retains its implicit barrier; this phase does not introduce asynchronous kernel execution or graph-level reordering.
+- The OpenMP phase establishes executable scheduling semantics and cross-platform correctness only. It does not claim wall-clock speedup, optimal thread count, grain-size selection, or benchmark superiority.
 
 ## [0.1.0] - 2026-09-04
 
