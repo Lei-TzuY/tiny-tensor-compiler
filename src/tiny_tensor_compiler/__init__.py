@@ -10,7 +10,7 @@ from .frontend import GraphBuilder, Tensor
 from .fusion_planner import fuse_elementwise
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
-from .ir import AffineDim, SymbolicDim
+from .ir import AffineDim, LinearDim, SymbolicDim
 from .loop_ir import (
     IndexMap,
     LoopAlloc,
@@ -68,6 +68,7 @@ __all__ = [
     "DynamicExecutable",
     "GraphBuilder",
     "IndexMap",
+    "LinearDim",
     "LoopAlloc",
     "LoopInput",
     "LoopKernel",
