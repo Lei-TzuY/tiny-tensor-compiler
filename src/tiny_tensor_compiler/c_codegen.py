@@ -133,18 +133,47 @@ def _emit_kernel(
         source = op.inputs[0]
         source_type = types[source]
         c_type = _c_type(output_type.dtype)
-        source_ref = _linear_input_ref(source, source_type, layouts[source], "n")
-        lines.extend(
-            [
-                f"        {c_type} sum_value = {_zero_literal(output_type.dtype)};",
-                f"        for (int64_t n = 0; n < {_element_count(source_type)}; ++n) {{",
-                f"            sum_value = (({c_type})sum_value + ({c_type}){source_ref});",
-                "        }",
-                f"        p{op.output}[0] = sum_value;",
-                "    }",
-                "",
-            ]
+        if op.reduction_axis is None:
+            source_ref = _linear_input_ref(source, source_type, layouts[source], "n")
+            lines.extend(
+                [
+                    f"        {c_type} sum_value = {_zero_literal(output_type.dtype)};",
+                    f"        for (int64_t n = 0; n < {_element_count(source_type)}; ++n) {{",
+                    f"            sum_value = (({c_type})sum_value + ({c_type}){source_ref});",
+                    "        }",
+                    f"        p{op.output}[0] = sum_value;",
+                    "    }",
+                    "",
+                ]
+            )
+            return lines
+
+        axis = op.reduction_axis
+        indent = "        "
+        for output_axis, bound in enumerate(output_type.shape):
+            lines.append(
+                f"{indent}for (int64_t i{output_axis} = 0; "
+                f"i{output_axis} < {bound}; ++i{output_axis}) {{"
+            )
+            indent += "    "
+        source_ref = _axis_sum_input_ref(source, source_type, layouts[source], axis)
+        output_offset = _flat_offset(
+            tuple(range(len(output_type.shape))), output_type.shape
         )
+        lines.append(f"{indent}{c_type} sum_value = {_zero_literal(output_type.dtype)};")
+        lines.append(
+            f"{indent}for (int64_t r = 0; r < {source_type.shape[axis]}; ++r) {{"
+        )
+        lines.append(
+            f"{indent}    sum_value = (({c_type})sum_value + ({c_type}){source_ref});"
+        )
+        lines.append(f"{indent}}}")
+        lines.append(f"{indent}p{op.output}[{output_offset}] = sum_value;")
+        for _ in output_type.shape:
+            indent = indent[:-4]
+            lines.append(f"{indent}}}")
+        lines.append("    }")
+        lines.append("")
         return lines
 
     if op.opcode == "reshape":
@@ -412,6 +441,31 @@ def _linear_input_ref(
             terms.append(coordinate)
         else:
             terms.append(f"({coordinate} * {physical_stride})")
+    offset = " + ".join(terms) if terms else "0"
+    return f"p{buffer}[{offset}]"
+
+
+def _axis_sum_input_ref(
+    buffer: int,
+    type_: TensorType,
+    layout: StorageLayout,
+    reduction_axis: int,
+) -> str:
+    terms: list[str] = []
+    for source_axis, (dim, stride) in enumerate(
+        zip(type_.shape, layout.strides, strict=True)
+    ):
+        if dim <= 1:
+            continue
+        if source_axis == reduction_axis:
+            coordinate = "r"
+        else:
+            output_axis = source_axis if source_axis < reduction_axis else source_axis - 1
+            coordinate = f"i{output_axis}"
+        if stride == 1:
+            terms.append(coordinate)
+        elif stride != 0:
+            terms.append(f"({coordinate} * {stride})")
     offset = " + ".join(terms) if terms else "0"
     return f"p{buffer}[{offset}]"
 
