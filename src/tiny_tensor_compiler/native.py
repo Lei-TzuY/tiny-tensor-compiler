@@ -85,7 +85,8 @@ class NativeExecutable:
         return self.execute(inputs, out=out)
 
 
-_PERSISTENT_CACHE_SCHEMA = "native-v1"
+_PERSISTENT_CACHE_SCHEMA = "native-v2"
+_PERSISTENT_MANIFEST_NAME = "manifest.json"
 _NATIVE_CACHE: dict[tuple[tuple[str, ...], str, str | None], _NativeArtifact] = {}
 _NATIVE_CACHE_LOCK = threading.RLock()
 
@@ -298,13 +299,22 @@ def _get_or_compile_persistent_artifact(
     build_directory = Path(tempfile.mkdtemp(prefix=".build-", dir=schema_root))
     try:
         compiled_library = _compile_source(source, command, build_directory)
+        compiled_manifest = build_directory / _PERSISTENT_MANIFEST_NAME
+        _write_persistent_manifest(
+            compiled_manifest,
+            library_path,
+            _sha256_file(compiled_library),
+        )
         library_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path = _persistent_manifest_path(library_path)
         try:
             os.replace(compiled_library, library_path)
+            os.replace(compiled_manifest, manifest_path)
         except OSError as error:
             concurrent = _stage_existing_persistent_artifact(library_path)
             if concurrent is not None:
                 return concurrent
+            _invalidate_persistent_entry(library_path)
             raise NativeCompilationError(
                 f"failed to publish persistent native artifact: {error}"
             ) from error
@@ -345,7 +355,19 @@ def _load_library(library_path: Path) -> ctypes.CDLL:
 
 
 def _stage_existing_persistent_artifact(library_path: Path) -> _NativeArtifact | None:
-    if not library_path.is_file():
+    manifest_path = _persistent_manifest_path(library_path)
+    if not library_path.is_file() and not manifest_path.is_file():
+        return None
+    if not library_path.is_file() or not manifest_path.is_file():
+        _invalidate_persistent_entry(library_path)
+        return None
+
+    manifest = _read_persistent_manifest(manifest_path)
+    if not _persistent_manifest_matches(manifest, library_path):
+        _invalidate_persistent_entry(library_path)
+        return None
+    if manifest["library_sha256"] != _sha256_file(library_path):
+        _invalidate_persistent_entry(library_path)
         return None
 
     staging_directory = Path(tempfile.mkdtemp(prefix="tiny_tensor_compiler_cached_"))
@@ -360,9 +382,80 @@ def _stage_existing_persistent_artifact(library_path: Path) -> _NativeArtifact |
         library = _load_library(staged_library)
     except NativeCompilationError:
         shutil.rmtree(staging_directory, ignore_errors=True)
-        _remove_file(library_path)
+        _invalidate_persistent_entry(library_path)
         return None
     return _NativeArtifact(staging_directory, library)
+
+
+def _persistent_manifest_path(library_path: Path) -> Path:
+    return library_path.with_name(_PERSISTENT_MANIFEST_NAME)
+
+
+def _read_persistent_manifest(manifest_path: Path) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
+def _persistent_manifest_matches(
+    manifest: dict[str, object] | None,
+    library_path: Path,
+) -> bool:
+    if manifest is None:
+        return False
+    expected = {
+        "schema": _PERSISTENT_CACHE_SCHEMA,
+        "digest": library_path.parent.name,
+        "library": library_path.name,
+    }
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        return False
+    library_sha256 = manifest.get("library_sha256")
+    return (
+        isinstance(library_sha256, str)
+        and len(library_sha256) == 64
+        and all(character in "0123456789abcdef" for character in library_sha256)
+    )
+
+
+def _write_persistent_manifest(
+    manifest_path: Path,
+    library_path: Path,
+    library_sha256: str,
+) -> None:
+    manifest = {
+        "schema": _PERSISTENT_CACHE_SCHEMA,
+        "digest": library_path.parent.name,
+        "library": library_path.name,
+        "library_sha256": library_sha256,
+    }
+    try:
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as error:
+        raise NativeCompilationError(f"failed to write persistent native manifest: {error}") from error
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise NativeCompilationError(f"failed to hash persistent native artifact: {error}") from error
+    return digest.hexdigest()
+
+
+def _invalidate_persistent_entry(library_path: Path) -> None:
+    _remove_file(_persistent_manifest_path(library_path))
+    _remove_file(library_path)
 
 
 def _persistent_library_path(
