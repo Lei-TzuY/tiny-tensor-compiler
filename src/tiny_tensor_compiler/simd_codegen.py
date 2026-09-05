@@ -4,14 +4,6 @@ from dataclasses import dataclass
 
 from .loop_ir import LoopKernel, fused_expression_for_kernel
 
-_EXISTING_SSE2_FUSED_OPCODES = frozenset(
-    {
-        "chain_add_add",
-        "relu_chain_add_add",
-        "tree_add_add_add",
-    }
-)
-
 
 @dataclass(frozen=True)
 class I32SSE2Step:
@@ -58,7 +50,13 @@ class I32SSE2Plan:
 
 
 def build_i32_sse2_plan(op: LoopKernel) -> I32SSE2Plan | None:
-    """Describe the existing SSE2 int32 family without encoding loop mechanics per opcode."""
+    """Build an SSE2 plan when kernel semantics use only int32 add/ReLU steps.
+
+    Layout and dtype eligibility are checked by the C backend. This function only
+    answers whether the kernel's scalar semantics can be represented by the SSE2
+    operations used by this project; multiplication deliberately remains outside
+    that surface because SSE2 has no 32-bit integer multiply-low instruction.
+    """
     if op.opcode == "add":
         lhs, rhs = op.inputs
         return I32SSE2Plan(
@@ -83,15 +81,19 @@ def build_i32_sse2_plan(op: LoopKernel) -> I32SSE2Plan | None:
             ),
             result="relu",
         )
-    if op.opcode not in _EXISTING_SSE2_FUSED_OPCODES:
-        return None
 
     expression = fused_expression_for_kernel(op)
     if expression is None:
-        raise RuntimeError(f"missing fused expression descriptor for {op.opcode}")
+        return None
+    if any(step.opcode not in {"add", "relu"} for step in expression.steps):
+        return None
+
+    pre_relu_result = (
+        expression.steps[-2].output if expression.terminal_relu else None
+    )
 
     def plan_name(name: str) -> str:
-        if op.opcode == "relu_chain_add_add" and name == "value":
+        if name == pre_relu_result:
             return "result"
         return name
 
