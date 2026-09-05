@@ -31,7 +31,7 @@ from .lowering import (
     lower_to_cpu,
     plan_memory,
 )
-from .native import (
+from .native_api import (
     NativeCompilationError,
     NativeExecutable,
     clear_native_cache,
