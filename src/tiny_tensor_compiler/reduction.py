@@ -93,3 +93,36 @@ class ReductionPlan:
         if isinstance(self.axis, int):
             return (self.axis,)
         return self.axis
+
+    def reduction_shape(self, input_shape: tuple[int, ...]) -> tuple[int, ...]:
+        axes = self.axes
+        if axes is None:
+            return input_shape
+        return tuple(input_shape[axis] for axis in axes)
+
+    def input_index(
+        self,
+        rank: int,
+        output_index: tuple[int, ...],
+        reduction_index: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        """Compose one logical source coordinate for a non-full reduction domain."""
+        axes = self.axes
+        if axes is None:
+            raise ValueError("full-tensor reduction does not use split output/reduction indices")
+        if len(reduction_index) != len(axes):
+            raise ValueError("reduction index rank does not match reduction domain")
+        if len(output_index) != rank - len(axes):
+            raise ValueError("output index rank does not match unreduced domain")
+
+        reduced_positions = {axis: position for position, axis in enumerate(axes)}
+        source: list[int] = []
+        output_position = 0
+        for axis in range(rank):
+            reduction_position = reduced_positions.get(axis)
+            if reduction_position is None:
+                source.append(output_index[output_position])
+                output_position += 1
+            else:
+                source.append(reduction_index[reduction_position])
+        return tuple(source)
