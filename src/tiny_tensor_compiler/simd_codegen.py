@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .fused_expr import describe_fused_opcode
 from .loop_ir import LoopKernel
+
+_EXISTING_SSE2_FUSED_OPCODES = frozenset(
+    {
+        "chain_add_add",
+        "relu_chain_add_add",
+        "tree_add_add_add",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -75,33 +84,33 @@ def build_i32_sse2_plan(op: LoopKernel) -> I32SSE2Plan | None:
             ),
             result="relu",
         )
-    if op.opcode in {"chain_add_add", "relu_chain_add_add"}:
-        lhs, rhs, tail = op.inputs
-        steps = [
-            I32SSE2Step("add", "inner", ("lhs", "rhs")),
-            I32SSE2Step("add", "result", ("inner", "tail")),
-        ]
-        result = "result"
-        if op.opcode == "relu_chain_add_add":
-            steps.append(I32SSE2Step("relu", "relu", ("result",)))
-            result = "relu"
-        return I32SSE2Plan(
-            loads=(("lhs", lhs), ("rhs", rhs), ("tail", tail)),
-            steps=tuple(steps),
-            result=result,
-        )
-    if op.opcode == "tree_add_add_add":
-        a, b, c, d = op.inputs
-        return I32SSE2Plan(
-            loads=(("a", a), ("b", b), ("c", c), ("d", d)),
-            steps=(
-                I32SSE2Step("add", "left", ("a", "b")),
-                I32SSE2Step("add", "right", ("c", "d")),
-                I32SSE2Step("add", "result", ("left", "right")),
-            ),
-            result="result",
-        )
-    return None
+    if op.opcode not in _EXISTING_SSE2_FUSED_OPCODES:
+        return None
+
+    expression = describe_fused_opcode(op.opcode)
+    if expression is None:
+        raise RuntimeError(f"missing fused expression descriptor for {op.opcode}")
+
+    def plan_name(name: str) -> str:
+        if op.opcode == "relu_chain_add_add" and name == "value":
+            return "result"
+        return name
+
+    return I32SSE2Plan(
+        loads=tuple(
+            (plan_name(name), buffer)
+            for name, buffer in zip(expression.input_names, op.inputs, strict=True)
+        ),
+        steps=tuple(
+            I32SSE2Step(
+                step.opcode,
+                plan_name(step.output),
+                tuple(plan_name(value) for value in step.inputs),
+            )
+            for step in expression.steps
+        ),
+        result=plan_name(expression.result),
+    )
 
 
 def emit_i32_sse2_plan(plan: I32SSE2Plan, *, output: int, count: int) -> list[str]:
