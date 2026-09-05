@@ -240,10 +240,10 @@ def test_release_channel_publish_fetch_load_and_rollback_replay(tmp_path: Path, 
         ReleaseStateStore,
         fetch_release_channel_archive,
         load_release_channel_registry,
+        native_bundle,
         publish_release_channel,
         publisher_public_key_from_private_key,
     )
-    from tiny_tensor_compiler import native_bundle
 
     secret = _key(3)
     policy = PublisherTrustPolicy((publisher_public_key_from_private_key(secret),))
