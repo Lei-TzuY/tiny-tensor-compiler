@@ -40,6 +40,12 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]].astype(dtype, copy=False)
             values[op.results[0]] = np.maximum(operand, np.array(0, dtype=dtype))
+        elif op.opcode == "reshape":
+            operand = values[op.operands[0]]
+            values[op.results[0]] = np.array(
+                np.reshape(operand, op.results[0].type.shape, order="C"),
+                copy=True,
+            )
         elif op.opcode == "return":
             outputs = tuple(np.array(values[operand], copy=True) for operand in op.operands)
             return outputs[0] if len(outputs) == 1 else outputs
