@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from .inference import TypeInferenceError, infer_binary, infer_relu
+from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 
@@ -32,6 +32,9 @@ class Tensor:
 
     def relu(self) -> Tensor:
         return self._builder.relu(self)
+
+    def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
+        return self._builder.reshape(self, shape)
 
 
 class GraphBuilder:
@@ -91,6 +94,17 @@ class GraphBuilder:
         result_type = infer_relu(tensor.type)
         op = self.function.add_op(
             "relu", operands=[tensor.value], result_types=[result_type]
+        )
+        return Tensor(self, op.results[0])
+
+    def reshape(self, tensor: Tensor, shape: Iterable[ShapeDim]) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        result_type = infer_reshape(tensor.type, shape)
+        op = self.function.add_op(
+            "reshape",
+            operands=[tensor.value],
+            result_types=[result_type],
         )
         return Tensor(self, op.results[0])
 
