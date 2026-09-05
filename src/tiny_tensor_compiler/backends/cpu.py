@@ -5,7 +5,6 @@ from typing import Any
 
 import numpy as np
 
-from ..fused_expr import describe_fused_opcode
 from ..input_binding import BorrowedLoopProgram, borrowed_slots
 from ..input_binding import borrow_inputs as bind_borrowed_inputs
 from ..input_validation import prepare_runtime_inputs
@@ -15,6 +14,7 @@ from ..loop_ir import (
     LoopKernel,
     LoopProgram,
     LoopReturn,
+    fused_expression_for_kernel,
     lower_to_loops,
 )
 from ..lowering import CPUProgram
@@ -91,7 +91,7 @@ def execute_loop(
                 zero = np.array(0, dtype=output.dtype)
                 output[output_index] = np.maximum(value, zero)
             else:
-                expression = describe_fused_opcode(op.opcode)
+                expression = fused_expression_for_kernel(op)
                 if expression is None:
                     raise RuntimeError(f"unsupported CPU loop kernel: {op.opcode}")
                 refs = dict(zip(expression.input_names, values, strict=True))
