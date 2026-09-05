@@ -29,9 +29,9 @@ def _fused(module):
 
 def test_fusion_materializes_structured_chain_tree_and_relu_expressions() -> None:
     builder = GraphBuilder()
-    a = builder.input((4,), dtype="int32")
-    b = builder.input((4,), dtype="int32")
-    c = builder.input((4,), dtype="int32")
+    a = builder.input((2, 1), dtype="int32")
+    b = builder.input((1, 3), dtype="int32")
+    c = builder.input((), dtype="int32")
     chain = _fused(builder.finish(((a + b) * c).relu()))
     assert [kernel.opcode for kernel in chain.kernels] == ["relu_chain_add_mul"]
     assert chain.kernels[0].fused_expression == binary_chain_expression(
@@ -39,10 +39,10 @@ def test_fusion_materializes_structured_chain_tree_and_relu_expressions() -> Non
     )
 
     builder = GraphBuilder()
-    a = builder.input((4,), dtype="int32")
-    b = builder.input((4,), dtype="int32")
-    c = builder.input((4,), dtype="int32")
-    d = builder.input((4,), dtype="int32")
+    a = builder.input((2, 1), dtype="int32")
+    b = builder.input((1, 3), dtype="int32")
+    c = builder.input((2, 1), dtype="int32")
+    d = builder.input((1, 3), dtype="int32")
     tree = _fused(builder.finish((a + b) * (c + d)))
     assert [kernel.opcode for kernel in tree.kernels] == ["tree_add_add_mul"]
     assert tree.kernels[0].fused_expression == binary_tree_expression(
@@ -50,11 +50,11 @@ def test_fusion_materializes_structured_chain_tree_and_relu_expressions() -> Non
     )
 
     builder = GraphBuilder()
-    a = builder.input((4,), dtype="int32")
-    b = builder.input((4,), dtype="int32")
-    c = builder.input((4,), dtype="int32")
-    d = builder.input((4,), dtype="int32")
-    e = builder.input((4,), dtype="int32")
+    a = builder.input((2, 1), dtype="int32")
+    b = builder.input((1, 3), dtype="int32")
+    c = builder.input((1, 3), dtype="int32")
+    d = builder.input((2, 1), dtype="int32")
+    e = builder.input((1, 3), dtype="int32")
     chain_tree = _fused(builder.finish(((a + b) * c) * (d + e)))
     assert [kernel.opcode for kernel in chain_tree.kernels] == [
         "chain_tree_add_mul_add_mul"
@@ -112,9 +112,9 @@ def test_loop_ir_rejects_structured_expression_opcode_mismatch() -> None:
 
 def test_input_borrowing_preserves_structured_fused_expression() -> None:
     builder = GraphBuilder()
-    lhs = builder.input((4,), dtype="int32")
-    rhs = builder.input((4,), dtype="int32")
-    tail = builder.input((4,), dtype="int32")
+    lhs = builder.input((2, 1), dtype="int32")
+    rhs = builder.input((1, 3), dtype="int32")
+    tail = builder.input((), dtype="int32")
     fused = _fused(builder.finish((lhs + rhs) * tail))
 
     expression = fused.kernels[0].fused_expression
