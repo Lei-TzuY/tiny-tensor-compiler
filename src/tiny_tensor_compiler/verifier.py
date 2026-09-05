@@ -13,6 +13,7 @@ from .inference import (
     infer_reverse,
     infer_slice,
     infer_transpose,
+    normalize_reduction_axes,
 )
 from .ir import DType, Module, Operation, TensorType, Value
 from .reduction import REDUCTION_OPCODES, ReductionOperator
@@ -184,16 +185,18 @@ def _verify_reduction(op_index: int, op: Operation) -> None:
         )
     operator = ReductionOperator.from_opcode(op.opcode)
     axis = op.attrs.get("axis")
-    if axis is not None:
-        rank = len(op.operands[0].type.shape)
-        if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= rank:
-            _fail(
-                op_index,
-                op,
-                f"{op.opcode} axis must be a canonical non-negative in-range integer",
-            )
     try:
-        expected_type = infer_reduction(op.operands[0].type, operator, axis)
+        canonical_axis = normalize_reduction_axes(op.operands[0].type, axis, operator)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if canonical_axis != axis:
+        _fail(
+            op_index,
+            op,
+            f"{op.opcode} axis attribute must use canonical normalized ordering",
+        )
+    try:
+        expected_type = infer_reduction(op.operands[0].type, operator, canonical_axis)
     except TypeInferenceError as exc:
         _fail(op_index, op, str(exc))
     if op.results[0].type != expected_type:

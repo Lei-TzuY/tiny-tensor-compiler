@@ -6,7 +6,7 @@ import numpy as np
 
 from .ir import AffineDim, DType, LinearDim, ShapeDim, SymbolicDim, TensorType
 from .layout import normalize_permutation
-from .reduction import ReductionOperator
+from .reduction import ReductionAxis, ReductionOperator
 
 
 class TypeInferenceError(ValueError):
@@ -44,39 +44,87 @@ def normalize_reduction_axis(
     return axis + rank if axis < 0 else axis
 
 
+def normalize_reduction_axes(
+    input_type: TensorType,
+    axis: int | Iterable[int] | None,
+    operator: ReductionOperator,
+) -> ReductionAxis:
+    """Canonicalize a full, single-axis, or non-empty multi-axis reduction domain."""
+    if axis is None:
+        return None
+    if isinstance(axis, int) and not isinstance(axis, bool):
+        return normalize_reduction_axis(input_type, axis, operator)
+    if isinstance(axis, (str, bytes)):
+        raise TypeInferenceError(f"{operator.value} axis must be an integer or axis collection")
+    try:
+        raw_axes = tuple(axis)
+    except TypeError as exc:
+        raise TypeInferenceError(
+            f"{operator.value} axis must be an integer or axis collection"
+        ) from exc
+    if not raw_axes:
+        raise TypeInferenceError(f"{operator.value} axis collection must not be empty")
+    normalized = tuple(
+        normalize_reduction_axis(input_type, candidate, operator) for candidate in raw_axes
+    )
+    if len(set(normalized)) != len(normalized):
+        raise TypeInferenceError(f"{operator.value} axis collection contains duplicates")
+    canonical = tuple(sorted(normalized))
+    return canonical[0] if len(canonical) == 1 else canonical
+
+
 def infer_reduction(
     input_type: TensorType,
     operator: ReductionOperator,
-    axis: int | None = None,
+    axis: int | Iterable[int] | None = None,
 ) -> TensorType:
-    """Infer one deterministic same-dtype full-tensor or single-axis reduction."""
+    """Infer deterministic same-dtype reduction over a canonical logical axis domain."""
     if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
         raise TypeInferenceError(
             f"{operator.value} requires a numeric tensor, got {input_type.dtype.value}"
         )
-    if axis is None:
+    normalized = normalize_reduction_axes(input_type, axis, operator)
+    if normalized is None:
         return TensorType((), input_type.dtype)
-    normalized_axis = normalize_reduction_axis(input_type, axis, operator)
-    shape = input_type.shape[:normalized_axis] + input_type.shape[normalized_axis + 1 :]
+    axes = (normalized,) if isinstance(normalized, int) else normalized
+    reduced = set(axes)
+    shape = tuple(dim for position, dim in enumerate(input_type.shape) if position not in reduced)
     return TensorType(shape, input_type.dtype)
 
 
 def normalize_sum_axis(input_type: TensorType, axis: int) -> int:
-    """Compatibility wrapper for the historical sum-axis API."""
+    """Compatibility wrapper for the historical single sum-axis API."""
     return normalize_reduction_axis(input_type, axis, ReductionOperator.SUM)
 
 
 def normalize_prod_axis(input_type: TensorType, axis: int) -> int:
+    """Compatibility wrapper for the historical single product-axis API."""
     return normalize_reduction_axis(input_type, axis, ReductionOperator.PRODUCT)
 
 
-def infer_sum(input_type: TensorType, axis: int | None = None) -> TensorType:
+def normalize_sum_axes(
+    input_type: TensorType, axis: int | Iterable[int] | None
+) -> ReductionAxis:
+    return normalize_reduction_axes(input_type, axis, ReductionOperator.SUM)
+
+
+def normalize_prod_axes(
+    input_type: TensorType, axis: int | Iterable[int] | None
+) -> ReductionAxis:
+    return normalize_reduction_axes(input_type, axis, ReductionOperator.PRODUCT)
+
+
+def infer_sum(
+    input_type: TensorType, axis: int | Iterable[int] | None = None
+) -> TensorType:
     """Compatibility wrapper for deterministic sum inference."""
     return infer_reduction(input_type, ReductionOperator.SUM, axis)
 
 
-def infer_prod(input_type: TensorType, axis: int | None = None) -> TensorType:
-    """Infer a deterministic full-tensor or single-axis same-dtype product."""
+def infer_prod(
+    input_type: TensorType, axis: int | Iterable[int] | None = None
+) -> TensorType:
+    """Infer a deterministic full/single/multi-axis same-dtype product."""
     return infer_reduction(input_type, ReductionOperator.PRODUCT, axis)
 
 

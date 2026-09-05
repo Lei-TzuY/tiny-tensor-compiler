@@ -15,8 +15,8 @@ from .inference import (
     infer_slice,
     infer_sum,
     infer_transpose,
-    normalize_prod_axis,
-    normalize_sum_axis,
+    normalize_prod_axes,
+    normalize_sum_axes,
 )
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
@@ -47,10 +47,10 @@ class Tensor:
     def relu(self) -> Tensor:
         return self._builder.relu(self)
 
-    def sum(self, axis: int | None = None) -> Tensor:
+    def sum(self, axis: int | Iterable[int] | None = None) -> Tensor:
         return self._builder.sum(self, axis=axis)
 
-    def prod(self, axis: int | None = None) -> Tensor:
+    def prod(self, axis: int | Iterable[int] | None = None) -> Tensor:
         return self._builder.prod(self, axis=axis)
 
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
@@ -140,10 +140,12 @@ class GraphBuilder:
         )
         return Tensor(self, op.results[0])
 
-    def sum(self, tensor: Tensor, axis: int | None = None) -> Tensor:
+    def sum(
+        self, tensor: Tensor, axis: int | Iterable[int] | None = None
+    ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
-        normalized_axis = None if axis is None else normalize_sum_axis(tensor.type, axis)
+        normalized_axis = normalize_sum_axes(tensor.type, axis)
         result_type = infer_sum(tensor.type, normalized_axis)
         attrs = {} if normalized_axis is None else {"axis": normalized_axis}
         op = self.function.add_op(
@@ -154,10 +156,12 @@ class GraphBuilder:
         )
         return Tensor(self, op.results[0])
 
-    def prod(self, tensor: Tensor, axis: int | None = None) -> Tensor:
+    def prod(
+        self, tensor: Tensor, axis: int | Iterable[int] | None = None
+    ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
-        normalized_axis = None if axis is None else normalize_prod_axis(tensor.type, axis)
+        normalized_axis = normalize_prod_axes(tensor.type, axis)
         result_type = infer_prod(tensor.type, normalized_axis)
         attrs = {} if normalized_axis is None else {"axis": normalized_axis}
         op = self.function.add_op(

@@ -137,7 +137,8 @@ def _emit_kernel(
         value_name = f"{reduction.opcode}_value"
         identity = _reduction_identity_literal(reduction.operator.identity_number, output_type.dtype)
         operator = reduction.operator.c_operator
-        if reduction.axis is None:
+        axes = reduction.axes
+        if axes is None:
             source_ref = _linear_input_ref(source, source_type, layouts[source], "n")
             lines.extend(
                 [
@@ -152,7 +153,6 @@ def _emit_kernel(
             )
             return lines
 
-        axis = reduction.axis
         indent = "        "
         for output_axis, bound in enumerate(output_type.shape):
             lines.append(
@@ -160,18 +160,41 @@ def _emit_kernel(
                 f"i{output_axis} < {bound}; ++i{output_axis}) {{"
             )
             indent += "    "
-        source_ref = _axis_reduction_input_ref(source, source_type, layouts[source], axis)
         output_offset = _flat_offset(
             tuple(range(len(output_type.shape))), output_type.shape
         )
         lines.append(f"{indent}{c_type} {value_name} = {identity};")
-        lines.append(
-            f"{indent}for (int64_t r = 0; r < {source_type.shape[axis]}; ++r) {{"
-        )
-        lines.append(
-            f"{indent}    {value_name} = (({c_type}){value_name} {operator} ({c_type}){source_ref});"
-        )
-        lines.append(f"{indent}}}")
+
+        if len(axes) == 1:
+            axis = axes[0]
+            source_ref = _axis_reduction_input_ref(source, source_type, layouts[source], axis)
+            lines.append(
+                f"{indent}for (int64_t r = 0; r < {source_type.shape[axis]}; ++r) {{"
+            )
+            lines.append(
+                f"{indent}    {value_name} = (({c_type}){value_name} {operator} ({c_type}){source_ref});"
+            )
+            lines.append(f"{indent}}}")
+        else:
+            source_ref = _multi_axis_reduction_input_ref(
+                source,
+                source_type,
+                layouts[source],
+                axes,
+            )
+            for reduction_position, axis in enumerate(axes):
+                lines.append(
+                    f"{indent}for (int64_t r{reduction_position} = 0; "
+                    f"r{reduction_position} < {source_type.shape[axis]}; ++r{reduction_position}) {{"
+                )
+                indent += "    "
+            lines.append(
+                f"{indent}{value_name} = (({c_type}){value_name} {operator} ({c_type}){source_ref});"
+            )
+            for _ in axes:
+                indent = indent[:-4]
+                lines.append(f"{indent}}}")
+
         lines.append(f"{indent}p{op.output}[{output_offset}] = {value_name};")
         for _ in output_type.shape:
             indent = indent[:-4]
@@ -466,6 +489,34 @@ def _axis_reduction_input_ref(
         else:
             output_axis = source_axis if source_axis < reduction_axis else source_axis - 1
             coordinate = f"i{output_axis}"
+        if stride == 1:
+            terms.append(coordinate)
+        elif stride != 0:
+            terms.append(f"({coordinate} * {stride})")
+    offset = " + ".join(terms) if terms else "0"
+    return f"p{buffer}[{offset}]"
+
+
+def _multi_axis_reduction_input_ref(
+    buffer: int,
+    type_: TensorType,
+    layout: StorageLayout,
+    reduction_axes: tuple[int, ...],
+) -> str:
+    reduced_positions = {axis: position for position, axis in enumerate(reduction_axes)}
+    output_position = 0
+    terms: list[str] = []
+    for source_axis, (dim, stride) in enumerate(
+        zip(type_.shape, layout.strides, strict=True)
+    ):
+        reduction_position = reduced_positions.get(source_axis)
+        if reduction_position is None:
+            coordinate = f"i{output_position}"
+            output_position += 1
+        else:
+            coordinate = f"r{reduction_position}"
+        if dim <= 1:
+            continue
         if stride == 1:
             terms.append(coordinate)
         elif stride != 0:
