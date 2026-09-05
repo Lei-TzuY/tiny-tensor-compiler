@@ -17,6 +17,9 @@ from .inference import (
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 
+_ALIAS_OPCODES = frozenset({"view", "slice", "reverse", "transpose"})
+
+
 class Tensor:
     def __init__(self, builder: GraphBuilder, value: Value) -> None:
         self._builder = builder
@@ -62,6 +65,10 @@ class Tensor:
 
     def transpose(self, axes: Iterable[int] | None = None) -> Tensor:
         return self._builder.transpose(self, axes)
+
+    def copy_into(self, target: Tensor, source: Tensor) -> Tensor:
+        """Copy ``source`` into one alias region of this internal storage root."""
+        return self._builder.copy_into(self, target, source)
 
 
 class GraphBuilder:
@@ -215,6 +222,31 @@ class GraphBuilder:
         )
         return Tensor(self, op.results[0])
 
+    def copy_into(self, root: Tensor, target: Tensor, source: Tensor) -> Tensor:
+        self._ensure_open()
+        for tensor in (root, target, source):
+            self._check_tensor_owner(tensor)
+
+        root_value = _storage_root(root.value)
+        if root_value is not root.value:
+            raise ValueError("copy_into root must be an owning internal tensor")
+        producer = root.value.producer
+        if producer is None or producer.opcode in {"input", "const"}:
+            raise ValueError("copy_into root must use internal computed storage")
+        if _storage_root(target.value) is not root.value:
+            raise ValueError("copy_into target must alias the supplied root")
+        if _storage_root(source.value) is root.value:
+            raise ValueError("copy_into source must use a different storage root")
+        if target.type != source.type:
+            raise ValueError("copy_into target and source types must exactly match")
+
+        op = self.function.add_op(
+            "copy_into",
+            operands=[root.value, target.value, source.value],
+            result_types=[root.type],
+        )
+        return Tensor(self, op.results[0])
+
     def finish(self, result: Tensor | Sequence[Tensor]) -> Module:
         self._ensure_open()
         if isinstance(result, Tensor):
@@ -263,3 +295,22 @@ class GraphBuilder:
     def _ensure_open(self) -> None:
         if self._finished:
             raise RuntimeError("graph has already been finished")
+
+
+def _storage_root(value: Value) -> Value:
+    current = value
+    seen: set[Value] = set()
+    while True:
+        if current in seen:
+            raise ValueError("tensor alias cycle detected")
+        seen.add(current)
+        producer = current.producer
+        if producer is None:
+            return current
+        if producer.opcode in _ALIAS_OPCODES:
+            current = producer.operands[0]
+            continue
+        if producer.opcode == "copy_into":
+            current = producer.operands[0]
+            continue
+        return current
