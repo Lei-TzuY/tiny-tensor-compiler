@@ -107,13 +107,13 @@ def test_multi_symbol_native_execution_supports_zero_extent_binding():
     assert executable.cached_bindings == ((("B", 0), ("W", 4)),)
 
 
-def test_single_symbol_specialize_rejects_bool_as_invalid_size():
+def test_single_symbol_specialize_rejects_bool_as_invalid_type():
     batch = SymbolicDim("B")
     builder = GraphBuilder()
     value = builder.input((batch, 2), dtype="float32")
     executable = compile_dynamic_module(builder.finish(value.relu()))
 
-    with pytest.raises(ValueError, match="non-negative integer"):
+    with pytest.raises(TypeError, match="bool"):
         executable.specialize(True)
 
 
