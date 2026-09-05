@@ -12,14 +12,14 @@ flowchart LR
     E[Virtual-buffer CPU IR]
     F[Liveness memory planner]
     G[Loop / kernel IR\nexplicit broadcast maps]
-    H[Verifier-backed fusion]
+    H[Topology-driven fusion\nfirst-class fused expressions]
     I[Deterministic C11]
     J[Native compiler\nGCC / Clang / MSVC]
     K[Reusable native executable\nprocess + persistent cache]
     R[NumPy reference executor]
 
     A --> B --> C --> D
-    D --> E
+    D --> E --> F --> G --> H --> I --> J --> K
     D --> S --> E
     B --> R
 ```
@@ -37,6 +37,9 @@ The project treats verification and explicit semantics as compiler features, not
 - Multiple returned tensors remain live through the terminal return block, so simultaneously returned same-typed values cannot be accidentally assigned one physical slot.
 - Loop IR makes broadcasting explicit through deterministic index maps; kernels may not overwrite a physical slot still read by the same kernel.
 - Fusion must preserve every returned value, including intermediates that are both returned and consumed by a later kernel.
+- Fused kernels carry a canonical `FusedExpression`; the historical fused opcode string is a checked compatibility encoding rather than the semantic source of truth.
+- The topology-driven fusion planner reasons about logical producer/consumer lifetimes rather than assuming physical buffer ids uniquely identify values. A physical slot may therefore be reused after a logical value's unique consumer without making that later value part of the earlier dependency edge.
+- A fusion candidate is accepted only when its internal logical values have one internal consumer, no later external use, identity internal indexing, compatible iteration shapes/dtypes, and no final-output/leaf alias. Supported matching does not reassociate arithmetic.
 - Verified input borrowing transforms already verified Loop IR and constructs a new `LoopProgram`, so input-lifetime splitting is rechecked by the existing allocation/read-before-write/kernel-alias verifier instead of bypassing it.
 - A borrowed runtime input owns a dedicated read-only physical epoch. If the planner later reuses the original input slot as scratch storage, the borrowing transform appends a dedicated external slot and rewrites only that input epoch's reads, leaving the original scratch reuse intact.
 - Borrowed runtime arrays must match exact shape/dtype and already be NumPy, C-contiguous, and aligned; the zero-copy contract rejects any input that would require hidden normalization.
@@ -61,7 +64,7 @@ The compiler is correctness-first and conservative by design.
 
 - Algebraic simplification avoids floating-point identities whose IEEE edge cases would change behavior.
 - CSE is exact rather than algebraic.
-- Fusion is verifier-backed and limited to bounded elementwise shapes with explicit alias/liveness checks.
+- Fusion is verifier-backed and topology-driven, but deliberately bounded to two- through four-node integer `add`/`mul` DAGs that can be represented by the existing chain/tree/chain-tree fused expressions. Producer materialization order and root-side placement are not semantic restrictions; reassociation and arbitrary DAG growth remain out of scope.
 - Contiguous-loop linearization happens only when identity indexing proves a row-major flat loop equivalent.
 - Compiler vectorization hints do not select a vector width or change fallback semantics.
 - SSE2 paths are guarded specializations for selected exact contiguous `int32` kernels; unsupported forms fall back to the general generated-C path.
@@ -99,6 +102,14 @@ The historical copied-input path remains the default compatibility behavior. Bor
 
 Zero-sized batches are valid because the concrete compiler already has explicit zero-extent semantics. Multi-output and `borrow_inputs=True` are carried through the same specialization boundary. Arbitrary symbolic arithmetic, multiple independent symbols, non-leading symbolic axes, reshape-style shape transforms, and a runtime-sized Buffer/Loop IR remain explicitly outside this phase.
 
+### Post-v0.1 — structured fusion phase
+
+Fused chain/tree semantics are represented as first-class `FusedExpression` metadata in Loop IR. Fusion construction builds the expression first and emits legacy names such as `chain_add_mul` or `chain_tree_add_mul_add_mul` only through one checked compatibility encoder. Verification, the loop interpreter, generated C, and SIMD planning consume the structured expression directly when present; hand-built legacy Loop IR can still be decoded at the compatibility boundary.
+
+The family-specific matching engine has now been replaced by one bounded topology-driven planner. It discovers dependency edges from previously materialized logical values, tracks each internal value through its unique consumer, and deliberately allows a physical buffer id to acquire a new logical identity after the earlier value dies. Safe mirror producer order, a chain on either root branch, and reversed root operands can therefore fuse without changing arithmetic grouping. The planner still emits only the existing chain/tree/chain-tree expression families and refuses unsupported larger or reassociated DAGs.
+
+`tiny_tensor_compiler.loop_ir.fuse_elementwise()` remains only as a lazy compatibility delegate to the sole planner, so there is no second executable fusion implementation to drift from the public/compiler path.
+
 ### Next architectural frontier
 
-Candidate frontiers now include generalized SIMD abstraction, broader symbolic-shape algebra, general expression-DAG matching, parallel scheduling, and accelerator backends. The next phase should be selected by executable cross-layer value rather than by enumerating more batch-shape or opcode × SIMD corner cases.
+With fused semantics and bounded topology matching centralized, the next high-value frontiers are expression-general lowering/SIMD selection, broader symbolic-shape algebra, larger structured DAG representation with an explicit cost model, parallel scheduling, or accelerator backends. The next phase should be selected by executable cross-layer value rather than by adding another family-specific fusion matcher or enumerating opcode × SIMD corner cases.
