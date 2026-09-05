@@ -77,7 +77,9 @@ class DynamicExecutable:
         self,
         bindings: int | Mapping[SymbolicDim | str, int],
     ) -> NativeExecutable:
-        if isinstance(bindings, int) and not isinstance(bindings, bool):
+        if isinstance(bindings, bool):
+            raise ValueError("symbolic dimension requires a non-negative integer binding")
+        if isinstance(bindings, int):
             if len(self._symbols) != 1:
                 raise SymbolicShapeError(
                     "integer specialization requires a single symbolic dimension"
