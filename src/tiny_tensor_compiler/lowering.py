@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from .inference import infer_binary, infer_relu
+from .inference import infer_binary, infer_relu, infer_reshape
 from .ir import Module, TensorType, Value
 from .verifier import verify
 
@@ -291,6 +291,12 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 expected = infer_relu(allocated[op.inputs[0]])
                 if expected != output_type:
                     raise ValueError("relu kernel output buffer type does not match inference")
+            elif op.opcode == "reshape":
+                if len(op.inputs) != 1 or op.literal is not None:
+                    raise ValueError("reshape kernel requires one input and no literal")
+                expected = infer_reshape(allocated[op.inputs[0]], output_type.shape)
+                if expected != output_type:
+                    raise ValueError("reshape kernel output buffer type does not match inference")
             else:
                 raise ValueError(f"unsupported buffer kernel: {op.opcode}")
 
