@@ -8,7 +8,11 @@ from tiny_tensor_compiler.differential import (
     generate_differential_case,
     run_differential_campaign,
 )
-from tiny_tensor_compiler.repro import load_repro_case, repro_case_sha256
+from tiny_tensor_compiler.repro import (
+    load_repro_case,
+    replay_repro_case,
+    repro_case_sha256,
+)
 
 
 def test_same_seed_generates_identical_canonical_repro_artifact():
@@ -72,6 +76,12 @@ def test_reference_candidate_campaign_is_deterministically_clean():
     assert first.passed
     assert first.checked_cases == 12
     assert first.failure is None
+
+
+def test_seed_four_replays_directly_through_native_backend():
+    document = generate_differential_case(4)
+
+    replay_repro_case(document, backend="native")
 
 
 def test_native_campaign_executes_generated_views_and_elementwise_graphs():
