@@ -9,7 +9,11 @@ from tiny_tensor_compiler.metamorphic import (
     generate_metamorphic_case,
     run_metamorphic_campaign,
 )
-from tiny_tensor_compiler.repro import load_repro_case, repro_case_sha256
+from tiny_tensor_compiler.repro import (
+    load_repro_case,
+    replay_repro_case,
+    repro_case_sha256,
+)
 
 
 def _single_output_bytes(document: str) -> tuple[tuple[int, ...], np.dtype, bytes]:
@@ -85,6 +89,14 @@ def test_reference_candidate_campaign_is_deterministically_clean():
     assert first.passed
     assert first.checked_cases == 24
     assert first.failure is None
+
+
+def test_seed_two_identity_view_pair_replays_directly_on_native_backend():
+    case = generate_metamorphic_case(2)
+    assert case.relation == "identity_view"
+
+    replay_repro_case(case.baseline_repro, backend="native")
+    replay_repro_case(case.transformed_repro, backend="native")
 
 
 def test_native_campaign_executes_multiple_metamorphic_relations():
