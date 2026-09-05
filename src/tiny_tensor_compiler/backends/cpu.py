@@ -92,25 +92,32 @@ def execute_loop(
             raise TypeError("unsupported CPU loop operation")
 
         output = buffers[op.output]
-        if op.opcode == "sum":
+        reduction = op.reduction
+        if reduction is not None:
             source = buffers[op.inputs[0]]
-            if op.reduction_axis is None:
-                accumulator = output.dtype.type(0)
+            if reduction.axis is None:
+                accumulator = reduction.operator.identity(output.dtype)
                 for input_index in np.ndindex(source.shape):
-                    accumulator = output.dtype.type(np.add(accumulator, source[input_index]))
+                    accumulator = reduction.operator.combine(
+                        output.dtype,
+                        accumulator,
+                        source[input_index],
+                    )
                 output[()] = accumulator
             else:
-                axis = op.reduction_axis
+                axis = reduction.axis
                 for output_index in np.ndindex(op.iteration_shape):
-                    accumulator = output.dtype.type(0)
+                    accumulator = reduction.operator.identity(output.dtype)
                     for reduction_index in range(source.shape[axis]):
                         input_index = (
                             output_index[:axis]
                             + (reduction_index,)
                             + output_index[axis:]
                         )
-                        accumulator = output.dtype.type(
-                            np.add(accumulator, source[input_index])
+                        accumulator = reduction.operator.combine(
+                            output.dtype,
+                            accumulator,
+                            source[input_index],
                         )
                     output[output_index] = accumulator
             continue
