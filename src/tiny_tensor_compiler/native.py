@@ -18,14 +18,11 @@ from typing import Any
 
 import numpy as np
 
+from . import native_cache_lock
 from .c_abi_codegen import generate_c
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
-from .native_cache_lock import (
-    PersistentCacheLeaseError,
-    persistent_cache_lease as _persistent_cache_lease,
-)
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 NativeOutput = np.ndarray | Sequence[np.ndarray] | None
@@ -91,6 +88,7 @@ class NativeExecutable:
 
 _PERSISTENT_CACHE_SCHEMA = "native-v2"
 _PERSISTENT_MANIFEST_NAME = "manifest.json"
+_persistent_cache_lease = native_cache_lock.persistent_cache_lease
 _NATIVE_CACHE: dict[tuple[tuple[str, ...], str, str | None], _NativeArtifact] = {}
 _NATIVE_CACHE_LOCK = threading.RLock()
 
@@ -148,9 +146,7 @@ def clear_native_cache() -> None:
                 if first_error is None:
                     first_error = error
         if first_error is not None:
-            raise NativeCompilationError(
-                f"failed to clear native artifact cache: {first_error}"
-            ) from first_error
+            raise NativeCompilationError(f"failed to clear native artifact cache: {first_error}") from first_error
 
 
 def _prepare_native_outputs(
@@ -332,7 +328,7 @@ def _get_or_compile_persistent_artifact(
                 return staged
             finally:
                 shutil.rmtree(build_directory, ignore_errors=True)
-    except PersistentCacheLeaseError as error:
+    except native_cache_lock.PersistentCacheLeaseError as error:
         raise NativeCompilationError(
             f"failed to acquire persistent native cache lease: {error}"
         ) from error
@@ -516,12 +512,7 @@ def _persistent_cache_digest(source: str, command: list[str]) -> str:
             "library_name": _library_name(),
         },
     }
-    serialized = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -587,9 +578,7 @@ def _release_library(library: ctypes.CDLL) -> None:
     free_library.restype = ctypes.c_int
     if free_library(ctypes.c_void_p(library._handle)) == 0:
         error = ctypes.get_last_error()
-        raise NativeCompilationError(
-            f"failed to unload native shared library: Windows error {error}"
-        )
+        raise NativeCompilationError(f"failed to unload native shared library: Windows error {error}")
 
 
 def _return_types(program: LoopProgram) -> tuple[TensorType, ...]:
