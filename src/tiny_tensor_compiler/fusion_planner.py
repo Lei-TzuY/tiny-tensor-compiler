@@ -34,22 +34,21 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
     while index < len(operations):
         plan = _plan_binary_subgraph(operations, index, types)
         if plan is not None:
-            kernel = plan.kernel
-            next_index = index + plan.consumed
-            relu_kernel = _fuse_trailing_relu(operations, next_index, kernel)
-            if relu_kernel is not None:
-                kernel = relu_kernel
-                next_index += 1
+            kernel, next_index = _absorb_relu_tail(
+                operations,
+                index + plan.consumed,
+                plan.kernel,
+            )
             fused.append(kernel)
             index = next_index
             continue
 
         operation = operations[index]
         if isinstance(operation, LoopKernel):
-            relu_kernel = _fuse_trailing_relu(operations, index + 1, operation)
-            if relu_kernel is not None:
-                fused.append(relu_kernel)
-                index += 2
+            kernel, next_index = _absorb_relu_tail(operations, index + 1, operation)
+            if next_index != index + 1:
+                fused.append(kernel)
+                index = next_index
                 continue
 
         fused.append(operation)
@@ -100,25 +99,26 @@ def _plan_binary_window(
     outputs = tuple(kernel.output for kernel in kernels)
     if len(set(outputs)) != len(outputs):
         return None
-    output_to_node = {buffer: index for index, buffer in enumerate(outputs)}
     identity = IndexMap(tuple(range(len(root.iteration_shape))))
 
     edges: list[tuple[int | None, int | None]] = []
     internal_uses = [0] * length
+    prior_outputs: dict[int, int] = {}
     for node_index, kernel in enumerate(kernels):
         if len(kernel.inputs) != 2 or len(kernel.input_maps) != 2:
             return None
         node_edges: list[int | None] = []
         for buffer, index_map in zip(kernel.inputs, kernel.input_maps, strict=True):
-            producer_index = output_to_node.get(buffer)
+            producer_index = prior_outputs.get(buffer)
             if producer_index is None:
                 node_edges.append(None)
                 continue
-            if producer_index >= node_index or index_map != identity:
+            if index_map != identity:
                 return None
             node_edges.append(producer_index)
             internal_uses[producer_index] += 1
         edges.append((node_edges[0], node_edges[1]))
+        prior_outputs[kernel.output] = node_index
 
     if internal_uses[-1] != 0 or any(count != 1 for count in internal_uses[:-1]):
         return None
@@ -295,6 +295,21 @@ def _classify_chain_tree(
         (*inner.inputs, chain.inputs[tail_slot], *simple.inputs),
         (*inner.input_maps, chain.input_maps[tail_slot], *simple.input_maps),
     )
+
+
+def _absorb_relu_tail(
+    operations: tuple[LoopOperation, ...],
+    start_index: int,
+    producer: LoopKernel,
+) -> tuple[LoopKernel, int]:
+    next_index = start_index
+    current = producer
+    while True:
+        fused = _fuse_trailing_relu(operations, next_index, current)
+        if fused is None:
+            return current, next_index
+        current = fused
+        next_index += 1
 
 
 def _fuse_trailing_relu(
