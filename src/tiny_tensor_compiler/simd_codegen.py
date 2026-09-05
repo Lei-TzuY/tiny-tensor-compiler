@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .fused_expr import describe_fused_opcode
-from .loop_ir import LoopKernel
+from .loop_ir import LoopKernel, fused_expression_for_kernel
 
 _EXISTING_SSE2_FUSED_OPCODES = frozenset(
     {
@@ -87,7 +86,7 @@ def build_i32_sse2_plan(op: LoopKernel) -> I32SSE2Plan | None:
     if op.opcode not in _EXISTING_SSE2_FUSED_OPCODES:
         return None
 
-    expression = describe_fused_opcode(op.opcode)
+    expression = fused_expression_for_kernel(op)
     if expression is None:
         raise RuntimeError(f"missing fused expression descriptor for {op.opcode}")
 
