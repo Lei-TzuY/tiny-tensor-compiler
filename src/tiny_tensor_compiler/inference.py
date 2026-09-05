@@ -81,6 +81,13 @@ def infer_slice(
     return TensorType(tuple(shape), input_type.dtype)
 
 
+def infer_reverse(input_type: TensorType, axis: int) -> TensorType:
+    """Infer one read-only axis reversal without changing logical tensor type."""
+    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(input_type.shape):
+        raise TypeInferenceError("reverse axis is out of range")
+    return input_type
+
+
 def infer_transpose(input_type: TensorType, axes: Iterable[int]) -> TensorType:
     """Infer one full compile-time axis permutation without changing storage dtype."""
     try:
