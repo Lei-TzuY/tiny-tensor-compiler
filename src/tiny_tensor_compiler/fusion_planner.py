@@ -6,10 +6,12 @@ from . import fused_expr
 from .ir import DType, TensorType
 from .loop_ir import (
     IndexMap,
+    LoopCopyInto,
     LoopInput,
     LoopKernel,
     LoopOperation,
     LoopProgram,
+    LoopReluInto,
     LoopReturn,
     LoopView,
     fused_expression_for_kernel,
@@ -495,6 +497,16 @@ def _producer_value_has_no_later_use(
             if operation.output == buffer:
                 return True
             if operation.source == buffer:
+                return False
+        elif isinstance(operation, LoopCopyInto):
+            if operation.output == buffer:
+                return True
+            if buffer in (operation.root, operation.target, operation.source):
+                return False
+        elif isinstance(operation, LoopReluInto):
+            if operation.output == buffer:
+                return True
+            if buffer in (operation.root, operation.target):
                 return False
         elif isinstance(operation, LoopKernel):
             if operation.output == buffer:
