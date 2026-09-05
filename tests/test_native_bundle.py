@@ -23,7 +23,7 @@ def _input() -> np.ndarray:
 
 
 def test_native_bundle_round_trips_without_compiler(tmp_path: Path, monkeypatch) -> None:
-    import tiny_tensor_compiler.native_bundle as native_bundle
+    from tiny_tensor_compiler import native_bundle
 
     bundle = tmp_path / "program.ttcbundle"
     native_bundle.compile_native_bundle(_program(), bundle)
@@ -137,15 +137,15 @@ def test_failed_bundle_build_never_publishes_partial_destination(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    import tiny_tensor_compiler.native_bundle as native_bundle
+    from tiny_tensor_compiler import native_bundle
 
     bundle = tmp_path / "program.ttcbundle"
 
     def fail_compile(*_args, **_kwargs):
-        raise native_bundle.NativeCompilationError("synthetic compile failure")
+        raise RuntimeError("synthetic compile failure")
 
     monkeypatch.setattr(native_bundle, "_compile_source", fail_compile)
-    with pytest.raises(native_bundle.NativeCompilationError, match="synthetic"):
+    with pytest.raises(RuntimeError, match="synthetic"):
         native_bundle.compile_native_bundle(_program(), bundle)
 
     assert not bundle.exists()
