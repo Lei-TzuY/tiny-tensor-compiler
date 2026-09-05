@@ -273,6 +273,10 @@ def load_dynamic_bundle_set(
 
     symbols = _decode_symbols(manifest["symbols"])
     template_inputs = _decode_template_inputs(manifest["inputs"], symbols)
+    if _template_symbol_names(template_inputs) != frozenset(symbols):
+        raise NativeBundleSetError(
+            "dynamic bundle set input template does not reference every declared symbol"
+        )
     raw_variants = manifest["variants"]
     if not isinstance(raw_variants, list) or not raw_variants:
         raise NativeBundleSetError("dynamic bundle set must contain at least one variant")
@@ -457,10 +461,26 @@ def _decode_template_dim(value: object, symbols: tuple[str, ...]) -> object:
             ):
                 raise NativeBundleSetError("dynamic bundle set linear dimension is malformed")
             decoded_terms.append((term[0], term[1]))
-        if tuple(decoded_terms) != tuple(sorted(set(decoded_terms))):
+        names = tuple(name for name, _ in decoded_terms)
+        if names != tuple(sorted(set(names))):
             raise NativeBundleSetError("dynamic bundle set linear terms are not canonical")
         return ("linear", tuple(decoded_terms), offset)
     raise NativeBundleSetError("dynamic bundle set input template dimension kind is unsupported")
+
+
+def _template_symbol_names(
+    template_inputs: tuple[tuple[DType, tuple[object, ...]], ...],
+) -> frozenset[str]:
+    names: set[str] = set()
+    for _, shape in template_inputs:
+        for dim in shape:
+            if not isinstance(dim, tuple) or not dim:
+                continue
+            if dim[0] in {"symbol", "affine"}:
+                names.add(dim[1])
+            elif dim[0] == "linear":
+                names.update(name for name, _ in dim[1])
+    return frozenset(names)
 
 
 def _evaluate_template_inputs(
