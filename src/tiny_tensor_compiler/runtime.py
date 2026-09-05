@@ -14,7 +14,7 @@ ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 
 
 def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionResult:
-    """Execute verified tensor IR directly; symbolic batch shapes specialize from inputs."""
+    """Execute verified tensor IR directly; symbolic shapes specialize from inputs."""
     if has_symbolic_shapes(module):
         module, _ = specialize_for_inputs(module, inputs)
     verify(module)
