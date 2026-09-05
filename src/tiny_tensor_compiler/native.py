@@ -23,6 +23,7 @@ from .c_abi_codegen import generate_c
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
+from .native_abi import NATIVE_ABI_SYMBOL, native_abi_sha256
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 NativeOutput = np.ndarray | Sequence[np.ndarray] | None
@@ -71,7 +72,8 @@ class NativeExecutable:
         outputs = _prepare_native_outputs(self._program, out, runtime_inputs)
         command = list(self._command)
         with _NATIVE_CACHE_LOCK:
-            artifact = _get_or_compile_artifact(
+            artifact = _get_or_compile_verified_artifact(
+                self._program,
                 self._source,
                 command,
                 self._persistent_library,
@@ -104,7 +106,7 @@ def compile_native(
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
-        _get_or_compile_artifact(source, command, persistent_library)
+        _get_or_compile_verified_artifact(program, source, command, persistent_library)
 
     return NativeExecutable(
         program=program,
@@ -129,7 +131,12 @@ def execute_native(
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
-        artifact = _get_or_compile_artifact(source, command, persistent_library)
+        artifact = _get_or_compile_verified_artifact(
+            program,
+            source,
+            command,
+            persistent_library,
+        )
         return _execute_artifact(program, artifact, runtime_inputs, outputs)
 
 
@@ -255,6 +262,57 @@ def _execute_artifact(
     )
     runner(*arguments)
     return outputs[0] if len(outputs) == 1 else outputs
+
+
+def _get_or_compile_verified_artifact(
+    program: LoopProgram,
+    source: str,
+    command: list[str],
+    persistent_library: Path | None,
+) -> _NativeArtifact:
+    expected_abi_sha256 = native_abi_sha256(program)
+    artifact = _get_or_compile_artifact(source, command, persistent_library)
+    try:
+        _verify_native_abi(artifact.library, expected_abi_sha256)
+        return artifact
+    except NativeCompilationError:
+        persistent_identity = str(persistent_library) if persistent_library is not None else None
+        key = (tuple(command), source, persistent_identity)
+        _NATIVE_CACHE.pop(key, None)
+        artifact.close()
+        if persistent_library is None:
+            raise
+        _invalidate_persistent_entry(persistent_library)
+
+    rebuilt = _get_or_compile_artifact(source, command, persistent_library)
+    try:
+        _verify_native_abi(rebuilt.library, expected_abi_sha256)
+    except NativeCompilationError:
+        persistent_identity = str(persistent_library)
+        key = (tuple(command), source, persistent_identity)
+        _NATIVE_CACHE.pop(key, None)
+        rebuilt.close()
+        _invalidate_persistent_entry(persistent_library)
+        raise
+    return rebuilt
+
+
+def _verify_native_abi(library: ctypes.CDLL, expected_abi_sha256: str) -> None:
+    try:
+        reporter = getattr(library, NATIVE_ABI_SYMBOL)
+    except AttributeError as error:
+        raise NativeCompilationError("native shared library is missing ABI fingerprint export") from error
+    reporter.argtypes = []
+    reporter.restype = ctypes.c_char_p
+    embedded = reporter()
+    if embedded is None:
+        raise NativeCompilationError("native shared library returned an empty ABI fingerprint")
+    try:
+        actual_abi_sha256 = embedded.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise NativeCompilationError("native shared library returned a malformed ABI fingerprint") from error
+    if actual_abi_sha256 != expected_abi_sha256:
+        raise NativeCompilationError("native ABI fingerprint mismatch")
 
 
 def _get_or_compile_artifact(
