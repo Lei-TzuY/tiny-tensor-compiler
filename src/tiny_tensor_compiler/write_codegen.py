@@ -43,7 +43,7 @@ def emit_copy_into(
     lines.append("    }")
     root_offset = op.layout.offset
     pointer = f"p{op.root}" if root_offset == 0 else f"p{op.root} + {root_offset}"
-    lines.append(f"    const {c_type} *p{op.output} = {pointer};")
+    lines.append(f"    {c_type} *p{op.output} = {pointer};")
     lines.append("")
     return lines
 
