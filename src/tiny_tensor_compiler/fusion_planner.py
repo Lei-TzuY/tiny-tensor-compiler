@@ -96,13 +96,10 @@ def _plan_binary_window(
     if any(kernel.iteration_shape != root.iteration_shape for kernel in kernels):
         return None
 
-    outputs = tuple(kernel.output for kernel in kernels)
-    if len(set(outputs)) != len(outputs):
-        return None
     identity = IndexMap(tuple(range(len(root.iteration_shape))))
-
     edges: list[tuple[int | None, int | None]] = []
     internal_uses = [0] * length
+    internal_consumers: list[int | None] = [None] * length
     prior_outputs: dict[int, int] = {}
     for node_index, kernel in enumerate(kernels):
         if len(kernel.inputs) != 2 or len(kernel.input_maps) != 2:
@@ -117,22 +114,24 @@ def _plan_binary_window(
                 return None
             node_edges.append(producer_index)
             internal_uses[producer_index] += 1
+            internal_consumers[producer_index] = node_index
         edges.append((node_edges[0], node_edges[1]))
+        # A physical slot may be legally reused after the prior logical value's
+        # unique consumer. From this point onward the slot names this new value.
         prior_outputs[kernel.output] = node_index
 
     if internal_uses[-1] != 0 or any(count != 1 for count in internal_uses[:-1]):
         return None
 
-    after_candidate = start_index + length
-    if any(
-        not _producer_value_has_no_later_use(
+    for producer_index, consumer_index in enumerate(internal_consumers[:-1]):
+        if consumer_index is None:
+            return None
+        if not _producer_value_has_no_later_use(
             operations,
-            after_candidate,
-            kernel.output,
-        )
-        for kernel in kernels[:-1]
-    ):
-        return None
+            start_index + consumer_index + 1,
+            kernels[producer_index].output,
+        ):
+            return None
 
     output_type = types[root.output]
     if output_type.dtype not in {DType.INT32, DType.INT64}:
