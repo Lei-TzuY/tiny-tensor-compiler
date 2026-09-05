@@ -4,7 +4,14 @@ from collections import Counter
 
 import numpy as np
 
-from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape, infer_slice
+from .inference import (
+    TypeInferenceError,
+    infer_binary,
+    infer_relu,
+    infer_reshape,
+    infer_slice,
+    infer_transpose,
+)
 from .ir import DType, Module, Operation, TensorType, Value
 
 
@@ -48,6 +55,8 @@ def verify(module: Module) -> None:
             _verify_shape_transform(op_index, op)
         elif op.opcode == "slice":
             _verify_slice(op_index, op)
+        elif op.opcode == "transpose":
+            _verify_transpose(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -164,6 +173,22 @@ def _verify_slice(op_index: int, op: Operation) -> None:
             op_index,
             op,
             f"slice result type {op.results[0].type} does not match inferred type {expected_type}",
+        )
+
+
+def _verify_transpose(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=1, results=1)
+    if set(op.attrs) != {"axes"}:
+        _fail(op_index, op, "transpose requires exactly one 'axes' attribute")
+    try:
+        expected_type = infer_transpose(op.operands[0].type, op.attrs["axes"])
+    except (TypeError, TypeInferenceError) as exc:
+        _fail(op_index, op, str(exc))
+    if op.results[0].type != expected_type:
+        _fail(
+            op_index,
+            op,
+            f"transpose result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
