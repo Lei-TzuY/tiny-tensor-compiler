@@ -14,7 +14,14 @@ from .inference import (
     infer_slice,
     infer_transpose,
 )
-from .ir import DType, Function, Module, ShapeDim, TensorType, Value
+from .ir import (
+    DType,
+    Function,
+    Module,
+    ShapeDim,
+    TensorType,
+    Value,
+)
 
 
 _ALIAS_OPCODES = frozenset({"view", "slice", "reverse", "transpose"})
