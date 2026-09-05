@@ -5,6 +5,7 @@ from collections.abc import Iterable
 import numpy as np
 
 from .ir import AffineDim, DType, LinearDim, ShapeDim, SymbolicDim, TensorType
+from .layout import normalize_permutation
 
 
 class TypeInferenceError(ValueError):
@@ -78,6 +79,15 @@ def infer_slice(
     shape = list(input_type.shape)
     shape[axis] = (stop - start + step - 1) // step
     return TensorType(tuple(shape), input_type.dtype)
+
+
+def infer_transpose(input_type: TensorType, axes: Iterable[int]) -> TensorType:
+    """Infer one full compile-time axis permutation without changing storage dtype."""
+    try:
+        permutation = normalize_permutation(len(input_type.shape), tuple(axes))
+    except (TypeError, ValueError) as exc:
+        raise TypeInferenceError(str(exc)) from exc
+    return TensorType(tuple(input_type.shape[axis] for axis in permutation), input_type.dtype)
 
 
 Monomial = tuple[tuple[SymbolicDim, int], ...]
