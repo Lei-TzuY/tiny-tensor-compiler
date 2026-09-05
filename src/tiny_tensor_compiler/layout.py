@@ -70,6 +70,26 @@ class StorageLayout:
         strides[axis] *= step
         return StorageLayout(offset=offset, strides=tuple(strides)), tuple(shape)
 
+    def permuted(
+        self,
+        source_shape: tuple[int, ...],
+        axes: tuple[int, ...],
+    ) -> tuple[StorageLayout, tuple[int, ...]]:
+        permutation = normalize_permutation(len(source_shape), axes)
+        shape = tuple(source_shape[axis] for axis in permutation)
+        strides = tuple(self.strides[axis] for axis in permutation)
+        return StorageLayout(offset=self.offset, strides=strides), shape
+
+
+def normalize_permutation(rank: int, axes: tuple[int, ...]) -> tuple[int, ...]:
+    if len(axes) != rank:
+        raise ValueError("transpose axes must form a complete permutation of tensor rank")
+    if any(not isinstance(axis, int) or isinstance(axis, bool) for axis in axes):
+        raise TypeError("transpose axes must be integers")
+    if set(axes) != set(range(rank)):
+        raise ValueError("transpose axes must form a complete permutation of tensor rank")
+    return axes
+
 
 def contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
     if any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape):
