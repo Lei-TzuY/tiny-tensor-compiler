@@ -9,6 +9,7 @@ import numpy as np
 
 from .fused_expr import FusedExpression
 from .ir import DType, TensorType
+from .layout import StorageLayout
 from .loop_ir import (
     IndexMap,
     LoopAlloc,
@@ -25,6 +26,7 @@ from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
 def generate_c(program: LoopProgram) -> str:
     """Generate deterministic C11 source for a verified explicit loop program."""
     types = program.value_types
+    layouts = program.value_layouts
     return_type = types[program.return_slot]
     parameters = [f"{_c_type(return_type.dtype)} *out"]
     parameters.extend(
@@ -75,13 +77,16 @@ def generate_c(program: LoopProgram) -> str:
             lines.extend(_emit_input(op, types[op.output]))
             continue
         if isinstance(op, LoopView):
-            lines.append(f"    const {_c_type(op.type.dtype)} *p{op.output} = p{op.source};")
+            root = program.storage_root(op.output)
+            offset = layouts[op.output].offset
+            pointer = f"p{root}" if offset == 0 else f"p{root} + {offset}"
+            lines.append(f"    const {_c_type(op.type.dtype)} *p{op.output} = {pointer};")
             lines.append("")
             continue
         if isinstance(op, LoopReturn):
-            lines.extend(_emit_return(op, types[op.buffer]))
+            lines.extend(_emit_return_copy(op.buffer, types[op.buffer], layouts[op.buffer], "out"))
             continue
-        lines.extend(_emit_kernel(op, types, kernel_number))
+        lines.extend(_emit_kernel(op, types, kernel_number, layouts=layouts))
         kernel_number += 1
 
     lines.append("}")
@@ -102,7 +107,11 @@ def _emit_kernel(
     op: LoopKernel,
     types: dict[int, TensorType],
     kernel_number: int,
+    *,
+    layouts: dict[int, StorageLayout] | None = None,
 ) -> list[str]:
+    if layouts is None:
+        layouts = {buffer: StorageLayout.contiguous(type_.shape) for buffer, type_ in types.items()}
     output_type = types[op.output]
     lines = ["    {"]
 
@@ -121,11 +130,13 @@ def _emit_kernel(
     if op.opcode == "reshape":
         if len(op.inputs) != 1:
             raise RuntimeError("verified reshape loop unexpectedly has invalid arity")
+        source = op.inputs[0]
+        source_ref = _linear_input_ref(source, types[source], layouts[source], "n")
         lines.extend(
             [
                 "        TINY_TENSOR_VECTORIZE_LOOP",
                 f"        for (int64_t n = 0; n < {_element_count(output_type)}; ++n) {{",
-                f"            p{op.output}[n] = p{op.inputs[0]}[n];",
+                f"            p{op.output}[n] = {source_ref};",
                 "        }",
                 "    }",
                 "",
@@ -133,7 +144,7 @@ def _emit_kernel(
         )
         return lines
 
-    sse2_plan = _select_i32_sse2_plan(op, types)
+    sse2_plan = _select_i32_sse2_plan(op, types, layouts=layouts)
     if sse2_plan is not None:
         lines.extend(
             emit_i32_sse2_plan(
@@ -146,7 +157,7 @@ def _emit_kernel(
         lines.append("")
         return lines
 
-    linearized = _can_linearize_kernel(op, types)
+    linearized = _can_linearize_kernel(op, types, layouts=layouts)
     indent = "        "
     if linearized:
         lines.append(f"{indent}TINY_TENSOR_VECTORIZE_LOOP")
@@ -169,7 +180,7 @@ def _emit_kernel(
         buffer = op.inputs[position]
         if linearized:
             return f"p{buffer}[n]"
-        return _input_ref(buffer, op.input_maps[position], types[buffer])
+        return _input_ref(buffer, op.input_maps[position], layouts[buffer])
 
     if op.opcode == "const":
         if op.literal is None:
@@ -272,6 +283,8 @@ def _emit_fused_expression(
 def _select_i32_sse2_plan(
     op: LoopKernel,
     types: dict[int, TensorType],
+    *,
+    layouts: dict[int, StorageLayout] | None = None,
 ) -> I32SSE2Plan | None:
     plan = build_i32_sse2_plan(op)
     if plan is None:
@@ -280,17 +293,26 @@ def _select_i32_sse2_plan(
         return None
     if any(types[buffer].dtype != DType.INT32 for buffer in op.inputs):
         return None
-    if not _can_linearize_kernel(op, types):
+    if not _can_linearize_kernel(op, types, layouts=layouts):
         return None
     return plan
 
 
-def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
+def _can_linearize_kernel(
+    op: LoopKernel,
+    types: dict[int, TensorType],
+    *,
+    layouts: dict[int, StorageLayout] | None = None,
+) -> bool:
     if not op.iteration_shape or _element_count(types[op.output]) == 0:
         return False
+    if layouts is None:
+        layouts = {buffer: StorageLayout.contiguous(type_.shape) for buffer, type_ in types.items()}
     identity = tuple(range(len(op.iteration_shape)))
     return all(
-        types[buffer].shape == op.iteration_shape and index_map.axes == identity
+        types[buffer].shape == op.iteration_shape
+        and index_map.axes == identity
+        and layouts[buffer].is_contiguous(types[buffer].shape)
         for buffer, index_map in zip(op.inputs, op.input_maps, strict=True)
     )
 
@@ -312,31 +334,103 @@ def _emit_relu_assignment(output_ref: str, dtype: DType, zero: str, indent: str)
     return [f"{indent}{output_ref} = value < {zero} ? {zero} : value;"]
 
 
-def _emit_return(op: LoopReturn, type_: TensorType) -> list[str]:
+def _emit_return_copy(
+    buffer: int,
+    type_: TensorType,
+    layout: StorageLayout,
+    output_name: str,
+) -> list[str]:
     count = _element_count(type_)
-    if type_.shape:
+    if not type_.shape:
+        return [f"    {output_name}[0] = p{buffer}[0];"]
+    if layout.is_contiguous(type_.shape):
         return [
             f"    for (int64_t r = 0; r < {count}; ++r) {{",
-            f"        out[r] = p{op.buffer}[r];",
+            f"        {output_name}[r] = p{buffer}[r];",
             "    }",
         ]
-    return [f"    out[0] = p{op.buffer}[0];"]
+
+    lines: list[str] = []
+    indent = "    "
+    for axis, bound in enumerate(type_.shape):
+        lines.append(f"{indent}for (int64_t r{axis} = 0; r{axis} < {bound}; ++r{axis}) {{")
+        indent += "    "
+    source_offset = _stride_offset(tuple(range(len(type_.shape))), layout.strides, prefix="r")
+    output_offset = _flat_offset(tuple(range(len(type_.shape))), type_.shape, prefix="r")
+    lines.append(f"{indent}{output_name}[{output_offset}] = p{buffer}[{source_offset}];")
+    for _ in type_.shape:
+        indent = indent[:-4]
+        lines.append(f"{indent}}}")
+    return lines
 
 
-def _input_ref(buffer: int, index_map: IndexMap, type_: TensorType) -> str:
-    return f"p{buffer}[{_flat_offset(index_map.axes, type_.shape)}]"
+def _input_ref(buffer: int, index_map: IndexMap, layout: StorageLayout) -> str:
+    return f"p{buffer}[{_stride_offset(index_map.axes, layout.strides)}]"
 
 
-def _flat_offset(axes: tuple[int | None, ...], shape: tuple[int, ...]) -> str:
+def _linear_input_ref(
+    buffer: int,
+    type_: TensorType,
+    layout: StorageLayout,
+    linear_index: str,
+) -> str:
+    if layout.is_contiguous(type_.shape):
+        return f"p{buffer}[{linear_index}]"
+    terms: list[str] = []
+    logical_strides = StorageLayout.contiguous(type_.shape).strides
+    for axis, (dim, logical_stride, physical_stride) in enumerate(
+        zip(type_.shape, logical_strides, layout.strides, strict=True)
+    ):
+        if dim <= 1:
+            continue
+        coordinate = (
+            f"(({linear_index} / {logical_stride}) % {dim})"
+            if logical_stride != 1
+            else f"({linear_index} % {dim})"
+        )
+        if physical_stride == 1:
+            terms.append(coordinate)
+        else:
+            terms.append(f"({coordinate} * {physical_stride})")
+    offset = " + ".join(terms) if terms else "0"
+    return f"p{buffer}[{offset}]"
+
+
+def _flat_offset(
+    axes: tuple[int | None, ...],
+    shape: tuple[int, ...],
+    *,
+    prefix: str = "i",
+) -> str:
     terms: list[str] = []
     for input_axis, output_axis in enumerate(axes):
         if output_axis is None:
             continue
         stride = reduce(mul, shape[input_axis + 1 :], 1)
+        index = f"{prefix}{output_axis}"
         if stride == 1:
-            terms.append(f"i{output_axis}")
+            terms.append(index)
         else:
-            terms.append(f"(i{output_axis} * {stride})")
+            terms.append(f"({index} * {stride})")
+    return " + ".join(terms) if terms else "0"
+
+
+def _stride_offset(
+    axes: tuple[int | None, ...],
+    strides: tuple[int, ...],
+    *,
+    prefix: str = "i",
+) -> str:
+    terms: list[str] = []
+    for input_axis, output_axis in enumerate(axes):
+        if output_axis is None:
+            continue
+        stride = strides[input_axis]
+        index = f"{prefix}{output_axis}"
+        if stride == 1:
+            terms.append(index)
+        else:
+            terms.append(f"({index} * {stride})")
     return " + ".join(terms) if terms else "0"
 
 
