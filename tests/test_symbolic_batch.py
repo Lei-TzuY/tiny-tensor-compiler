@@ -121,22 +121,22 @@ def test_runtime_binding_rejects_inconsistent_shared_batch_and_static_tail():
         )
 
 
-def test_dynamic_batch_contract_rejects_nonleading_or_multiple_symbols():
+def test_dynamic_contract_accepts_nonleading_and_multiple_symbols():
     batch = SymbolicDim("B")
     width = SymbolicDim("W")
 
     builder = GraphBuilder()
     value = builder.input((3, batch), dtype="float32")
     module = builder.finish(value.relu())
-    with pytest.raises(SymbolicShapeError, match="leading axis"):
-        compile_dynamic_module(module)
+    executable = compile_dynamic_module(module)
+    assert executable.symbolic_dim == batch
 
     builder = GraphBuilder()
-    lhs = builder.input((batch, 3), dtype="float32")
-    rhs = builder.input((width, 1), dtype="float32")
-    module = builder.finish((lhs, rhs))
-    with pytest.raises(SymbolicShapeError, match="exactly one symbolic dimension"):
-        compile_dynamic_module(module)
+    lhs = builder.input((batch, 1), dtype="float32")
+    rhs = builder.input((1, width), dtype="float32")
+    module = builder.finish(lhs + rhs)
+    executable = compile_dynamic_module(module)
+    assert executable.symbolic_dims == (batch, width)
 
 
 def test_static_compile_entrypoint_rejects_unspecialized_symbolic_ir():
