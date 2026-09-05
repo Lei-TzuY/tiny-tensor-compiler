@@ -14,6 +14,7 @@ from ..loop_ir import (
     LoopKernel,
     LoopProgram,
     LoopReturn,
+    LoopView,
     fused_expression_for_kernel,
     lower_to_loops,
 )
@@ -57,6 +58,14 @@ def execute_loop(
                 buffers[op.output] = runtime_inputs[op.index]
             else:
                 np.copyto(buffers[op.output], runtime_inputs[op.index])
+            continue
+
+        if isinstance(op, LoopView):
+            source = buffers[op.source]
+            viewed = np.reshape(source, op.type.shape, order="C")
+            if not np.shares_memory(viewed, source):
+                raise RuntimeError("verified loop view unexpectedly required a copy")
+            buffers[op.output] = viewed
             continue
 
         if isinstance(op, LoopReturn):
