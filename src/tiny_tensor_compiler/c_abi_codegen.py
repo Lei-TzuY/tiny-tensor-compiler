@@ -3,7 +3,7 @@ from __future__ import annotations
 from .c_codegen import _c_type, _element_count, _emit_input, _emit_kernel, _storage_size
 from .input_binding import BorrowedLoopProgram
 from .ir import TensorType
-from .loop_ir import LoopAlloc, LoopInput, LoopProgram, LoopReturn
+from .loop_ir import LoopAlloc, LoopInput, LoopProgram, LoopReturn, LoopView
 from .parallel_codegen import emit_parallel_kernel
 
 
@@ -13,7 +13,7 @@ def generate_c(
     parallel: bool = False,
 ) -> str:
     """Generate deterministic C11 with one output pointer per returned tensor."""
-    types = {op.buffer: op.type for op in program.allocations}
+    types = program.buffer_types
     return_types = tuple(types[slot] for slot in program.return_slots)
     output_names = (
         ("out",)
@@ -81,6 +81,12 @@ def generate_c(
         if isinstance(op, LoopInput):
             if op.output not in borrowed_by_slot:
                 lines.extend(_emit_input(op, types[op.output]))
+            continue
+        if isinstance(op, LoopView):
+            lines.append(
+                f"    const {_c_type(op.type.dtype)} *p{op.output} = p{op.source};"
+            )
+            lines.append("")
             continue
         if isinstance(op, LoopReturn):
             lines.extend(
