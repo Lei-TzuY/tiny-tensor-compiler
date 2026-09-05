@@ -127,28 +127,32 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
-    if op.opcode == "sum":
+    reduction = op.reduction
+    if reduction is not None:
         if len(op.inputs) != 1:
-            raise RuntimeError("verified sum loop unexpectedly has invalid arity")
+            raise RuntimeError("verified reduction loop unexpectedly has invalid arity")
         source = op.inputs[0]
         source_type = types[source]
         c_type = _c_type(output_type.dtype)
-        if op.reduction_axis is None:
+        value_name = f"{reduction.opcode}_value"
+        identity = _reduction_identity_literal(reduction.operator.identity_number, output_type.dtype)
+        operator = reduction.operator.c_operator
+        if reduction.axis is None:
             source_ref = _linear_input_ref(source, source_type, layouts[source], "n")
             lines.extend(
                 [
-                    f"        {c_type} sum_value = {_zero_literal(output_type.dtype)};",
+                    f"        {c_type} {value_name} = {identity};",
                     f"        for (int64_t n = 0; n < {_element_count(source_type)}; ++n) {{",
-                    f"            sum_value = (({c_type})sum_value + ({c_type}){source_ref});",
+                    f"            {value_name} = (({c_type}){value_name} {operator} ({c_type}){source_ref});",
                     "        }",
-                    f"        p{op.output}[0] = sum_value;",
+                    f"        p{op.output}[0] = {value_name};",
                     "    }",
                     "",
                 ]
             )
             return lines
 
-        axis = op.reduction_axis
+        axis = reduction.axis
         indent = "        "
         for output_axis, bound in enumerate(output_type.shape):
             lines.append(
@@ -156,19 +160,19 @@ def _emit_kernel(
                 f"i{output_axis} < {bound}; ++i{output_axis}) {{"
             )
             indent += "    "
-        source_ref = _axis_sum_input_ref(source, source_type, layouts[source], axis)
+        source_ref = _axis_reduction_input_ref(source, source_type, layouts[source], axis)
         output_offset = _flat_offset(
             tuple(range(len(output_type.shape))), output_type.shape
         )
-        lines.append(f"{indent}{c_type} sum_value = {_zero_literal(output_type.dtype)};")
+        lines.append(f"{indent}{c_type} {value_name} = {identity};")
         lines.append(
             f"{indent}for (int64_t r = 0; r < {source_type.shape[axis]}; ++r) {{"
         )
         lines.append(
-            f"{indent}    sum_value = (({c_type})sum_value + ({c_type}){source_ref});"
+            f"{indent}    {value_name} = (({c_type}){value_name} {operator} ({c_type}){source_ref});"
         )
         lines.append(f"{indent}}}")
-        lines.append(f"{indent}p{op.output}[{output_offset}] = sum_value;")
+        lines.append(f"{indent}p{op.output}[{output_offset}] = {value_name};")
         for _ in output_type.shape:
             indent = indent[:-4]
             lines.append(f"{indent}}}")
@@ -445,7 +449,7 @@ def _linear_input_ref(
     return f"p{buffer}[{offset}]"
 
 
-def _axis_sum_input_ref(
+def _axis_reduction_input_ref(
     buffer: int,
     type_: TensorType,
     layout: StorageLayout,
@@ -531,6 +535,18 @@ def _zero_literal(dtype: DType) -> str:
     if dtype == DType.FLOAT64:
         return "0.0"
     return "0"
+
+
+def _one_literal(dtype: DType) -> str:
+    if dtype == DType.FLOAT32:
+        return "1.0f"
+    if dtype == DType.FLOAT64:
+        return "1.0"
+    return "1"
+
+
+def _reduction_identity_literal(identity_number: int, dtype: DType) -> str:
+    return _zero_literal(dtype) if identity_number == 0 else _one_literal(dtype)
 
 
 def _c_literal(value: Any, dtype: DType) -> str:

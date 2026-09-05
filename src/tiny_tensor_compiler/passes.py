@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from .ir import DType, Module, Operation, Value
+from .reduction import REDUCTION_OPCODES
 from .verifier import verify
 
 _PURE_OPCODES = frozenset(
@@ -11,7 +12,7 @@ _PURE_OPCODES = frozenset(
         "add",
         "mul",
         "relu",
-        "sum",
+        *REDUCTION_OPCODES,
         "reshape",
         "view",
         "slice",
@@ -19,7 +20,7 @@ _PURE_OPCODES = frozenset(
         "transpose",
     }
 )
-_CSE_OPCODES = frozenset({"add", "mul", "relu", "sum", "reshape", "view"})
+_CSE_OPCODES = frozenset({"add", "mul", "relu", *REDUCTION_OPCODES, "reshape", "view"})
 _CANONICAL_COMMUTATIVE_OPCODES = frozenset({"add", "mul"})
 _EFFECT_OPCODES = frozenset({"copy_into"})
 
@@ -123,10 +124,10 @@ def common_subexpression_eliminate(module: Module) -> int:
     for op in list(function.ops):
         if op.opcode not in _CSE_OPCODES or not op.results:
             continue
-        if op.attrs and op.opcode != "sum":
+        if op.attrs and op.opcode not in REDUCTION_OPCODES:
             continue
 
-        attrs_key = tuple(sorted(op.attrs.items())) if op.opcode == "sum" else ()
+        attrs_key = tuple(sorted(op.attrs.items())) if op.opcode in REDUCTION_OPCODES else ()
         key = (
             op.opcode,
             tuple(op.operands),

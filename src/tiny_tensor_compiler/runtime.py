@@ -7,6 +7,7 @@ import numpy as np
 
 from .input_validation import prepare_runtime_inputs
 from .ir import Module, Value
+from .reduction import REDUCTION_OPCODES, ReductionPlan
 from .symbolic import has_symbolic_shapes, specialize_for_inputs
 from .verifier import verify
 
@@ -40,26 +41,31 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]].astype(dtype, copy=False)
             values[op.results[0]] = np.maximum(operand, np.array(0, dtype=dtype))
-        elif op.opcode == "sum":
+        elif op.opcode in REDUCTION_OPCODES:
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]]
-            axis = op.attrs.get("axis")
-            if axis is None:
-                accumulator = dtype.type(0)
+            plan = ReductionPlan.from_opcode(op.opcode, op.attrs.get("axis"))
+            if plan.axis is None:
+                accumulator = plan.operator.identity(dtype)
                 for index in np.ndindex(operand.shape):
-                    accumulator = dtype.type(np.add(accumulator, operand[index]))
+                    accumulator = plan.operator.combine(dtype, accumulator, operand[index])
                 values[op.results[0]] = np.array(accumulator, dtype=dtype)
             else:
+                axis = plan.axis
                 output = np.empty(op.results[0].type.shape, dtype=dtype)
                 for output_index in np.ndindex(output.shape):
-                    accumulator = dtype.type(0)
+                    accumulator = plan.operator.identity(dtype)
                     for reduction_index in range(operand.shape[axis]):
                         input_index = (
                             output_index[:axis]
                             + (reduction_index,)
                             + output_index[axis:]
                         )
-                        accumulator = dtype.type(np.add(accumulator, operand[input_index]))
+                        accumulator = plan.operator.combine(
+                            dtype,
+                            accumulator,
+                            operand[input_index],
+                        )
                     output[output_index] = accumulator
                 values[op.results[0]] = output
         elif op.opcode == "reshape":

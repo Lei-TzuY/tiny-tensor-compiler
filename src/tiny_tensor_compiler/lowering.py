@@ -7,15 +7,16 @@ import numpy as np
 
 from .inference import (
     infer_binary,
+    infer_reduction,
     infer_relu,
     infer_reshape,
     infer_reverse,
     infer_slice,
-    infer_sum,
     infer_transpose,
 )
 from .ir import Module, TensorType, Value
 from .layout import StorageLayout, element_count
+from .reduction import REDUCTION_OPCODES, ReductionPlan
 from .verifier import verify
 
 
@@ -58,6 +59,12 @@ class BufferKernel:
     inputs: tuple[int, ...]
     literal: np.ndarray[Any, Any] | None = None
     reduction_axis: int | None = None
+
+    @property
+    def reduction(self) -> ReductionPlan | None:
+        if self.opcode not in REDUCTION_OPCODES:
+            return None
+        return ReductionPlan.from_opcode(self.opcode, self.reduction_axis)
 
 
 @dataclass(frozen=True)
@@ -239,8 +246,8 @@ class CPUProgram:
                     operands = ", ".join(f"b{buffer}" for buffer in op.inputs)
                     suffix = (
                         ""
-                        if op.opcode != "sum" or op.reduction_axis is None
-                        else f" axis={op.reduction_axis}"
+                        if op.reduction is None or op.reduction.axis is None
+                        else f" axis={op.reduction.axis}"
                     )
                     lines.append(f"b{op.output} = {op.opcode} {operands}{suffix}")
             else:
@@ -322,7 +329,7 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 output=buffer,
                 inputs=tuple(buffers[operand] for operand in op.operands),
                 literal=literal,
-                reduction_axis=op.attrs.get("axis") if op.opcode == "sum" else None,
+                reduction_axis=op.attrs.get("axis") if op.opcode in REDUCTION_OPCODES else None,
             )
         )
 
@@ -600,8 +607,8 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                     raise ValueError(f"buffer b{buffer} is read before being written")
                 require_fresh(buffer)
 
-            if op.opcode != "sum" and op.reduction_axis is not None:
-                raise ValueError("only sum kernels may carry a reduction axis")
+            if op.opcode not in REDUCTION_OPCODES and op.reduction_axis is not None:
+                raise ValueError("only reduction kernels may carry a reduction axis")
             output_type = allocated[op.output]
             if op.opcode == "const":
                 if op.inputs:
@@ -625,12 +632,21 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 expected = infer_relu(allocated[op.inputs[0]])
                 if expected != output_type:
                     raise ValueError("relu kernel output buffer type does not match inference")
-            elif op.opcode == "sum":
+            elif op.opcode in REDUCTION_OPCODES:
                 if len(op.inputs) != 1 or op.literal is not None:
-                    raise ValueError("sum kernel requires one input and no literal")
-                expected = infer_sum(allocated[op.inputs[0]], op.reduction_axis)
+                    raise ValueError(f"{op.opcode} kernel requires one input and no literal")
+                plan = op.reduction
+                if plan is None:
+                    raise RuntimeError("verified reduction kernel unexpectedly has no plan")
+                expected = infer_reduction(
+                    allocated[op.inputs[0]],
+                    plan.operator,
+                    plan.axis,
+                )
                 if expected != output_type:
-                    raise ValueError("sum kernel output buffer type does not match inference")
+                    raise ValueError(
+                        f"{op.opcode} kernel output buffer type does not match inference"
+                    )
             elif op.opcode == "reshape":
                 if len(op.inputs) != 1 or op.literal is not None:
                     raise ValueError("reshape kernel requires one input and no literal")

@@ -8,12 +8,14 @@ import numpy as np
 from .inference import (
     TypeInferenceError,
     infer_binary,
+    infer_prod,
     infer_relu,
     infer_reshape,
     infer_reverse,
     infer_slice,
     infer_sum,
     infer_transpose,
+    normalize_prod_axis,
     normalize_sum_axis,
 )
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
@@ -47,6 +49,9 @@ class Tensor:
 
     def sum(self, axis: int | None = None) -> Tensor:
         return self._builder.sum(self, axis=axis)
+
+    def prod(self, axis: int | None = None) -> Tensor:
+        return self._builder.prod(self, axis=axis)
 
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.reshape(self, shape)
@@ -143,6 +148,20 @@ class GraphBuilder:
         attrs = {} if normalized_axis is None else {"axis": normalized_axis}
         op = self.function.add_op(
             "sum",
+            operands=[tensor.value],
+            result_types=[result_type],
+            attrs=attrs,
+        )
+        return Tensor(self, op.results[0])
+
+    def prod(self, tensor: Tensor, axis: int | None = None) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        normalized_axis = None if axis is None else normalize_prod_axis(tensor.type, axis)
+        result_type = infer_prod(tensor.type, normalized_axis)
+        attrs = {} if normalized_axis is None else {"axis": normalized_axis}
+        op = self.function.add_op(
+            "prod",
             operands=[tensor.value],
             result_types=[result_type],
             attrs=attrs,

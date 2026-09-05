@@ -7,14 +7,15 @@ import numpy as np
 from .inference import (
     TypeInferenceError,
     infer_binary,
+    infer_reduction,
     infer_relu,
     infer_reshape,
     infer_reverse,
     infer_slice,
-    infer_sum,
     infer_transpose,
 )
 from .ir import DType, Module, Operation, TensorType, Value
+from .reduction import REDUCTION_OPCODES, ReductionOperator
 
 
 class VerificationError(ValueError):
@@ -67,8 +68,8 @@ def verify(module: Module) -> None:
             _verify_binary(op_index, op)
         elif op.opcode == "relu":
             _verify_relu(op_index, op)
-        elif op.opcode == "sum":
-            _verify_sum(op_index, op)
+        elif op.opcode in REDUCTION_OPCODES:
+            _verify_reduction(op_index, op)
         elif op.opcode in {"reshape", "view"}:
             _verify_shape_transform(op_index, op)
         elif op.opcode == "slice":
@@ -173,24 +174,33 @@ def _verify_relu(op_index: int, op: Operation) -> None:
         )
 
 
-def _verify_sum(op_index: int, op: Operation) -> None:
+def _verify_reduction(op_index: int, op: Operation) -> None:
     _expect_arity(op_index, op, operands=1, results=1)
     if set(op.attrs) not in (set(), {"axis"}):
-        _fail(op_index, op, "sum accepts only an optional canonical 'axis' attribute")
+        _fail(
+            op_index,
+            op,
+            f"{op.opcode} accepts only an optional canonical 'axis' attribute",
+        )
+    operator = ReductionOperator.from_opcode(op.opcode)
     axis = op.attrs.get("axis")
     if axis is not None:
         rank = len(op.operands[0].type.shape)
         if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= rank:
-            _fail(op_index, op, "sum axis must be a canonical non-negative in-range integer")
+            _fail(
+                op_index,
+                op,
+                f"{op.opcode} axis must be a canonical non-negative in-range integer",
+            )
     try:
-        expected_type = infer_sum(op.operands[0].type, axis)
+        expected_type = infer_reduction(op.operands[0].type, operator, axis)
     except TypeInferenceError as exc:
         _fail(op_index, op, str(exc))
     if op.results[0].type != expected_type:
         _fail(
             op_index,
             op,
-            f"sum result type {op.results[0].type} does not match inferred type {expected_type}",
+            f"{op.opcode} result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
