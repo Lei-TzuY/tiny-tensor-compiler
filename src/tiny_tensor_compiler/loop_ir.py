@@ -5,15 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from .fused_expr import (
-    BINARY_CHAIN_OPCODES as _BINARY_CHAIN_OPCODES,
-    BINARY_TREE_OPCODES as _BINARY_TREE_OPCODES,
-    CHAIN_TREE_OPCODES as _CHAIN_TREE_OPCODES,
-    RELU_BINARY_CHAIN_OPCODES as _RELU_BINARY_CHAIN_OPCODES,
-    RELU_BINARY_TREE_OPCODES as _RELU_BINARY_TREE_OPCODES,
-    FusedExpression,
-    describe_fused_opcode,
-)
+from . import fused_expr
 from .inference import infer_binary, infer_relu
 from .ir import DType, TensorType
 from .lowering import BufferAlloc, BufferInput, BufferReturn, CPUProgram, plan_memory
@@ -182,8 +174,8 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
         "relu",
         "relu_add",
         "relu_mul",
-        *_BINARY_CHAIN_OPCODES,
-        *_RELU_BINARY_CHAIN_OPCODES,
+        *fused_expr.BINARY_CHAIN_OPCODES,
+        *fused_expr.RELU_BINARY_CHAIN_OPCODES,
     }
 
     while index < len(operations):
@@ -245,7 +237,7 @@ def fuse_elementwise(program: LoopProgram) -> LoopProgram:
                 break
 
             opcode = current.opcode
-            if opcode in {"add", "mul"} or opcode in _BINARY_CHAIN_OPCODES:
+            if opcode in {"add", "mul"} or opcode in fused_expr.BINARY_CHAIN_OPCODES:
                 opcode = f"relu_{opcode}"
             current = LoopKernel(
                 opcode=opcode,
@@ -590,7 +582,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError(f"{op.opcode} loop output buffer type does not match inference")
                 _verify_index_maps(op, allocated)
             else:
-                expression = describe_fused_opcode(op.opcode)
+                expression = fused_expr.describe_fused_opcode(op.opcode)
                 if expression is None:
                     raise ValueError(f"unsupported loop kernel: {op.opcode}")
                 _verify_fused_expression(op, expression, allocated, output_type)
@@ -614,7 +606,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
 
 def _verify_fused_expression(
     op: LoopKernel,
-    expression: FusedExpression,
+    expression: fused_expr.FusedExpression,
     allocated: dict[int, TensorType],
     output_type: TensorType,
 ) -> None:
