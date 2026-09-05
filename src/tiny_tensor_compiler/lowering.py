@@ -5,8 +5,9 @@ from typing import Any
 
 import numpy as np
 
-from .inference import infer_binary, infer_relu, infer_reshape
+from .inference import infer_binary, infer_relu, infer_reshape, infer_slice
 from .ir import Module, TensorType, Value
+from .layout import StorageLayout, element_count
 from .verifier import verify
 
 
@@ -26,6 +27,10 @@ class BufferInput:
 class BufferView:
     output: int
     source: int
+    slice_axis: int | None = None
+    start: int = 0
+    stop: int = 0
+    step: int = 1
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,7 @@ class BufferAlias:
     source: int
     physical: int
     type: TensorType
+    layout: StorageLayout
 
 
 @dataclass(frozen=True)
@@ -87,13 +93,14 @@ class MemoryPlan:
         for alias in self.aliases:
             if alias.virtual in virtuals or alias.virtual in alias_virtuals:
                 raise ValueError(f"virtual buffer b{alias.virtual} has multiple memory bindings")
-            if alias.physical not in physical_types:
+            root_type = physical_types.get(alias.physical)
+            if root_type is None:
                 raise ValueError(
                     f"view alias b{alias.virtual} refers to missing physical buffer p{alias.physical}"
                 )
-            expected = infer_reshape(physical_types[alias.physical], alias.type.shape)
-            if expected != alias.type:
-                raise ValueError(f"view alias b{alias.virtual} has incompatible storage type")
+            if root_type.dtype != alias.type.dtype:
+                raise ValueError(f"view alias b{alias.virtual} changes backing storage dtype")
+            alias.layout.validate_bounds(alias.type.shape, element_count(root_type.shape))
             alias_virtuals.add(alias.virtual)
 
     @property
@@ -116,8 +123,11 @@ class MemoryPlan:
                 return alias.physical
         raise KeyError(f"virtual buffer b{virtual} has no physical assignment")
 
+    def alias_for(self, virtual: int) -> BufferAlias | None:
+        return next((alias for alias in self.aliases if alias.virtual == virtual), None)
+
     def is_alias(self, virtual: int) -> bool:
-        return any(alias.virtual == virtual for alias in self.aliases)
+        return self.alias_for(virtual) is not None
 
     def dump(self) -> str:
         lines = [
@@ -125,7 +135,8 @@ class MemoryPlan:
             for assignment in self.assignments
         ]
         lines.extend(
-            f"b{alias.virtual} => p{alias.physical} view(b{alias.source}) : {alias.type}"
+            f"b{alias.virtual} => p{alias.physical} view(b{alias.source}) "
+            f"offset={alias.layout.offset} strides={alias.layout.strides} : {alias.type}"
             for alias in self.aliases
         )
         return "\n".join(lines)
@@ -177,7 +188,13 @@ class CPUProgram:
             elif isinstance(op, BufferInput):
                 lines.append(f"b{op.output} = input {op.index}")
             elif isinstance(op, BufferView):
-                lines.append(f"b{op.output} = view b{op.source}")
+                if op.slice_axis is None:
+                    lines.append(f"b{op.output} = view b{op.source}")
+                else:
+                    lines.append(
+                        f"b{op.output} = slice b{op.source} axis={op.slice_axis} "
+                        f"[{op.start}:{op.stop}:{op.step}]"
+                    )
             elif isinstance(op, BufferKernel):
                 if op.opcode == "const":
                     if op.literal is None:
@@ -214,6 +231,18 @@ def lower_to_cpu(module: Module) -> CPUProgram:
         if op.opcode == "view":
             operations.append(BufferView(output=buffer, source=buffers[op.operands[0]]))
             continue
+        if op.opcode == "slice":
+            operations.append(
+                BufferView(
+                    output=buffer,
+                    source=buffers[op.operands[0]],
+                    slice_axis=op.attrs["axis"],
+                    start=op.attrs["start"],
+                    stop=op.attrs["stop"],
+                    step=op.attrs["step"],
+                )
+            )
+            continue
 
         literal = None
         if op.opcode == "const":
@@ -232,7 +261,7 @@ def lower_to_cpu(module: Module) -> CPUProgram:
 
 
 def plan_memory(program: CPUProgram) -> MemoryPlan:
-    """Reuse same-typed storage while preserving transitive contiguous-view lifetimes."""
+    """Reuse storage while preserving transitive positive-stride alias lifetimes."""
     allocation_positions: dict[int, int] = {}
     types: dict[int, TensorType] = {}
     last_uses: dict[int, int] = {}
@@ -292,6 +321,29 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
 
         assignments.append(BufferAssignment(buffer, physical, buffer_type))
 
+    layouts: dict[int, StorageLayout] = {}
+    view_outputs = set(view_sources)
+    for op in program.operations:
+        if isinstance(op, BufferAlloc) and op.buffer not in view_outputs:
+            layouts[op.buffer] = StorageLayout.contiguous(op.type.shape)
+        elif isinstance(op, BufferView):
+            source_layout = layouts[op.source]
+            source_type = types[op.source]
+            output_type = types[op.output]
+            if op.slice_axis is None:
+                layout = source_layout.reshaped(source_type.shape, output_type.shape)
+            else:
+                layout, inferred_shape = source_layout.sliced(
+                    source_type.shape,
+                    axis=op.slice_axis,
+                    start=op.start,
+                    stop=op.stop,
+                    step=op.step,
+                )
+                if inferred_shape != output_type.shape:
+                    raise ValueError("buffer slice layout shape does not match inferred output")
+            layouts[op.output] = layout
+
     assignment_by_virtual = {assignment.virtual: assignment for assignment in assignments}
     aliases: list[BufferAlias] = []
     for op in program.operations:
@@ -307,6 +359,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
                 source=op.source,
                 physical=root_assignment.physical,
                 type=types[op.output],
+                layout=layouts[op.output],
             )
         )
 
@@ -352,7 +405,16 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             if op.source not in written:
                 raise ValueError(f"buffer b{op.source} is viewed before being written")
             output_type = allocated[op.output]
-            expected = infer_reshape(allocated[op.source], output_type.shape)
+            if op.slice_axis is None:
+                expected = infer_reshape(allocated[op.source], output_type.shape)
+            else:
+                expected = infer_slice(
+                    allocated[op.source],
+                    axis=op.slice_axis,
+                    start=op.start,
+                    stop=op.stop,
+                    step=op.step,
+                )
             if expected != output_type:
                 raise ValueError("buffer view output type does not match inference")
             written.add(op.output)
