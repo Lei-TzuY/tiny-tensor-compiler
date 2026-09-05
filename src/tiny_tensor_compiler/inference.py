@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .ir import AffineDim, DType, ShapeDim, SymbolicDim, TensorType
+from .ir import AffineDim, DType, LinearDim, ShapeDim, SymbolicDim, TensorType
 
 
 class TypeInferenceError(ValueError):
@@ -43,8 +43,8 @@ def _broadcast_shapes(
         if rhs_dim == 1:
             result.append(lhs_dim)
             continue
-        if isinstance(lhs_dim, (SymbolicDim, AffineDim)) or isinstance(
-            rhs_dim, (SymbolicDim, AffineDim)
+        if isinstance(lhs_dim, (SymbolicDim, AffineDim, LinearDim)) or isinstance(
+            rhs_dim, (SymbolicDim, AffineDim, LinearDim)
         ):
             raise TypeInferenceError(
                 f"cannot broadcast symbolic dimensions {lhs_dim} and {rhs_dim} "
