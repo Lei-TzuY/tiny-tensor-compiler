@@ -112,6 +112,14 @@ from .native_bundle_transparency import (
     verify_transparency_consistency,
     verify_transparency_inclusion,
 )
+from .native_bundle_transparency_witness import (
+    NativeBundleTransparencyWitnessError,
+    TransparencyWitnessPolicy,
+    TransparencyWitnessQuorum,
+    accept_witnessed_release_transparency,
+    create_transparency_witness_quorum,
+    verify_transparency_witness_quorum,
+)
 from .native_bundle_trust import (
     AttestedNativeBundleRegistryExecutable,
     fetch_attested_dynamic_bundle_set_archive,
@@ -172,6 +180,7 @@ __all__ = [
     "NativeBundleThresholdRollbackError",
     "NativeBundleTransparencyError",
     "NativeBundleTransparencyRollbackError",
+    "NativeBundleTransparencyWitnessError",
     "NativeBundleTrustError",
     "NativeCompilationError",
     "NativeExecutable",
@@ -191,9 +200,12 @@ __all__ = [
     "ThresholdReleaseStateStore",
     "TransparencyCheckpoint",
     "TransparencyStateStore",
+    "TransparencyWitnessPolicy",
+    "TransparencyWitnessQuorum",
     "TypeInferenceError",
     "VerificationError",
     "accept_release_transparency",
+    "accept_witnessed_release_transparency",
     "algebraic_simplify",
     "bind_dynamic_batch",
     "bind_dynamic_shapes",
@@ -210,6 +222,7 @@ __all__ = [
     "create_threshold_policy_transition",
     "create_threshold_release_checkpoint",
     "create_transparency_checkpoint",
+    "create_transparency_witness_quorum",
     "dead_code_eliminate",
     "digest_dynamic_bundle_set_archive",
     "execute_cpu",
@@ -250,4 +263,5 @@ __all__ = [
     "verify_transparency_checkpoint",
     "verify_transparency_consistency",
     "verify_transparency_inclusion",
+    "verify_transparency_witness_quorum",
 ]

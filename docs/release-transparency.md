@@ -32,20 +32,26 @@ Re-accepting the exact same head is idempotent. Rollback, same-size forks, corru
 
 `accept_release_transparency()` composes checkpoint signature verification, release-byte inclusion verification, and persistent append-only state advancement. It does **not** call the publisher/threshold release verifier itself; this separation keeps release authorization and transparency evidence explicit.
 
+## Optional caller-pinned witness quorum
+
+The separate witness-quorum layer may require `k` distinct caller-pinned Ed25519 witness keys to endorse the exact signed transparency-checkpoint bytes before `TransparencyStateStore` is allowed to advance. `accept_witnessed_release_transparency()` verifies that quorum first and then delegates to the unchanged append-only acceptance path above.
+
+Witness endorsement is intentionally a separate policy surface rather than a property silently implied by the base log verifier. See [`release-transparency-witnesses.md`](release-transparency-witnesses.md) for the canonical policy/quorum format, revocation behavior, state-ordering guarantee, and its narrower security claim.
+
 ## Security boundary
 
-This layer proves a local append-only property relative to a caller-pinned operator key and previously persisted state. It does **not** provide:
+The base transparency layer proves a local append-only property relative to a caller-pinned operator key and previously persisted state. By itself it does **not** provide:
 
 - first-contact freshness when no local transparency floor exists;
-- gossip, witness cosigning, or cross-client checkpoint comparison;
+- witness cosigning, gossip, or cross-client checkpoint comparison;
 - protection against a malicious log serving different individually consistent split views to isolated clients;
 - trusted timestamps, expiry, or external time ordering;
 - PKI/organizational identity for the log key;
 - recovery if an attacker can delete or rewrite the caller's local state or replace pinned key material;
 - registry availability, global consistency, or a full TUF-style update framework.
 
-Those properties require independent witnesses/gossip, trusted freshness signals, or a broader update-security protocol and are intentionally not claimed here.
+The optional witness-quorum layer adds caller-pinned multi-key endorsement of one exact checkpoint, but it still does not prove that witnesses independently monitored consistency or exchanged views. Stronger split-view resistance requires independently verifiable witness-side state, gossip/cross-comparison, trusted freshness signals, or a broader update-security protocol and is intentionally not claimed here.
 
 ## Verification evidence
 
-Focused regressions cover canonical Ed25519 checkpoint verification, operator-key binding, inclusion proofs, non-power-of-two consistency growth, damaged proofs, rollback and same-size fork refusal, idempotent re-acceptance, persistent reopen, wrong pinned operator refusal, and bounded malformed proof/tree inputs. The full repository CI matrix exercises the state layer on Ubuntu and Windows with Python 3.11 and 3.13.
+Focused regressions cover canonical Ed25519 checkpoint verification, operator-key binding, inclusion proofs, non-power-of-two consistency growth, damaged proofs, rollback and same-size fork refusal, idempotent re-acceptance, persistent reopen, wrong pinned operator refusal, and bounded malformed proof/tree inputs. The full repository CI matrix exercises the state layer on Ubuntu and Windows with Python 3.11 and 3.13. Witness-specific evidence is documented separately in `release-transparency-witnesses.md`.
