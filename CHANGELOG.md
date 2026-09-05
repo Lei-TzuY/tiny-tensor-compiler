@@ -28,6 +28,9 @@ All notable project milestones are recorded here.
 - Opt-in native OpenMP loop scheduling through `compile_native(..., parallel=True)`, `execute_native(..., parallel=True)`, `compile_module(..., parallel=True)`, and dynamic specializations. Verified non-scalar, non-empty general-C kernels use static OpenMP scheduling while per-kernel barriers preserve existing producer/consumer ordering.
 - Cross-platform OpenMP compilation through `-fopenmp` on GCC-style toolchains and `/openmp` on MSVC, including MSVC-compatible canonical induction-variable emission for linearized and broadcast outer loops.
 - Windows OpenMP native artifacts use a process-pinned DLL lifetime so `clear_native_cache()` cannot unload generated code that the OpenMP worker runtime may still reference; marked staging directories are eligible for best-effort stale cleanup by a later process.
+- First-class `Tensor.reshape(shape)` with exact dtype preservation and verified C-order copy semantics through tensor IR, Buffer IR, Loop IR, reference/CPU execution, generated C, native execution, and opt-in OpenMP scheduling.
+- Exact symbolic reshape element-count proofs using canonical shape polynomials over integer, `SymbolicDim`, `AffineDim`, and `LinearDim` extents; targets may not introduce previously unbound symbols.
+- Reshape integration with existing pure-operation DCE/CSE, including explicit fusion-boundary, zero-extent, borrowed-input, multi-output, and dynamic-specialization regression coverage.
 
 ### Compatibility
 
@@ -37,7 +40,8 @@ All notable project milestones are recorded here.
 - Existing one-symbol dynamic callers retain `bind_dynamic_batch()`, `DynamicExecutable.symbolic_dim`, integer `specialize(size)`, and `cached_batch_sizes`; multi-symbol executables use complete binding mappings instead of ambiguous batch-only values.
 - Plain `SymbolicDim` and one-variable `AffineDim` shapes keep their existing direct runtime-binding behavior. `LinearDim` adds positive-coefficient/non-negative-offset relations across multiple named symbols, but all relations are solved to one complete integer binding before Buffer/Loop IR.
 - Symbolic broadcasting stays structural: exact matching symbolic/affine/linear expressions may align or broadcast with dimension `1`; runtime equation solving does not implicitly equate different expressions during type inference.
-- Subtraction, division, negative coefficients, nonlinear symbolic products, reshape-style symbolic transforms, and runtime-sized physical IR remain out of scope.
+- Reshape is a verified row-major copy in this phase, not a view: source/target element-count polynomials must be exactly identical and the target may use only symbols already present in the source. Inferred `-1` dimensions, transpose/strided transforms, zero-copy reshape views, and alias-aware view lifetimes remain out of scope.
+- Subtraction, division, negative symbolic coefficients, nonlinear symbolic products, and runtime-sized physical IR remain out of scope.
 - Two- through four-node fused kernels keep the existing chain/tree/chain-tree compatibility spellings. Five- and six-node generic DAG kernels use the fixed `fused_dag` opcode and require first-class `FusedExpression` metadata because their semantics are intentionally not encoded into an expanding opcode name family.
 - Generic DAG fusion remains bounded to adjacent integer binary windows with single-consumer internal values, no later external use, identity internal indexing, compatible shapes/dtypes, and no final-output/leaf alias. Shared internal subexpressions, reassociation, kernel reordering, non-adjacent fusion, floating-point generic DAGs, and windows larger than six binary nodes remain out of scope.
 - `tiny_tensor_compiler.loop_ir.fuse_elementwise()` remains as a compatibility entry point but delegates to the sole topology-driven fusion planner; the former family-specific fusion engine has been retired.
