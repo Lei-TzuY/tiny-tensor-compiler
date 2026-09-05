@@ -127,6 +127,26 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
+    if op.opcode == "sum":
+        if len(op.inputs) != 1:
+            raise RuntimeError("verified sum loop unexpectedly has invalid arity")
+        source = op.inputs[0]
+        source_type = types[source]
+        c_type = _c_type(output_type.dtype)
+        source_ref = _linear_input_ref(source, source_type, layouts[source], "n")
+        lines.extend(
+            [
+                f"        {c_type} sum_value = {_zero_literal(output_type.dtype)};",
+                f"        for (int64_t n = 0; n < {_element_count(source_type)}; ++n) {{",
+                f"            sum_value = (({c_type})sum_value + ({c_type}){source_ref});",
+                "        }",
+                f"        p{op.output}[0] = sum_value;",
+                "    }",
+                "",
+            ]
+        )
+        return lines
+
     if op.opcode == "reshape":
         if len(op.inputs) != 1:
             raise RuntimeError("verified reshape loop unexpectedly has invalid arity")
