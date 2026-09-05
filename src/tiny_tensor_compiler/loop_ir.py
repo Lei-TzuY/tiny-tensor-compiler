@@ -312,7 +312,10 @@ def _verify_fused_expression(
     allocated: dict[int, TensorType],
     output_type: TensorType,
 ) -> None:
-    arity_word = {3: "three", 4: "four", 5: "five"}[expression.input_count]
+    arity_word = {3: "three", 4: "four", 5: "five"}.get(
+        expression.input_count,
+        str(expression.input_count),
+    )
     if (
         len(op.inputs) != expression.input_count
         or len(op.input_maps) != expression.input_count
