@@ -23,7 +23,7 @@ from .c_abi_codegen import generate_c
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
-from .native_abi import NATIVE_ABI_SYMBOL, native_abi_sha256
+from .native_abi import NATIVE_ABI_SYMBOL, append_native_abi_export, native_abi_sha256
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 NativeOutput = np.ndarray | Sequence[np.ndarray] | None
@@ -102,7 +102,7 @@ def compile_native(
 ) -> NativeExecutable:
     """Eagerly compile/load a loop program and return a reusable executable."""
     command = _compiler_command(compiler)
-    source = generate_c(program)
+    source = append_native_abi_export(generate_c(program), native_abi_sha256(program))
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
@@ -127,7 +127,7 @@ def execute_native(
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     outputs = _prepare_native_outputs(program, out, runtime_inputs)
     command = _compiler_command(compiler)
-    source = generate_c(program)
+    source = append_native_abi_export(generate_c(program), native_abi_sha256(program))
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
