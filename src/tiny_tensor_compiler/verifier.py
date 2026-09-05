@@ -20,12 +20,16 @@ class VerificationError(ValueError):
     pass
 
 
+_ALIAS_OPCODES = frozenset({"view", "slice", "reverse", "transpose"})
+
+
 def verify(module: Module) -> None:
     function = module.function
     seen: set[Value] = set()
     all_results: list[Value] = []
     expected_uses: Counter[tuple[Value, Operation, int]] = Counter()
     returns = 0
+    copy_into_count = 0
     next_input_index = 0
 
     for op_index, op in enumerate(function.ops):
@@ -60,6 +64,9 @@ def verify(module: Module) -> None:
             _verify_reverse(op_index, op)
         elif op.opcode == "transpose":
             _verify_transpose(op_index, op)
+        elif op.opcode == "copy_into":
+            copy_into_count += 1
+            _verify_copy_into(op_index, op, function.ops)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -71,6 +78,10 @@ def verify(module: Module) -> None:
     if returns != 1:
         raise VerificationError(
             f"function @{function.name}: expected exactly one return, found {returns}"
+        )
+    if copy_into_count > 1:
+        raise VerificationError(
+            f"function @{function.name}: first writable-alias phase permits at most one copy_into"
         )
 
     actual_uses: Counter[tuple[Value, Operation, int]] = Counter()
@@ -211,6 +222,43 @@ def _verify_transpose(op_index: int, op: Operation) -> None:
         )
 
 
+def _verify_copy_into(
+    op_index: int,
+    op: Operation,
+    operations: list[Operation],
+) -> None:
+    _expect_arity(op_index, op, operands=3, results=1)
+    if op.attrs:
+        _fail(op_index, op, "copy_into does not accept attributes")
+
+    root, target, source = op.operands
+    result = op.results[0]
+    if result.type != root.type:
+        _fail(op_index, op, "copy_into result type must match the owning root type")
+    if target.type != source.type:
+        _fail(op_index, op, "copy_into target and source types must exactly match")
+    if _storage_root(root) is not root:
+        _fail(op_index, op, "copy_into root must be an owning tensor value")
+    producer = root.producer
+    if producer is None or producer.opcode in {"input", "const"}:
+        _fail(op_index, op, "copy_into root must use internal computed storage")
+    if _storage_root(target) is not root:
+        _fail(op_index, op, "copy_into target must alias its owning root")
+    if _storage_root(source) is root:
+        _fail(op_index, op, "copy_into source must use a different storage root")
+
+    if op_index != len(operations) - 2 or operations[-1].opcode != "return":
+        _fail(op_index, op, "copy_into must be the final effect before return")
+    return_op = operations[-1]
+    if result not in return_op.operands:
+        _fail(op_index, op, "copy_into fresh result must be returned")
+    for operand in return_op.operands:
+        if operand is result:
+            continue
+        if _storage_root(operand) is root:
+            _fail(op_index, op, "return contains a stale alias from before copy_into")
+
+
 def _verify_return(op_index: int, op: Operation) -> None:
     if op.results:
         _fail(op_index, op, "return must not produce results")
@@ -218,6 +266,25 @@ def _verify_return(op_index: int, op: Operation) -> None:
         _fail(op_index, op, "return requires at least one operand")
     if op.attrs:
         _fail(op_index, op, "return does not accept attributes")
+
+
+def _storage_root(value: Value) -> Value:
+    current = value
+    seen: set[Value] = set()
+    while True:
+        if current in seen:
+            raise VerificationError("tensor alias cycle detected")
+        seen.add(current)
+        producer = current.producer
+        if producer is None:
+            return current
+        if producer.opcode in _ALIAS_OPCODES:
+            current = producer.operands[0]
+            continue
+        if producer.opcode == "copy_into":
+            current = producer.operands[0]
+            continue
+        return current
 
 
 def _expect_arity(op_index: int, op: Operation, operands: int, results: int) -> None:
