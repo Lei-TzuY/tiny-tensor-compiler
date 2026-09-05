@@ -46,6 +46,12 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
                 np.reshape(operand, op.results[0].type.shape, order="C"),
                 copy=True,
             )
+        elif op.opcode == "view":
+            operand = values[op.operands[0]]
+            viewed = np.reshape(operand, op.results[0].type.shape, order="C")
+            if not np.shares_memory(viewed, operand):
+                raise RuntimeError("verified contiguous view unexpectedly required a copy")
+            values[op.results[0]] = viewed
         elif op.opcode == "return":
             outputs = tuple(np.array(values[operand], copy=True) for operand in op.operands)
             return outputs[0] if len(outputs) == 1 else outputs
