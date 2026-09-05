@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _BINARY_OPCODES = ("add", "mul")
+GENERIC_DAG_OPCODE = "fused_dag"
 
 BINARY_CHAIN_OPCODES = frozenset(
     f"chain_{inner}_{outer}"
@@ -98,6 +99,8 @@ class FusedExpression:
             base = "integer binary-tree"
         elif self.family == "chain-tree":
             base = "integer chain-tree"
+        elif self.family == "generic-dag":
+            base = "integer generic DAG"
         else:
             raise ValueError(f"unknown fused expression family: {self.family}")
         if self.terminal_relu:
@@ -198,6 +201,26 @@ def chain_tree_expression(
     )
 
 
+def generic_dag_expression(
+    input_names: tuple[str, ...],
+    steps: tuple[FusedExprStep, ...],
+    result: str,
+    *,
+    terminal_relu: bool = False,
+) -> FusedExpression:
+    """Build a structured DAG expression whose semantics live entirely in metadata."""
+    binary_steps = sum(step.opcode in _BINARY_OPCODES for step in steps)
+    if binary_steps < 5:
+        raise ValueError("generic DAG expressions require at least five binary steps")
+    return FusedExpression(
+        family="generic-dag",
+        input_names=input_names,
+        steps=steps,
+        result=result,
+        terminal_relu=terminal_relu,
+    )
+
+
 def with_terminal_relu(expression: FusedExpression) -> FusedExpression:
     """Return the canonical terminal-ReLU form of a supported fused expression."""
     if expression.terminal_relu:
@@ -223,11 +246,25 @@ def with_terminal_relu(expression: FusedExpression) -> FusedExpression:
             root.opcode,
             terminal_relu=True,
         )
+    if expression.family == "generic-dag":
+        names = set(expression.input_names)
+        names.update(step.output for step in expression.steps)
+        relu_name = "relu_result"
+        suffix = 0
+        while relu_name in names:
+            suffix += 1
+            relu_name = f"relu_result_{suffix}"
+        return generic_dag_expression(
+            expression.input_names,
+            (*expression.steps, FusedExprStep("relu", relu_name, (expression.result,))),
+            relu_name,
+            terminal_relu=True,
+        )
     raise ValueError(f"terminal ReLU is unsupported for {expression.family}")
 
 
 def encode_fused_opcode(expression: FusedExpression) -> str:
-    """Encode a canonical structured expression using the legacy Loop IR spelling."""
+    """Encode structured semantics at the Loop IR compatibility boundary."""
     if expression.family == "binary-chain":
         binary_steps = expression.steps[:-1] if expression.terminal_relu else expression.steps
         if len(binary_steps) != 2:
@@ -275,6 +312,15 @@ def encode_fused_opcode(expression: FusedExpression) -> str:
             f"chain_tree_{inner.opcode}_{left.opcode}_{right.opcode}_{root.opcode}"
         )
 
+    if expression.family == "generic-dag":
+        generic_dag_expression(
+            expression.input_names,
+            expression.steps,
+            expression.result,
+            terminal_relu=expression.terminal_relu,
+        )
+        return GENERIC_DAG_OPCODE
+
     raise ValueError(f"unknown fused expression family: {expression.family}")
 
 
@@ -310,6 +356,8 @@ def describe_fused_opcode(opcode: str) -> FusedExpression | None:
             root_opcode,
         )
 
+    # Generic DAG semantics cannot be reconstructed from a spelling. The
+    # structured metadata is therefore mandatory for GENERIC_DAG_OPCODE.
     return None
 
 
