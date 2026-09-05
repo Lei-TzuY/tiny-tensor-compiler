@@ -14,6 +14,7 @@ from ..loop_ir import (
     LoopKernel,
     LoopProgram,
     LoopReturn,
+    LoopView,
     fused_expression_for_kernel,
     lower_to_loops,
 )
@@ -57,6 +58,10 @@ def execute_loop(
                 buffers[op.output] = runtime_inputs[op.index]
             else:
                 np.copyto(buffers[op.output], runtime_inputs[op.index])
+            continue
+
+        if isinstance(op, LoopView):
+            buffers[op.output] = buffers[op.source].reshape(op.type.shape)
             continue
 
         if isinstance(op, LoopReturn):
