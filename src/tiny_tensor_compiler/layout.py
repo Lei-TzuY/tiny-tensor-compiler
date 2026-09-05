@@ -16,10 +16,10 @@ class StorageLayout:
         if not isinstance(self.offset, int) or isinstance(self.offset, bool) or self.offset < 0:
             raise ValueError("storage layout offset must be a non-negative integer")
         if any(
-            not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0
+            not isinstance(stride, int) or isinstance(stride, bool) or stride == 0
             for stride in self.strides
         ):
-            raise ValueError("storage layout strides must be positive integers")
+            raise ValueError("storage layout strides must be non-zero integers")
 
     @classmethod
     def contiguous(cls, shape: tuple[int, ...], *, offset: int = 0) -> StorageLayout:
@@ -39,10 +39,14 @@ class StorageLayout:
             if self.offset > storage_elements:
                 raise ValueError("empty storage view offset exceeds storage bounds")
             return
-        maximum = self.offset + sum(
-            (dim - 1) * stride for dim, stride in zip(shape, self.strides, strict=True)
-        )
-        if maximum >= storage_elements:
+
+        minimum = self.offset
+        maximum = self.offset
+        for dim, stride in zip(shape, self.strides, strict=True):
+            span = (dim - 1) * stride
+            minimum += min(0, span)
+            maximum += max(0, span)
+        if minimum < 0 or maximum >= storage_elements:
             raise ValueError("storage layout exceeds backing storage bounds")
 
     def reshaped(self, source_shape: tuple[int, ...], target_shape: tuple[int, ...]) -> StorageLayout:
@@ -69,6 +73,16 @@ class StorageLayout:
         offset = self.offset + start * strides[axis]
         strides[axis] *= step
         return StorageLayout(offset=offset, strides=tuple(strides)), tuple(shape)
+
+    def reversed(self, source_shape: tuple[int, ...], axis: int) -> StorageLayout:
+        _validate_axis(source_shape, axis, operation="reverse")
+        extent = source_shape[axis]
+        strides = list(self.strides)
+        offset = self.offset
+        if extent:
+            offset += (extent - 1) * strides[axis]
+        strides[axis] *= -1
+        return StorageLayout(offset=offset, strides=tuple(strides))
 
     def permuted(
         self,
@@ -117,6 +131,14 @@ def validate_slice_bounds(
     _validate_slice(shape, axis=axis, start=start, stop=stop, step=step)
 
 
+def _validate_axis(shape: tuple[int, ...], axis: int, *, operation: str) -> None:
+    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(shape):
+        raise ValueError(f"{operation} axis is out of range")
+    extent = shape[axis]
+    if not isinstance(extent, int) or isinstance(extent, bool):
+        raise TypeError(f"{operation} axis extent must be concrete")
+
+
 def _validate_slice(
     shape: tuple[int, ...],
     *,
@@ -125,16 +147,13 @@ def _validate_slice(
     stop: int,
     step: int,
 ) -> None:
-    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(shape):
-        raise ValueError("slice axis is out of range")
+    _validate_axis(shape, axis, operation="slice")
     for name, value in (("start", start), ("stop", stop), ("step", step)):
         if not isinstance(value, int) or isinstance(value, bool):
             raise TypeError(f"slice {name} must be an integer")
     if step <= 0:
         raise ValueError("slice step must be a positive integer")
     extent = shape[axis]
-    if not isinstance(extent, int) or isinstance(extent, bool):
-        raise TypeError("slice axis extent must be concrete")
     if start < 0 or stop < 0 or start > stop or stop > extent:
         raise ValueError(
             f"slice bounds must satisfy 0 <= start <= stop <= extent ({extent})"
