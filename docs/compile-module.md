@@ -47,7 +47,7 @@ Borrowed inputs must already be `numpy.ndarray` objects with the exact compiled 
 
 ## Runtime symbolic-shape specialization
 
-`compile_dynamic_module()` is the separate entrypoint for runtime-specialized tensor shapes. Tensor IR may contain one or more named `SymbolicDim` values on arbitrary axes, and may use bounded one-variable affine terms with a positive integer scale and non-negative integer offset:
+`compile_dynamic_module()` is the separate entrypoint for runtime-specialized tensor shapes. Tensor IR supports plain `SymbolicDim`, bounded one-variable `AffineDim` terms, and canonical positive multi-symbol `LinearDim` relations:
 
 ```python
 import numpy as np
@@ -57,41 +57,45 @@ from tiny_tensor_compiler import GraphBuilder, SymbolicDim, compile_dynamic_modu
 B = SymbolicDim("B")
 W = SymbolicDim("W")
 builder = GraphBuilder()
-lhs = builder.input((2 * B + 1, 1), dtype="float32")
-rhs = builder.input((1, 3 * W + 2), dtype="float32")
+lhs = builder.input((B + W, 1), dtype="float32")
+rhs = builder.input((1, 2 * B + W), dtype="float32")
 module = builder.finish((lhs + rhs).relu())
 
 executable = compile_dynamic_module(module)
 result = executable(
     inputs=[
         np.zeros((5, 1), dtype=np.float32),
-        np.ones((1, 8), dtype=np.float32),
+        np.ones((1, 7), dtype=np.float32),
     ]
 )
 ```
 
-The runtime contract solves `2*B+1 = 5` and `3*W+2 = 8`, producing `B=2,W=2`. An affine axis is accepted only when `(runtime_extent - offset)` is non-negative and exactly divisible by the positive scale. A repeated direct or affine occurrence of the same symbol must resolve to the identical integer binding.
+The runtime shape equations are `B+W=5` and `2*B+W=7`, so exact elimination produces `B=2,W=3`. No floating-point approximation is used: the solver operates with exact rational arithmetic and accepts a completed system only when every symbolic dimension has one unique, non-negative integer solution.
 
-The symbolic path does not introduce runtime-sized Buffer IR, Loop IR, C arrays, or variable-length native ABI types. Instead it preserves a strict specialization boundary:
+Direct and one-variable affine behavior remains compatible. A direct `B` axis binds its runtime extent immediately. An affine axis such as `2*B+1` still requires `(runtime_extent - 1)` to be non-negative and exactly divisible by `2`. Those already-known bindings are substituted into any relational equations before exact elimination. Redundant relational equations are checked again against the final binding, so contradictory constraints cannot be ignored merely because enough earlier axes already determined the symbols.
+
+The symbolic path still does not introduce runtime-sized Buffer IR, Loop IR, C arrays, or variable-length native ABI types. It preserves one strict specialization boundary:
 
 ```text
-symbolic / affine tensor Module
+symbolic / affine / linear tensor Module
 -> tensor IR verification
 -> exact runtime input rank/static-axis/dtype validation
--> solve every named symbol from direct or affine runtime input axes
--> clone tensor IR and evaluate all symbolic/affine terms to concrete integers
+-> collect direct bindings and multi-symbol linear equations
+-> exact rational elimination for the remaining symbols
+-> require a unique non-negative integer binding for every symbol
+-> clone tensor IR and evaluate every symbolic expression to concrete integers
 -> reverify the concrete tensor Module
 -> ordinary compile_module() pipeline
 -> NativeExecutable cached by the complete binding tuple
 ```
 
-Symbolic broadcasting remains conservative. The same `SymbolicDim` may broadcast with itself or dimension `1`, and structurally identical affine terms may align with one another. Distinct symbols are not implicitly unified, and a direct `B` aligned against `2*B` is not treated as conditionally equal for selected runtime values. This keeps type inference deterministic before specialization.
+An inconsistent system is rejected. A rank-deficient/underdetermined system is rejected rather than choosing an arbitrary solution. A unique fractional or negative solution is also rejected because tensor extents are non-negative integers. Coefficients in `LinearDim` are positive integers and the constant offset is non-negative; subtraction, division, negative coefficients, and nonlinear symbolic products are deliberately outside this bounded solver.
 
-`bind_dynamic_shapes(module, inputs)` exposes the same runtime-binding validation and returns the complete `{SymbolicDim: int}` mapping. `DynamicExecutable.symbolic_dims` reports the deterministic symbol order, `cached_bindings` reports the concrete binding tuples already compiled, and `specialize({...})` accepts either `SymbolicDim` or string keys. For a one-symbol executable, the existing convenience surface remains compatible: `symbolic_dim`, integer `specialize(2)`, and `cached_batch_sizes` still work. Those single-symbol convenience properties deliberately reject multi-symbol executables rather than returning ambiguous data.
+Symbolic broadcasting remains conservative and structural. The same `SymbolicDim`, identical `AffineDim`, or identical `LinearDim` expressions may align with one another, and any symbolic expression may broadcast with concrete dimension `1`. Different expressions are not conditionally unified by the runtime solver during type inference. For example, `B+W` and `2*B+W` remain different dimensions even if a particular runtime binding could make their concrete values equal.
 
-`DynamicExecutable` deep-clones the symbolic module when it is created, including constant payloads. Later caller mutation of the original `Module` therefore cannot make existing and future specializations represent different programs. Each distinct complete binding lazily creates one ordinary `NativeExecutable`; repeated calls with the same binding reuse that specialization. `cache_dir=` and `borrow_inputs=True` are forwarded into every specialization, so persistent native caching, multi-output execution, and verified zero-copy inputs remain available. Zero-valued symbolic dimensions are valid when the affine expression evaluates to a legal zero extent, such as `2*B` with `B=0`.
+`bind_dynamic_shapes(module, inputs)` exposes the same runtime solving and returns the complete `{SymbolicDim: int}` mapping. `DynamicExecutable.symbolic_dims` reports deterministic symbol order, `cached_bindings` reports concrete binding tuples already compiled, and `specialize({...})` accepts either `SymbolicDim` or string keys. For a one-symbol executable, the existing convenience surface remains compatible: `symbolic_dim`, integer `specialize(2)`, and `cached_batch_sizes` still work. Those single-symbol convenience properties deliberately reject multi-symbol executables rather than returning ambiguous data.
 
-The current affine contract is intentionally bounded: each expression contains exactly one named symbol, a strictly positive integer scale, and a non-negative integer offset. Multi-variable expressions, subtraction, division, implicit equality solving between distinct symbols, reshape-style symbolic transforms, and runtime-sized physical buffers are not claimed.
+`DynamicExecutable` deep-clones the symbolic module when it is created, including constant payloads. Later caller mutation of the original `Module` therefore cannot make existing and future specializations represent different programs. Each distinct complete binding lazily creates one ordinary `NativeExecutable`; repeated calls with the same binding reuse that specialization. `cache_dir=` and `borrow_inputs=True` are forwarded into every specialization, so persistent native caching, multi-output execution, and verified zero-copy inputs remain available. Zero-valued relational solutions are valid when the full-rank system uniquely determines them, such as `B+W=0` and `B+2*W=0`, which resolve to `B=0,W=0`.
 
 ## Outputs
 
