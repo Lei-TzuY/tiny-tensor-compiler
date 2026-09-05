@@ -97,6 +97,10 @@ class BorrowedLoopProgram:
         return self.program.value_types
 
     @property
+    def value_layouts(self):
+        return self.program.value_layouts
+
+    @property
     def input_types(self) -> InputTypeContract:
         types = tuple(self.program.input_types)
         return InputTypeContract(types=types, borrow_mask=(True,) * len(types))
@@ -179,6 +183,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
                     output=op.output + split_count,
                     source=remap_handle(op.source),
                     type=op.type,
+                    layout=op.layout,
                 )
             )
             continue
