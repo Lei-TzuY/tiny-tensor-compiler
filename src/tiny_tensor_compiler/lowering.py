@@ -453,6 +453,11 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
     allocated: dict[int, TensorType] = {}
     written: set[int] = set()
     alias_sources: dict[int, int] = {}
+    roots: dict[int, int] = {}
+    root_generations: dict[int, int] = {}
+    value_generations: dict[int, int] = {}
+    full_root_handles: set[int] = set()
+    input_roots: set[int] = set()
     next_input_index = 0
     saw_return = False
 
@@ -465,6 +470,15 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             seen.add(current)
             current = alias_sources[current]
         return current
+
+    def require_fresh(buffer: int) -> None:
+        root = roots.get(buffer)
+        if root is None:
+            raise ValueError(f"buffer b{buffer} has no storage-generation metadata")
+        if value_generations.get(buffer) != root_generations[root]:
+            raise ValueError(
+                f"stale buffer view/alias b{buffer} refers to an older storage generation"
+            )
 
     for index, op in enumerate(operations):
         if saw_return and not isinstance(op, BufferReturn):
@@ -488,6 +502,11 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                     f"input index {op.index} is not the next dense input index {next_input_index}"
                 )
             next_input_index += 1
+            roots[op.output] = op.output
+            root_generations[op.output] = 1
+            value_generations[op.output] = 1
+            full_root_handles.add(op.output)
+            input_roots.add(op.output)
             written.add(op.output)
             continue
 
@@ -498,6 +517,7 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 raise ValueError(f"buffer b{op.output} is written more than once")
             if op.source not in written:
                 raise ValueError(f"buffer b{op.source} is viewed before being written")
+            require_fresh(op.source)
             mode_count = sum(
                 transform is not None
                 for transform in (op.slice_axis, op.reverse_axis, op.permutation)
@@ -522,6 +542,8 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             if expected != output_type:
                 raise ValueError("buffer view output type does not match inference")
             alias_sources[op.output] = op.source
+            roots[op.output] = roots[op.source]
+            value_generations[op.output] = value_generations[op.source]
             written.add(op.output)
             continue
 
@@ -534,17 +556,27 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             for buffer in (op.root, op.target, op.source):
                 if buffer not in written:
                     raise ValueError(f"copy_into reads b{buffer} before it is written")
-            if root_virtual(op.root) != op.root:
-                raise ValueError("copy_into root must be an owning buffer")
-            if root_virtual(op.target) != op.root:
-                raise ValueError("copy_into target must alias its owning root")
-            if root_virtual(op.source) == op.root:
+                require_fresh(buffer)
+            owner = roots[op.root]
+            if op.root not in full_root_handles:
+                raise ValueError("copy_into root must be a fresh full-root buffer handle")
+            if owner in input_roots:
+                raise ValueError("copy_into root must use internal computed storage")
+            if roots[op.target] != owner:
+                raise ValueError("copy_into target must alias its owning root storage")
+            if roots[op.source] == owner:
                 raise ValueError("copy_into source must use a different storage root")
+            if allocated[op.root] != allocated[owner]:
+                raise ValueError("copy_into root handle type must match owning storage")
             if allocated[op.output] != allocated[op.root]:
-                raise ValueError("copy_into result type must match its root type")
+                raise ValueError("copy_into result type must match its root handle type")
             if allocated[op.target] != allocated[op.source]:
                 raise ValueError("copy_into target and source types must exactly match")
             alias_sources[op.output] = op.root
+            root_generations[owner] += 1
+            roots[op.output] = owner
+            value_generations[op.output] = root_generations[owner]
+            full_root_handles.add(op.output)
             written.add(op.output)
             continue
 
@@ -558,6 +590,7 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                     raise ValueError(f"buffer b{buffer} is not allocated")
                 if buffer not in written:
                     raise ValueError(f"buffer b{buffer} is read before being written")
+                require_fresh(buffer)
 
             output_type = allocated[op.output]
             if op.opcode == "const":
@@ -591,6 +624,10 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             else:
                 raise ValueError(f"unsupported buffer kernel: {op.opcode}")
 
+            roots[op.output] = op.output
+            root_generations[op.output] = 1
+            value_generations[op.output] = 1
+            full_root_handles.add(op.output)
             written.add(op.output)
             continue
 
@@ -600,6 +637,7 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
             raise ValueError(f"buffer b{op.buffer} is not allocated")
         if op.buffer not in written:
             raise ValueError(f"buffer b{op.buffer} is returned before being written")
+        require_fresh(op.buffer)
         saw_return = True
 
     if not saw_return:
