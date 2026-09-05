@@ -110,11 +110,13 @@ class LoopProgram:
     @property
     def value_types(self) -> dict[int, TensorType]:
         types = {alloc.buffer: alloc.type for alloc in self.allocations}
-        for op in self.operations:
-            if isinstance(op, LoopView):
-                types[op.output] = op.type
-            elif isinstance(op, LoopCopyInto):
-                types[op.output] = op.type
+        types.update(
+            {
+                op.output: op.type
+                for op in self.operations
+                if isinstance(op, (LoopView, LoopCopyInto))
+            }
+        )
         return types
 
     @property
