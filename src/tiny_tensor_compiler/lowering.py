@@ -43,6 +43,14 @@ class BufferView:
 
 
 @dataclass(frozen=True)
+class BufferCopyInto:
+    output: int
+    root: int
+    target: int
+    source: int
+
+
+@dataclass(frozen=True)
 class BufferKernel:
     opcode: str
     output: int
@@ -55,7 +63,7 @@ class BufferReturn:
     buffer: int
 
 
-BufferOperation = BufferAlloc | BufferInput | BufferView | BufferKernel | BufferReturn
+BufferOperation = BufferAlloc | BufferInput | BufferView | BufferCopyInto | BufferKernel | BufferReturn
 
 
 @dataclass(frozen=True)
@@ -171,6 +179,10 @@ class CPUProgram:
         return tuple(op for op in self.operations if isinstance(op, BufferView))
 
     @property
+    def copies(self) -> tuple[BufferCopyInto, ...]:
+        return tuple(op for op in self.operations if isinstance(op, BufferCopyInto))
+
+    @property
     def instructions(self) -> tuple[BufferKernel, ...]:
         """Compatibility view containing only executable kernel operations."""
         return tuple(op for op in self.operations if isinstance(op, BufferKernel))
@@ -212,6 +224,10 @@ class CPUProgram:
                         f"b{op.output} = slice b{op.source} axis={op.slice_axis} "
                         f"[{op.start}:{op.stop}:{op.step}]"
                     )
+            elif isinstance(op, BufferCopyInto):
+                lines.append(
+                    f"b{op.output} = copy_into root=b{op.root} target=b{op.target} source=b{op.source}"
+                )
             elif isinstance(op, BufferKernel):
                 if op.opcode == "const":
                     if op.literal is None:
@@ -278,6 +294,16 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 )
             )
             continue
+        if op.opcode == "copy_into":
+            operations.append(
+                BufferCopyInto(
+                    output=buffer,
+                    root=buffers[op.operands[0]],
+                    target=buffers[op.operands[1]],
+                    source=buffers[op.operands[2]],
+                )
+            )
+            continue
 
         literal = None
         if op.opcode == "const":
@@ -300,7 +326,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
     allocation_positions: dict[int, int] = {}
     types: dict[int, TensorType] = {}
     last_uses: dict[int, int] = {}
-    view_sources: dict[int, int] = {}
+    alias_sources: dict[int, int] = {}
 
     for index, op in enumerate(program.operations):
         if isinstance(op, BufferAlloc):
@@ -309,9 +335,13 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         elif isinstance(op, BufferInput):
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
         elif isinstance(op, BufferView):
-            view_sources[op.output] = op.source
+            alias_sources[op.output] = op.source
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
             last_uses[op.source] = max(last_uses.get(op.source, -1), index)
+        elif isinstance(op, BufferCopyInto):
+            alias_sources[op.output] = op.root
+            for buffer in (op.output, op.root, op.target, op.source):
+                last_uses[buffer] = max(last_uses.get(buffer, -1), index)
         elif isinstance(op, BufferKernel):
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
             for buffer in op.inputs:
@@ -322,11 +352,11 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
     def root_virtual(buffer: int) -> int:
         seen: set[int] = set()
         current = buffer
-        while current in view_sources:
+        while current in alias_sources:
             if current in seen:
                 raise ValueError("buffer view alias cycle detected")
             seen.add(current)
-            current = view_sources[current]
+            current = alias_sources[current]
         return current
 
     for buffer, last_use in tuple(last_uses.items()):
@@ -337,7 +367,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
     assignments: list[BufferAssignment] = []
 
     for buffer, start in allocation_positions.items():
-        if buffer in view_sources:
+        if buffer in alias_sources:
             continue
         buffer_type = types[buffer]
         end = max(start, last_uses.get(buffer, start))
@@ -357,9 +387,9 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         assignments.append(BufferAssignment(buffer, physical, buffer_type))
 
     layouts: dict[int, StorageLayout] = {}
-    view_outputs = set(view_sources)
+    alias_outputs = set(alias_sources)
     for op in program.operations:
-        if isinstance(op, BufferAlloc) and op.buffer not in view_outputs:
+        if isinstance(op, BufferAlloc) and op.buffer not in alias_outputs:
             layouts[op.buffer] = StorageLayout.contiguous(op.type.shape)
         elif isinstance(op, BufferView):
             source_layout = layouts[op.source]
@@ -388,23 +418,31 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
                 if inferred_shape != output_type.shape:
                     raise ValueError("buffer slice layout shape does not match inferred output")
             layouts[op.output] = layout
+        elif isinstance(op, BufferCopyInto):
+            layouts[op.output] = layouts[op.root]
 
     assignment_by_virtual = {assignment.virtual: assignment for assignment in assignments}
     aliases: list[BufferAlias] = []
     for op in program.operations:
-        if not isinstance(op, BufferView):
+        if isinstance(op, BufferView):
+            source = op.source
+            output = op.output
+        elif isinstance(op, BufferCopyInto):
+            source = op.root
+            output = op.output
+        else:
             continue
-        root = root_virtual(op.output)
+        root = root_virtual(output)
         root_assignment = assignment_by_virtual.get(root)
         if root_assignment is None:
             raise ValueError(f"view root b{root} has no physical storage assignment")
         aliases.append(
             BufferAlias(
-                virtual=op.output,
-                source=op.source,
+                virtual=output,
+                source=source,
                 physical=root_assignment.physical,
-                type=types[op.output],
-                layout=layouts[op.output],
+                type=types[output],
+                layout=layouts[output],
             )
         )
 
@@ -414,8 +452,19 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
 def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
     allocated: dict[int, TensorType] = {}
     written: set[int] = set()
+    alias_sources: dict[int, int] = {}
     next_input_index = 0
     saw_return = False
+
+    def root_virtual(buffer: int) -> int:
+        seen: set[int] = set()
+        current = buffer
+        while current in alias_sources:
+            if current in seen:
+                raise ValueError("buffer alias cycle detected")
+            seen.add(current)
+            current = alias_sources[current]
+        return current
 
     for index, op in enumerate(operations):
         if saw_return and not isinstance(op, BufferReturn):
@@ -472,6 +521,30 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 )
             if expected != output_type:
                 raise ValueError("buffer view output type does not match inference")
+            alias_sources[op.output] = op.source
+            written.add(op.output)
+            continue
+
+        if isinstance(op, BufferCopyInto):
+            for buffer in (op.output, op.root, op.target, op.source):
+                if buffer not in allocated:
+                    raise ValueError("copy_into requires allocated logical buffer values")
+            if op.output in written:
+                raise ValueError(f"buffer b{op.output} is written more than once")
+            for buffer in (op.root, op.target, op.source):
+                if buffer not in written:
+                    raise ValueError(f"copy_into reads b{buffer} before it is written")
+            if root_virtual(op.root) != op.root:
+                raise ValueError("copy_into root must be an owning buffer")
+            if root_virtual(op.target) != op.root:
+                raise ValueError("copy_into target must alias its owning root")
+            if root_virtual(op.source) == op.root:
+                raise ValueError("copy_into source must use a different storage root")
+            if allocated[op.output] != allocated[op.root]:
+                raise ValueError("copy_into result type must match its root type")
+            if allocated[op.target] != allocated[op.source]:
+                raise ValueError("copy_into target and source types must exactly match")
+            alias_sources[op.output] = op.root
             written.add(op.output)
             continue
 
