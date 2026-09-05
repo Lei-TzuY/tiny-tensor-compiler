@@ -31,6 +31,9 @@ All notable project milestones are recorded here.
 - First-class `Tensor.reshape(shape)` with exact dtype preservation and verified C-order copy semantics through tensor IR, Buffer IR, Loop IR, reference/CPU execution, generated C, native execution, and opt-in OpenMP scheduling.
 - Exact symbolic reshape element-count proofs using canonical shape polynomials over integer, `SymbolicDim`, `AffineDim`, and `LinearDim` extents; targets may not introduce previously unbound symbols.
 - Reshape integration with existing pure-operation DCE/CSE, including explicit fusion-boundary, zero-extent, borrowed-input, multi-output, and dynamic-specialization regression coverage.
+- First-class read-only contiguous `LoopView` aliases that give logical tensors independent shapes while resolving to one verified physical storage root.
+- Alias-lifetime verification that rejects writes to a storage root while any dependent view is live, while still permitting normal physical-slot reuse after the view's final use.
+- Conservative reshape-copy elision through `alias_contiguous_reshapes()`, with NumPy view execution and typed generated-C pointer aliases across ordinary, borrowed-input, multi-output, dynamic, and OpenMP native paths.
 
 ### Compatibility
 
@@ -40,7 +43,9 @@ All notable project milestones are recorded here.
 - Existing one-symbol dynamic callers retain `bind_dynamic_batch()`, `DynamicExecutable.symbolic_dim`, integer `specialize(size)`, and `cached_batch_sizes`; multi-symbol executables use complete binding mappings instead of ambiguous batch-only values.
 - Plain `SymbolicDim` and one-variable `AffineDim` shapes keep their existing direct runtime-binding behavior. `LinearDim` adds positive-coefficient/non-negative-offset relations across multiple named symbols, but all relations are solved to one complete integer binding before Buffer/Loop IR.
 - Symbolic broadcasting stays structural: exact matching symbolic/affine/linear expressions may align or broadcast with dimension `1`; runtime equation solving does not implicitly equate different expressions during type inference.
-- Reshape is a verified row-major copy in this phase, not a view: source/target element-count polynomials must be exactly identical and the target may use only symbols already present in the source. Inferred `-1` dimensions, transpose/strided transforms, zero-copy reshape views, and alias-aware view lifetimes remain out of scope.
+- Reshape remains value-oriented at the public API. Safe internal reshape copies may now be represented as read-only contiguous alias views, but terminal native outputs are still materialized into caller-owned arrays and no caller-visible aliased-output contract is introduced.
+- Contiguous alias views require identical dtype and element count, zero storage offset, and one stable source storage root through the view's final use. Write-through views, arbitrary strides, transpose/slicing, non-contiguous views, inferred `-1` dimensions, and runtime-sized physical IR remain out of scope.
+- The alias-view rewrite eliminates verified reshape data movement but intentionally does not claim physical-allocation-count reduction or wall-clock speedup; the previously planned destination allocation may remain unused in this phase.
 - Subtraction, division, negative symbolic coefficients, nonlinear symbolic products, and runtime-sized physical IR remain out of scope.
 - Two- through four-node fused kernels keep the existing chain/tree/chain-tree compatibility spellings. Five- and six-node generic DAG kernels use the fixed `fused_dag` opcode and require first-class `FusedExpression` metadata because their semantics are intentionally not encoded into an expanding opcode name family.
 - Generic DAG fusion remains bounded to adjacent integer binary windows with single-consumer internal values, no later external use, identity internal indexing, compatible shapes/dtypes, and no final-output/leaf alias. Shared internal subexpressions, reassociation, kernel reordering, non-adjacent fusion, floating-point generic DAGs, and windows larger than six binary nodes remain out of scope.
