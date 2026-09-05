@@ -23,7 +23,6 @@ from .loop_ir import lower_to_loops
 from .lowering import lower_to_cpu
 from .native_bundle import (
     NativeBundleExecutable,
-    NativeBundleError,
     compile_native_bundle,
     load_native_bundle,
 )
