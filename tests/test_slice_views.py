@@ -56,6 +56,13 @@ def test_slice_layout_tracks_absolute_offset_positive_strides_and_no_allocation(
     assert loops.value_layouts[view.output] == view.layout
 
 
+def test_empty_contiguous_layout_keeps_strides_positive():
+    layout = StorageLayout.contiguous((3, 0))
+
+    assert layout.strides == (1, 1)
+    layout.validate_bounds((3, 0), storage_elements=0)
+
+
 def test_slice_rejects_invalid_bounds_step_and_symbolic_sliced_axis():
     builder = GraphBuilder()
     value = builder.input((3, 6), dtype="float32")
