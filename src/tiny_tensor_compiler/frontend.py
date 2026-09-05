@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape
+from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape, infer_slice
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 
@@ -38,6 +38,16 @@ class Tensor:
 
     def view(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.view(self, shape)
+
+    def slice(
+        self,
+        *,
+        axis: int,
+        start: int = 0,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> Tensor:
+        return self._builder.slice(self, axis=axis, start=start, stop=stop, step=step)
 
 
 class GraphBuilder:
@@ -119,6 +129,43 @@ class GraphBuilder:
             "view",
             operands=[tensor.value],
             result_types=[result_type],
+        )
+        return Tensor(self, op.results[0])
+
+    def slice(
+        self,
+        tensor: Tensor,
+        *,
+        axis: int,
+        start: int = 0,
+        stop: int | None = None,
+        step: int = 1,
+    ) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(tensor.type.shape):
+            raise TypeInferenceError("slice axis is out of range")
+        extent = tensor.type.shape[axis]
+        if not isinstance(extent, int) or isinstance(extent, bool):
+            raise TypeInferenceError("slice axis extent must be concrete before slicing")
+        normalized_stop = extent if stop is None else stop
+        result_type = infer_slice(
+            tensor.type,
+            axis=axis,
+            start=start,
+            stop=normalized_stop,
+            step=step,
+        )
+        op = self.function.add_op(
+            "slice",
+            operands=[tensor.value],
+            result_types=[result_type],
+            attrs={
+                "axis": axis,
+                "start": start,
+                "stop": normalized_stop,
+                "step": step,
+            },
         )
         return Tensor(self, op.results[0])
 
