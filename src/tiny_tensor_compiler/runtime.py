@@ -62,6 +62,12 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             if viewed.size and not np.shares_memory(viewed, operand):
                 raise RuntimeError("verified positive-stride slice unexpectedly required a copy")
             values[op.results[0]] = viewed
+        elif op.opcode == "reverse":
+            operand = values[op.operands[0]]
+            viewed = np.flip(operand, axis=op.attrs["axis"])
+            if viewed.size and not np.shares_memory(viewed, operand):
+                raise RuntimeError("verified reverse unexpectedly required a copy")
+            values[op.results[0]] = viewed
         elif op.opcode == "transpose":
             operand = values[op.operands[0]]
             viewed = np.transpose(operand, axes=op.attrs["axes"])
