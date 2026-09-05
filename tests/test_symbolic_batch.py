@@ -146,6 +146,23 @@ def test_static_compile_entrypoint_rejects_unspecialized_symbolic_ir():
         compile_module(module)
 
 
+def test_dynamic_executable_freezes_caller_owned_module_before_specialization():
+    _default_compiler_or_skip()
+    batch = SymbolicDim("B")
+    builder = GraphBuilder()
+    values = builder.input((batch, 2), dtype="float32")
+    module = builder.finish(values * 2)
+    executable = compile_dynamic_module(module)
+
+    const_op = next(op for op in module.function.ops if op.opcode == "const")
+    const_op.attrs["value"] = np.array(9, dtype=np.float32)
+    verify(module)
+
+    runtime_values = np.array([[1.0, -3.0], [4.0, 2.0]], dtype=np.float32)
+    actual = executable(inputs=[runtime_values])
+    np.testing.assert_array_equal(actual, runtime_values * np.float32(2))
+
+
 def test_dynamic_native_execution_reuses_each_batch_specialization():
     _default_compiler_or_skip()
     _, module = _symbolic_relu_module()
