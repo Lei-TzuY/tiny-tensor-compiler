@@ -8,8 +8,9 @@ from .c_codegen import (
     _storage_size,
 )
 from .input_binding import BorrowedLoopProgram
-from .loop_ir import LoopAlloc, LoopInput, LoopProgram, LoopReturn, LoopView
+from .loop_ir import LoopAlloc, LoopCopyInto, LoopInput, LoopProgram, LoopReturn, LoopView
 from .parallel_codegen import emit_parallel_kernel
+from .write_codegen import emit_copy_into
 
 
 def generate_c(
@@ -94,6 +95,9 @@ def generate_c(
             pointer = f"p{root}" if offset == 0 else f"p{root} + {offset}"
             lines.append(f"    const {_c_type(op.type.dtype)} *p{op.output} = {pointer};")
             lines.append("")
+            continue
+        if isinstance(op, LoopCopyInto):
+            lines.extend(emit_copy_into(op, types, layouts))
             continue
         if isinstance(op, LoopReturn):
             lines.extend(
