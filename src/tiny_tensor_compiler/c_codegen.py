@@ -222,7 +222,7 @@ def _emit_kernel(
             lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
         else:
             lines.append(
-                f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail};"
+                f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
             )
     elif op.opcode in _BINARY_TREE_OPERATORS or op.opcode in _RELU_BINARY_TREE_OPCODES:
         left_lhs = input_ref(0)
