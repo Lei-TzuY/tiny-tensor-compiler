@@ -28,8 +28,10 @@ def verify(module: Module) -> None:
     seen: set[Value] = set()
     all_results: list[Value] = []
     expected_uses: Counter[tuple[Value, Operation, int]] = Counter()
+    storage_roots: dict[Value, Value] = {}
+    root_generations: dict[Value, int] = {}
+    value_generations: dict[Value, int] = {}
     returns = 0
-    copy_into_count = 0
     next_input_index = 0
 
     for op_index, op in enumerate(function.ops):
@@ -38,6 +40,14 @@ def verify(module: Module) -> None:
         for operand_index, operand in enumerate(op.operands):
             if operand not in seen:
                 _fail(op_index, op, f"operand {operand_index} is not defined before use")
+            _verify_fresh_tensor_value(
+                op_index,
+                op,
+                operand,
+                storage_roots,
+                root_generations,
+                value_generations,
+            )
             expected_uses[(operand, op, operand_index)] += 1
         for result_index, result in enumerate(op.results):
             if result.producer is not op or result.result_index != result_index:
@@ -65,8 +75,7 @@ def verify(module: Module) -> None:
         elif op.opcode == "transpose":
             _verify_transpose(op_index, op)
         elif op.opcode == "copy_into":
-            copy_into_count += 1
-            _verify_copy_into(op_index, op, function.ops)
+            _verify_copy_into(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -75,13 +84,16 @@ def verify(module: Module) -> None:
         else:
             _fail(op_index, op, f"unknown opcode {op.opcode!r}")
 
+        _record_storage_generation(
+            op,
+            storage_roots,
+            root_generations,
+            value_generations,
+        )
+
     if returns != 1:
         raise VerificationError(
             f"function @{function.name}: expected exactly one return, found {returns}"
-        )
-    if copy_into_count > 1:
-        raise VerificationError(
-            f"function @{function.name}: first writable-alias phase permits at most one copy_into"
         )
 
     actual_uses: Counter[tuple[Value, Operation, int]] = Counter()
@@ -222,41 +234,27 @@ def _verify_transpose(op_index: int, op: Operation) -> None:
         )
 
 
-def _verify_copy_into(
-    op_index: int,
-    op: Operation,
-    operations: list[Operation],
-) -> None:
+def _verify_copy_into(op_index: int, op: Operation) -> None:
     _expect_arity(op_index, op, operands=3, results=1)
     if op.attrs:
         _fail(op_index, op, "copy_into does not accept attributes")
 
     root, target, source = op.operands
     result = op.results[0]
+    owner = _storage_root(root)
     if result.type != root.type:
-        _fail(op_index, op, "copy_into result type must match the owning root type")
+        _fail(op_index, op, "copy_into result type must match the current root handle type")
     if target.type != source.type:
         _fail(op_index, op, "copy_into target and source types must exactly match")
-    if _storage_root(root) is not root:
-        _fail(op_index, op, "copy_into root must be an owning tensor value")
-    producer = root.producer
+    if not _is_full_root_handle(root):
+        _fail(op_index, op, "copy_into root must be an owning value or fresh full-root result")
+    producer = owner.producer
     if producer is None or producer.opcode in {"input", "const"}:
         _fail(op_index, op, "copy_into root must use internal computed storage")
-    if _storage_root(target) is not root:
-        _fail(op_index, op, "copy_into target must alias its owning root")
-    if _storage_root(source) is root:
+    if _storage_root(target) is not owner:
+        _fail(op_index, op, "copy_into target must alias its owning root storage")
+    if _storage_root(source) is owner:
         _fail(op_index, op, "copy_into source must use a different storage root")
-
-    if op_index != len(operations) - 2 or operations[-1].opcode != "return":
-        _fail(op_index, op, "copy_into must be the final effect before return")
-    return_op = operations[-1]
-    if result not in return_op.operands:
-        _fail(op_index, op, "copy_into fresh result must be returned")
-    for operand in return_op.operands:
-        if operand is result:
-            continue
-        if _storage_root(operand) is root:
-            _fail(op_index, op, "return contains a stale alias from before copy_into")
 
 
 def _verify_return(op_index: int, op: Operation) -> None:
@@ -266,6 +264,65 @@ def _verify_return(op_index: int, op: Operation) -> None:
         _fail(op_index, op, "return requires at least one operand")
     if op.attrs:
         _fail(op_index, op, "return does not accept attributes")
+
+
+def _record_storage_generation(
+    op: Operation,
+    storage_roots: dict[Value, Value],
+    root_generations: dict[Value, int],
+    value_generations: dict[Value, int],
+) -> None:
+    if not op.results:
+        return
+    result = op.results[0]
+    if op.opcode in _ALIAS_OPCODES:
+        source = op.operands[0]
+        root = storage_roots[source]
+        storage_roots[result] = root
+        value_generations[result] = value_generations[source]
+        return
+    if op.opcode == "copy_into":
+        root = storage_roots[op.operands[0]]
+        root_generations[root] += 1
+        storage_roots[result] = root
+        value_generations[result] = root_generations[root]
+        return
+
+    storage_roots[result] = result
+    root_generations[result] = 0
+    value_generations[result] = 0
+
+
+def _verify_fresh_tensor_value(
+    op_index: int,
+    op: Operation,
+    value: Value,
+    storage_roots: dict[Value, Value],
+    root_generations: dict[Value, int],
+    value_generations: dict[Value, int],
+) -> None:
+    root = storage_roots.get(value)
+    if root is None:
+        _fail(op_index, op, "operand has no storage-generation metadata")
+    if value_generations.get(value) != root_generations[root]:
+        _fail(
+            op_index,
+            op,
+            "stale tensor view/alias refers to an older storage generation",
+        )
+
+
+def _is_full_root_handle(value: Value) -> bool:
+    owner = _storage_root(value)
+    if value is owner:
+        return True
+    producer = value.producer
+    return (
+        producer is not None
+        and producer.opcode == "copy_into"
+        and producer.results[0] is value
+        and value.type == owner.type
+    )
 
 
 def _storage_root(value: Value) -> Value:
