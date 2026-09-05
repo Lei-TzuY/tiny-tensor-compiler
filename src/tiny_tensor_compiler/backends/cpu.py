@@ -14,6 +14,7 @@ from ..loop_ir import (
     LoopInput,
     LoopKernel,
     LoopProgram,
+    LoopReluInto,
     LoopReturn,
     LoopView,
     fused_expression_for_kernel,
@@ -81,6 +82,12 @@ def execute_loop(
 
         if isinstance(op, LoopCopyInto):
             np.copyto(buffers[op.target], buffers[op.source])
+            buffers[op.output] = buffers[op.root]
+            continue
+
+        if isinstance(op, LoopReluInto):
+            target = buffers[op.target]
+            np.maximum(target, np.array(0, dtype=target.dtype), out=target)
             buffers[op.output] = buffers[op.root]
             continue
 
