@@ -15,13 +15,34 @@ from .loop_ir import (
 )
 
 _BINARY_OPCODES = {"add", "mul"}
-_MAX_BINARY_NODES = 4
+_MAX_BINARY_NODES = 6
+_MAX_GENERIC_INPUTS = 7
+
+
+@dataclass(frozen=True)
+class _FusionCost:
+    """Static materialization cost used only to rank already-legal candidates."""
+
+    eliminated_intermediates: int
+    external_inputs: int
+    binary_steps: int
+
+    @property
+    def rank(self) -> tuple[int, int, int]:
+        # Prefer eliminating more intermediate materializations, then a smaller
+        # external-input footprint, then the larger coherent binary window.
+        return (
+            self.eliminated_intermediates,
+            -self.external_inputs,
+            self.binary_steps,
+        )
 
 
 @dataclass(frozen=True)
 class _BinaryFusionPlan:
     consumed: int
     kernel: LoopKernel
+    cost: _FusionCost
 
 
 def fuse_elementwise(program: LoopProgram) -> LoopProgram:
@@ -72,11 +93,23 @@ def _plan_binary_subgraph(
             break
         max_length += 1
 
-    for length in range(max_length, 1, -1):
+    candidates: list[_BinaryFusionPlan] = []
+    for length in range(2, max_length + 1):
         kernel = _plan_binary_window(operations, start_index, length, types)
-        if kernel is not None:
-            return _BinaryFusionPlan(length, kernel)
-    return None
+        if kernel is None:
+            continue
+        cost = _FusionCost(
+            eliminated_intermediates=length - 1,
+            external_inputs=len(kernel.inputs),
+            binary_steps=length,
+        )
+        if kernel.opcode == fused_expr.GENERIC_DAG_OPCODE and cost.external_inputs > _MAX_GENERIC_INPUTS:
+            continue
+        candidates.append(_BinaryFusionPlan(length, kernel, cost))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate.cost.rank)
 
 
 def _plan_binary_window(
@@ -140,6 +173,8 @@ def _plan_binary_window(
         return None
 
     classified = _classify_supported_topology(kernels, tuple(edges))
+    if classified is None and length >= 5:
+        classified = _build_generic_dag(kernels, tuple(edges))
     if classified is None:
         return None
     expression, fused_inputs, fused_maps = classified
@@ -174,6 +209,56 @@ def _classify_supported_topology(
     if len(kernels) == 4:
         return _classify_chain_tree(kernels, edges)
     return None
+
+
+def _build_generic_dag(
+    kernels: tuple[LoopKernel, ...],
+    edges: tuple[tuple[int | None, int | None], ...],
+) -> tuple[
+    fused_expr.FusedExpression,
+    tuple[int, ...],
+    tuple[IndexMap, ...],
+]:
+    input_names: list[str] = []
+    fused_inputs: list[int] = []
+    fused_maps: list[IndexMap] = []
+    external_names: dict[tuple[int, IndexMap], str] = {}
+    value_names: dict[int, str] = {}
+    steps: list[fused_expr.FusedExprStep] = []
+
+    for node_index, kernel in enumerate(kernels):
+        step_inputs: list[str] = []
+        for slot, producer_index in enumerate(edges[node_index]):
+            if producer_index is not None:
+                step_inputs.append(value_names[producer_index])
+                continue
+
+            key = (kernel.inputs[slot], kernel.input_maps[slot])
+            name = external_names.get(key)
+            if name is None:
+                name = f"arg{len(input_names)}"
+                external_names[key] = name
+                input_names.append(name)
+                fused_inputs.append(kernel.inputs[slot])
+                fused_maps.append(kernel.input_maps[slot])
+            step_inputs.append(name)
+
+        output_name = f"v{node_index}"
+        value_names[node_index] = output_name
+        steps.append(
+            fused_expr.FusedExprStep(
+                kernel.opcode,
+                output_name,
+                tuple(step_inputs),
+            )
+        )
+
+    expression = fused_expr.generic_dag_expression(
+        tuple(input_names),
+        tuple(steps),
+        value_names[len(kernels) - 1],
+    )
+    return expression, tuple(fused_inputs), tuple(fused_maps)
 
 
 def _classify_binary_chain(
