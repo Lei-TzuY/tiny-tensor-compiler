@@ -12,6 +12,7 @@ from .inference import (
     infer_reshape,
     infer_reverse,
     infer_slice,
+    infer_sum,
     infer_transpose,
 )
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
@@ -42,6 +43,9 @@ class Tensor:
 
     def relu(self) -> Tensor:
         return self._builder.relu(self)
+
+    def sum(self) -> Tensor:
+        return self._builder.sum(self)
 
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.reshape(self, shape)
@@ -127,6 +131,15 @@ class GraphBuilder:
         result_type = infer_relu(tensor.type)
         op = self.function.add_op(
             "relu", operands=[tensor.value], result_types=[result_type]
+        )
+        return Tensor(self, op.results[0])
+
+    def sum(self, tensor: Tensor) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        result_type = infer_sum(tensor.type)
+        op = self.function.add_op(
+            "sum", operands=[tensor.value], result_types=[result_type]
         )
         return Tensor(self, op.results[0])
 

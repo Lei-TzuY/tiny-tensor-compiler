@@ -11,6 +11,7 @@ from .inference import (
     infer_reshape,
     infer_reverse,
     infer_slice,
+    infer_sum,
     infer_transpose,
 )
 from .ir import DType, Module, Operation, TensorType, Value
@@ -66,6 +67,8 @@ def verify(module: Module) -> None:
             _verify_binary(op_index, op)
         elif op.opcode == "relu":
             _verify_relu(op_index, op)
+        elif op.opcode == "sum":
+            _verify_sum(op_index, op)
         elif op.opcode in {"reshape", "view"}:
             _verify_shape_transform(op_index, op)
         elif op.opcode == "slice":
@@ -167,6 +170,22 @@ def _verify_relu(op_index: int, op: Operation) -> None:
             op_index,
             op,
             f"result type {op.results[0].type} does not match operand type {expected_type}",
+        )
+
+
+def _verify_sum(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=1, results=1)
+    if op.attrs:
+        _fail(op_index, op, "sum does not accept attributes")
+    try:
+        expected_type = infer_sum(op.operands[0].type)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if op.results[0].type != expected_type:
+        _fail(
+            op_index,
+            op,
+            f"sum result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 

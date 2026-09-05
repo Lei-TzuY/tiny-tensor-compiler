@@ -27,6 +27,13 @@ def infer_relu(input_type: TensorType) -> TensorType:
     return input_type
 
 
+def infer_sum(input_type: TensorType) -> TensorType:
+    """Infer a deterministic full-tensor sum that preserves the input dtype."""
+    if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
+        raise TypeInferenceError(f"sum requires a numeric tensor, got {input_type.dtype.value}")
+    return TensorType((), input_type.dtype)
+
+
 def infer_reshape(input_type: TensorType, shape: Iterable[ShapeDim]) -> TensorType:
     """Infer a row-major reshape only when element-count equality is provable exactly."""
     try:

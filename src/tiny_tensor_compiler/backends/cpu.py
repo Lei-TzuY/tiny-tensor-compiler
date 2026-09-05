@@ -92,6 +92,14 @@ def execute_loop(
             raise TypeError("unsupported CPU loop operation")
 
         output = buffers[op.output]
+        if op.opcode == "sum":
+            source = buffers[op.inputs[0]]
+            accumulator = output.dtype.type(0)
+            for input_index in np.ndindex(source.shape):
+                accumulator = output.dtype.type(np.add(accumulator, source[input_index]))
+            output[()] = accumulator
+            continue
+
         if op.opcode == "reshape":
             source = buffers[op.inputs[0]]
             np.copyto(output.reshape(-1), source.reshape(-1))
