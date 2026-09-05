@@ -482,11 +482,11 @@ def _release_library(library: ctypes.CDLL) -> None:
 
 
 def _return_types(program: LoopProgram) -> tuple[TensorType, ...]:
-    allocation_types = {allocation.buffer: allocation.type for allocation in program.allocations}
+    types = program.buffer_types
     try:
-        return tuple(allocation_types[slot] for slot in program.return_slots)
+        return tuple(types[slot] for slot in program.return_slots)
     except KeyError as error:
-        raise RuntimeError("verified loop IR return buffer unexpectedly has no allocation") from error
+        raise RuntimeError("verified loop IR return buffer unexpectedly has no type") from error
 
 
 def _library_name() -> str:
