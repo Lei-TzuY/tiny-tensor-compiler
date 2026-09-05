@@ -9,6 +9,7 @@ from .c_codegen import (
 )
 from .input_binding import BorrowedLoopProgram
 from .loop_ir import LoopAlloc, LoopCopyInto, LoopInput, LoopProgram, LoopReturn, LoopView
+from .native_abi import native_abi_sha256
 from .parallel_codegen import emit_parallel_kernel
 from .write_codegen import emit_copy_into
 
@@ -35,6 +36,7 @@ def generate_c(
         f"const {_c_type(input_type.dtype)} *input{index}"
         for index, input_type in enumerate(program.input_types)
     )
+    abi_sha256 = native_abi_sha256(program)
 
     lines = [
         "#include <math.h>",
@@ -62,6 +64,10 @@ def generate_c(
         "#else",
         "#define TINY_TENSOR_VECTORIZE_LOOP",
         "#endif",
+        "",
+        "TINY_TENSOR_EXPORT const char *tiny_tensor_abi_sha256(void) {",
+        f'    return "{abi_sha256}";',
+        "}",
         "",
         f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{",
     ]
