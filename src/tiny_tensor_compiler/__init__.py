@@ -11,6 +11,7 @@ from .fusion_planner import fuse_elementwise
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
 from .ir import AffineDim, LinearDim, SymbolicDim
+from .layout import StorageLayout
 from .loop_ir import (
     IndexMap,
     LoopAlloc,
@@ -83,6 +84,7 @@ __all__ = [
     "MemoryPlan",
     "NativeCompilationError",
     "NativeExecutable",
+    "StorageLayout",
     "SymbolicDim",
     "SymbolicShapeError",
     "Tensor",
