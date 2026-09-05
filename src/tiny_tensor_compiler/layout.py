@@ -70,6 +70,22 @@ class StorageLayout:
         strides[axis] *= step
         return StorageLayout(offset=offset, strides=tuple(strides)), tuple(shape)
 
+    def permuted(
+        self,
+        source_shape: tuple[int, ...],
+        axes: tuple[int, ...],
+    ) -> tuple[StorageLayout, tuple[int, ...]]:
+        normalized = validate_permutation(len(source_shape), axes)
+        if len(self.strides) != len(source_shape):
+            raise ValueError("storage layout rank does not match source shape rank")
+        return (
+            StorageLayout(
+                offset=self.offset,
+                strides=tuple(self.strides[axis] for axis in normalized),
+            ),
+            tuple(source_shape[axis] for axis in normalized),
+        )
+
 
 def contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
     if any(not isinstance(dim, int) or isinstance(dim, bool) or dim < 0 for dim in shape):
@@ -84,6 +100,18 @@ def contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
 
 def element_count(shape: tuple[int, ...]) -> int:
     return reduce(mul, shape, 1)
+
+
+def validate_permutation(rank: int, axes: tuple[int, ...]) -> tuple[int, ...]:
+    if not isinstance(axes, tuple):
+        raise TypeError("permutation axes must be a tuple of integers")
+    if len(axes) != rank:
+        raise ValueError(f"permutation axes must contain exactly {rank} entries")
+    if any(not isinstance(axis, int) or isinstance(axis, bool) for axis in axes):
+        raise TypeError("permutation axes must contain only integers")
+    if set(axes) != set(range(rank)):
+        raise ValueError(f"permutation axes must be a permutation of 0..{rank - 1}")
+    return axes
 
 
 def validate_slice_bounds(
