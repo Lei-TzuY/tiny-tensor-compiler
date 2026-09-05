@@ -17,12 +17,16 @@ All notable project milestones are recorded here.
 - `SymbolicDim` in typed tensor IR plus bounded symbolic broadcasting for one shared runtime batch dimension.
 - `compile_dynamic_module()` and reusable `DynamicExecutable` handles that bind a leading symbolic batch dimension from runtime inputs, clone/reverify a concrete specialization, and cache one `NativeExecutable` per batch size.
 - Dynamic reference execution plus native multi-output and verified borrowed-input coverage across multiple runtime batch sizes, including zero-sized batches.
+- First-class structured fused expressions carried by Loop IR and consumed directly by verification, CPU execution, generated C, and SIMD planning while retaining legacy opcode spelling as a checked compatibility encoding.
+- A bounded topology-driven elementwise fusion planner for two- through four-node integer `add`/`mul` DAGs, with logical-value lifetime checks that remain correct across physical-slot reuse.
+- Fusion of safe mirrored producer order and reversed-root chain-tree layouts without reassociation or expansion of the existing fused opcode families.
 
 ### Compatibility
 
 - Single-output generated C and the existing `out=np.ndarray` native call contract remain unchanged.
 - External inputs still use the historical copied-buffer path by default; zero-copy binding is explicitly selected through `borrow_inputs()` or `compile_module(..., borrow_inputs=True)`.
 - `compile_module()` remains the eager concrete-shape entrypoint. Symbolic tensor IR must use the explicit `compile_dynamic_module()` specialization boundary before physical lowering.
+- `tiny_tensor_compiler.loop_ir.fuse_elementwise()` remains as a compatibility entry point but delegates to the sole topology-driven fusion planner; the former family-specific fusion engine has been retired.
 
 ## [0.1.0] - 2026-09-04
 
