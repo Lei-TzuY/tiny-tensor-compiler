@@ -45,7 +45,7 @@ def _checkpoint(log_private: bytes, release: bytes) -> bytes:
 
 
 def _canonical(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
 
 
 def test_witness_policy_and_quorum_are_deterministic() -> None:
