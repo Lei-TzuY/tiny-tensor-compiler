@@ -16,7 +16,7 @@ All notable project milestones are recorded here.
 - Strict borrowed-input contracts requiring exact NumPy arrays with compiled shape/dtype plus C-contiguous aligned storage, so the zero-copy path never hides a normalization copy.
 - `SymbolicDim` in typed tensor IR plus conservative symbolic broadcasting for named runtime dimensions.
 - `compile_dynamic_module()` and reusable `DynamicExecutable` handles that bind one-or-more symbols on arbitrary axes, clone/reverify a fully concrete specialization, and cache one `NativeExecutable` per complete deterministic binding tuple.
-- `bind_dynamic_shapes()` plus generalized `symbolic_dims` / `cached_bindings` execution metadata while retaining the existing one-symbol `symbolic_dim`, integer `specialize()`, and `cached_batch_sizes` convenience surface.
+- `bind_dynamic_shapes()` plus generalized `symbolic_dims` / `cached_bindings` execution metadata while retaining the existing one-symbol `symbolic_dim`, integer `specialize(size)`, and `cached_batch_sizes` convenience surface.
 - Bounded one-variable `AffineDim` shape terms such as `2*B+1`, with exact runtime inversion, non-negative/integral constraint checks, concrete specialization, and unchanged physical lowering boundaries.
 - Canonical multi-symbol `LinearDim` shape relations such as `B+W` and `2*B+W+3`, with exact rational elimination over runtime input-axis equations, unique-solution enforcement, and non-negative integer binding checks.
 - Dynamic reference execution plus native multi-output, verified borrowed-input, multi-symbol broadcast, affine/relational-shape, and zero-extent coverage across distinct runtime bindings.
@@ -34,7 +34,7 @@ All notable project milestones are recorded here.
 - First-class `Tensor.view(shape)` with the same exact shape proof as reshape but zero-copy whole-storage C-order alias semantics instead of a copy kernel.
 - Alias-aware memory planning and Loop IR with `BufferAlias` / `LoopView` logical handles, transitive root-lifetime extension, storage-root write/read alias checks, and storage-generation rejection of stale views after a root rewrite.
 - Native/CPU view execution without internal materialization: NumPy uses shared-memory reshape views and generated C uses typed pointer aliases; direct returns, multi-output execution, symbolic specialization, and verified borrowed-input views remain supported.
-- `StorageLayout(offset, strides)` descriptors with non-negative root-relative element offsets, non-zero signed element strides, concrete minimum/maximum root-bound verification, transitive layout composition, and zero-extent-safe canonical contiguous strides.
+- `StorageLayout(offset, strides)` descriptors with non-negative root-relative element offsets, non-zero signed element strides, concrete minimum/maximum root-bound verification, transitive alias composition, and zero-extent-safe canonical contiguous strides.
 - First-class positive-stride `Tensor.slice(axis=..., start=..., stop=..., step=...)` views on one concrete axis, including zero-copy reference/CPU execution, Buffer/Loop alias lowering, generated-C offset pointers plus strided logical indexing, native multi-output/borrowed-input execution, and dynamic specialization on unsliced symbolic axes.
 - First-class zero-copy `Tensor.transpose(axes)` views for complete compile-time axis permutations. Shape and storage strides are permuted together while root-relative offsets, storage-root lifetime/generation checks, borrowed-input safety, dynamic specialization, and general CPU/C/native indexing remain shared with the existing alias model.
 - First-class zero-copy `Tensor.reverse(axis)` views with signed-stride layout composition, including symbolic-axis specialization, positive-slice/transpose composition, borrowed-input CPU/native execution, and deterministic fallback from contiguous/SSE2 paths.
@@ -50,7 +50,7 @@ All notable project milestones are recorded here.
 - Single-output generated C and the existing `out=np.ndarray` native call contract remain unchanged.
 - External inputs still use the historical copied-buffer path by default; zero-copy binding is explicitly selected through `borrow_inputs()` or `compile_module(..., borrow_inputs=True)`.
 - `compile_module()` remains the eager concrete-shape entrypoint. Symbolic tensor IR must use the explicit `compile_dynamic_module()` specialization boundary before physical lowering.
-- Existing one-symbol dynamic callers retain `bind_dynamic_batch()`, `DynamicExecutable.symbolic_dim`, integer `specialize()`, and `cached_batch_sizes`; multi-symbol executables use complete binding mappings instead of ambiguous batch-only values.
+- Existing one-symbol dynamic callers retain `bind_dynamic_batch()`, `DynamicExecutable.symbolic_dim`, integer `specialize(size)`, and `cached_batch_sizes`; multi-symbol executables use complete binding mappings instead of ambiguous batch-only values.
 - Plain `SymbolicDim` and one-variable `AffineDim` shapes keep their existing direct runtime-binding behavior. `LinearDim` adds positive-coefficient/non-negative-offset relations across multiple named symbols, but all relations are solved to one complete integer binding before Buffer/Loop IR.
 - Symbolic broadcasting stays structural: exact matching symbolic/affine/linear expressions may align or broadcast with dimension `1`; runtime equation solving does not implicitly equate different expressions during type inference.
 - `reshape` remains a verified row-major copy into distinct storage. `view` is the explicit zero-copy alternative for whole-storage C-contiguous shape changes. `slice` adds one compile-time-bounded positive-stride axis, `reverse` adds one explicit signed-stride axis reversal, and `transpose` adds a complete compile-time axis permutation; all remain read-only aliases. Inferred `-1`, generic negative-step slice syntax, writable view kernels, runtime permutation axes, and general advanced indexing remain out of scope.
@@ -89,3 +89,7 @@ First frozen compiler milestone: a compact, correctness-first tensor compiler wi
 ### Frozen scope
 
 `v0.1.0` intentionally keeps shapes static, returns a single output, copies inputs into planned internal buffers, and uses a CPU/C11 backend. Dynamic shapes, multiple outputs, zero-copy input aliasing, generalized SIMD abstraction, general DAG fusion, parallel scheduling, and accelerator backends are deferred to later milestones.
+
+### Release policy
+
+The `v0.1.x` line is maintenance-oriented. Changes should address correctness, regressions, diagnostics, portability, tests, or bounded release-quality improvements. New language/backend scope belongs in a separately selected later milestone rather than an endless stream of opcode/SIMD micro-specializations.
