@@ -7,40 +7,10 @@ from typing import Any
 
 import numpy as np
 
+from .fused_expr import FusedExpression, describe_fused_opcode
 from .ir import DType, TensorType
 from .loop_ir import IndexMap, LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
 from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
-
-_BINARY_CHAIN_OPERATORS = {
-    "chain_add_add": ("+", "+"),
-    "chain_add_mul": ("+", "*"),
-    "chain_mul_add": ("*", "+"),
-    "chain_mul_mul": ("*", "*"),
-}
-_RELU_BINARY_CHAIN_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_CHAIN_OPERATORS)
-_BINARY_TREE_OPERATORS = {
-    f"tree_{left}_{right}_{root}": (
-        "+" if left == "add" else "*",
-        "+" if right == "add" else "*",
-        "+" if root == "add" else "*",
-    )
-    for left in ("add", "mul")
-    for right in ("add", "mul")
-    for root in ("add", "mul")
-}
-_RELU_BINARY_TREE_OPCODES = frozenset(f"relu_{opcode}" for opcode in _BINARY_TREE_OPERATORS)
-_CHAIN_TREE_OPERATORS = {
-    f"chain_tree_{inner}_{left}_{right}_{root}": (
-        "+" if inner == "add" else "*",
-        "+" if left == "add" else "*",
-        "+" if right == "add" else "*",
-        "+" if root == "add" else "*",
-    )
-    for inner in ("add", "mul")
-    for left in ("add", "mul")
-    for right in ("add", "mul")
-    for root in ("add", "mul")
-}
 
 
 def generate_c(program: LoopProgram) -> str:
@@ -203,87 +173,71 @@ def _emit_kernel(
         operator = "+" if op.opcode == "relu_add" else "*"
         lines.append(f"{indent}{c_type} value = (({c_type}){lhs} {operator} ({c_type}){rhs});")
         lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
-    elif op.opcode in _BINARY_CHAIN_OPERATORS or op.opcode in _RELU_BINARY_CHAIN_OPCODES:
-        lhs = input_ref(0)
-        rhs = input_ref(1)
-        tail = input_ref(2)
-        c_type = _c_type(output_type.dtype)
-        relu_chain = op.opcode in _RELU_BINARY_CHAIN_OPCODES
-        chain_opcode = op.opcode.removeprefix("relu_")
-        inner_operator, outer_operator = _BINARY_CHAIN_OPERATORS[chain_opcode]
-        lines.append(
-            f"{indent}{c_type} inner = (({c_type}){lhs} {inner_operator} ({c_type}){rhs});"
-        )
-        if relu_chain:
-            zero = _zero_literal(output_type.dtype)
-            lines.append(
-                f"{indent}{c_type} value = (({c_type})inner {outer_operator} ({c_type}){tail});"
-            )
-            lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
-        else:
-            lines.append(
-                f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
-            )
-    elif op.opcode in _BINARY_TREE_OPERATORS or op.opcode in _RELU_BINARY_TREE_OPCODES:
-        left_lhs = input_ref(0)
-        left_rhs = input_ref(1)
-        right_lhs = input_ref(2)
-        right_rhs = input_ref(3)
-        c_type = _c_type(output_type.dtype)
-        relu_tree = op.opcode in _RELU_BINARY_TREE_OPCODES
-        tree_opcode = op.opcode.removeprefix("relu_")
-        left_operator, right_operator, root_operator = _BINARY_TREE_OPERATORS[tree_opcode]
-        lines.append(
-            f"{indent}{c_type} left = "
-            f"(({c_type}){left_lhs} {left_operator} ({c_type}){left_rhs});"
-        )
-        lines.append(
-            f"{indent}{c_type} right = "
-            f"(({c_type}){right_lhs} {right_operator} ({c_type}){right_rhs});"
-        )
-        if relu_tree:
-            zero = _zero_literal(output_type.dtype)
-            lines.append(
-                f"{indent}{c_type} value = (({c_type})left {root_operator} ({c_type})right);"
-            )
-            lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
-        else:
-            lines.append(
-                f"{indent}{output_ref} = (({c_type})left {root_operator} ({c_type})right);"
-            )
-    elif op.opcode in _CHAIN_TREE_OPERATORS:
-        first_lhs = input_ref(0)
-        first_rhs = input_ref(1)
-        left_tail = input_ref(2)
-        right_lhs = input_ref(3)
-        right_rhs = input_ref(4)
-        c_type = _c_type(output_type.dtype)
-        inner_operator, left_operator, right_operator, root_operator = _CHAIN_TREE_OPERATORS[
-            op.opcode
-        ]
-        lines.append(
-            f"{indent}{c_type} inner = "
-            f"(({c_type}){first_lhs} {inner_operator} ({c_type}){first_rhs});"
-        )
-        lines.append(
-            f"{indent}{c_type} left = "
-            f"(({c_type})inner {left_operator} ({c_type}){left_tail});"
-        )
-        lines.append(
-            f"{indent}{c_type} right = "
-            f"(({c_type}){right_lhs} {right_operator} ({c_type}){right_rhs});"
-        )
-        lines.append(
-            f"{indent}{output_ref} = (({c_type})left {root_operator} ({c_type})right);"
-        )
     else:
-        raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
+        expression = describe_fused_opcode(op.opcode)
+        if expression is None:
+            raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
+        lines.extend(
+            _emit_fused_expression(
+                expression,
+                output_ref=output_ref,
+                output_type=output_type,
+                input_ref=input_ref,
+                indent=indent,
+            )
+        )
 
     for _ in range(loop_depth):
         indent = indent[:-4]
         lines.append(f"{indent}}}")
     lines.append("    }")
     lines.append("")
+    return lines
+
+
+def _emit_fused_expression(
+    expression: FusedExpression,
+    *,
+    output_ref: str,
+    output_type: TensorType,
+    input_ref: Any,
+    indent: str,
+) -> list[str]:
+    refs = {
+        name: input_ref(position)
+        for position, name in enumerate(expression.input_names)
+    }
+    c_type = _c_type(output_type.dtype)
+    lines: list[str] = []
+
+    for step in expression.steps:
+        if step.opcode == "relu":
+            operand = refs[step.inputs[0]]
+            if operand != "value":
+                lines.append(f"{indent}{c_type} value = ({c_type}){operand};")
+            lines.extend(
+                _emit_relu_assignment(
+                    output_ref,
+                    output_type.dtype,
+                    _zero_literal(output_type.dtype),
+                    indent,
+                )
+            )
+            refs[step.output] = output_ref
+            continue
+
+        lhs, rhs = step.inputs
+        operator = "+" if step.opcode == "add" else "*"
+        expression_text = (
+            f"(({c_type}){refs[lhs]} {operator} ({c_type}){refs[rhs]})"
+        )
+        if step.output == expression.result:
+            lines.append(f"{indent}{output_ref} = {expression_text};")
+            refs[step.output] = output_ref
+        else:
+            lines.append(f"{indent}{c_type} {step.output} = {expression_text};")
+            refs[step.output] = step.output
+
     return lines
 
 
