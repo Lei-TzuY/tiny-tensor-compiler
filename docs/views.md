@@ -79,19 +79,21 @@ The descriptor is absolute relative to the storage root, so transitive views do 
 - symbolic, affine, and relational dimensions are merely moved to new positions; transpose does not add a shape equation or runtime solver rule;
 - dtype is unchanged.
 
-`copy_into(root, target, source)` is an explicit storage effect. It requires:
+`copy_into(root, target, source)` is an explicit storage effect. Its canonical tensor-IR form requires:
 
 - `root` to be either the internally computed owning value or the latest fresh full-root result of an earlier `copy_into` on that storage;
 - the underlying owner to be compiler-owned computed storage rather than an input or constant;
 - `target` to resolve to the same owning storage root through a fresh verified alias chain;
-- `source` to be fresh and resolve to a different storage root;
+- the actual `copy_into` source operand to be fresh and resolve to a different storage root;
 - source and target `TensorType` values to match exactly, with no cast or broadcast;
 - the result type to match the complete owning-root type and layout;
 - every root, target, source, and later consumer to match the current generation of its storage root.
 
+The public builder has one conservative same-root convenience beyond that canonical form. If a concrete same-root source and target have root-relative minimum/maximum reachable element spans that are statically proven disjoint, the builder first materializes the source through an explicit owning `reshape` copy and then emits ordinary different-root `copy_into`. This preserves the low-level verifier invariant and makes the temporary snapshot allocation visible in tensor IR. Overlapping spans, interleaved strided regions whose bounding intervals overlap, and unresolved symbolic regions fail closed. See `docs/disjoint-same-root-copy.md` for the precise boundary.
+
 A write increments the owner generation exactly once. Every pre-write root or view handle for that storage becomes stale immediately; only the returned full-root handle represents the new generation. A later view may be derived from that fresh result and used by another ordered write. Ordinary pure computation may also consume the fresh generation between writes, so sequencing is defined by SSA operation order plus explicit generation checks rather than by a special terminal-only syntax. Returning or reading an older root/view generation is rejected.
 
-Reference execution uses NumPy views and requires `numpy.shares_memory()` for non-empty view/slice/reverse/transpose results. Each `copy_into` executes with `numpy.copyto(target, source)` and then exposes the owning array as the fresh post-write value. Caller-visible return values still copy through the existing result contract.
+Reference execution uses NumPy views and requires `numpy.shares_memory()` for non-empty view/slice/reverse/transpose results. Canonical `copy_into` executes with `numpy.copyto(target, source)` and then exposes the owning array as the fresh post-write value. A proven disjoint same-root request has already been rewritten to an explicit snapshot plus a different-root copy before verification/execution. Caller-visible return values still copy through the existing result contract.
 
 ## Buffer planning and lifetimes
 
@@ -107,7 +109,7 @@ Writable effects lower to ordered `BufferCopyInto` operations. Each fresh result
 - the logical alias type;
 - the verified absolute `StorageLayout`.
 
-Every direct or transitive alias use extends the storage root's lifetime. A physical slot cannot be reused while any live alias can still observe its prior contents. Buffer verification independently tracks storage roots and generations: every operand must be fresh before use; `BufferCopyInto` requires a fresh full-root handle, a fresh same-root target, and a fresh different-root source; the write advances the owner generation and makes only its result fresh. This catches malformed low-level IR even if it bypasses tensor-IR construction.
+Every direct or transitive alias use extends the storage root's lifetime. A physical slot cannot be reused while any live alias can still observe its prior contents. Buffer verification independently tracks storage roots and generations: every operand must be fresh before use; `BufferCopyInto` still requires a fresh full-root handle, a fresh same-root target, and a fresh different-root source; the write advances the owner generation and makes only its result fresh. Same-root public requests have been canonicalized through an owning snapshot before this layer, so malformed low-level IR cannot bypass the invariant.
 
 Alias validation is layout-based rather than element-count-only: dtype must be preserved and the complete minimum/maximum reachable root-relative interval must remain inside the backing allocation. A reverse or transpose therefore needs no special lifetime rule; each changes only the existing alias layout.
 
@@ -125,7 +127,7 @@ A contiguous `LoopView` may omit an explicit layout and derive it from its sourc
 
 Alias safety is checked by storage root, not by handle number. A kernel output may not share a storage root with any input, including sliced, reversed, or transposed aliases.
 
-Every write to a storage root advances its generation. A view captures the current generation. Reading or returning that view after the root has been rewritten is rejected as stale, including transitive slice/reverse/transpose chains. `LoopCopyInto` accepts the latest fresh full-root generation handle, resolves it to the backing `LoopAlloc`, verifies the target and source generations, advances the backing root generation, and records only the newly produced result handle as fresh. This permits ordered write chains without confusing logical generation handles with physical allocation identity.
+Every write to a storage root advances its generation. A view captures the current generation. Reading or returning that view after the root has been rewritten is rejected as stale, including transitive slice/reverse/transpose chains. `LoopCopyInto` accepts the latest fresh full-root generation handle, resolves it to the backing `LoopAlloc`, verifies the target and different-root source generations, advances the backing root generation, and records only the newly produced result handle as fresh. This permits ordered write chains without confusing logical generation handles with physical allocation identity.
 
 Runtime-input roots are tracked separately and cannot be mutation roots. Writable generations therefore cannot turn verified borrowed/copy-in input storage into caller-visible mutation.
 
@@ -139,7 +141,7 @@ The Loop CPU backend materializes no view buffer. It creates NumPy logical views
 
 Downstream elementwise kernels then index that logical NumPy view normally. Positive slices, reversals, and transposes all use exactly the same layout-driven path. Borrowed external inputs remain compatible: a verified borrowed root may feed one or more view transforms without input or view materialization.
 
-For each `LoopCopyInto`, the backend executes `np.copyto(target, source)` only after Loop IR has proven that target and source use different storage roots and exact matching types. The fresh logical output references the same mutated owning array and can safely feed later views, kernels, or another verified write. Same-root overlap is rejected by verification instead of depending on unspecified copy overlap behavior.
+For each `LoopCopyInto`, the backend executes `np.copyto(target, source)` only after Loop IR has proven that target and source use different storage roots and exact matching types. The fresh logical output references the same mutated owning array and can safely feed later views, kernels, or another verified write. High-level same-root disjoint copies never reach this operation directly: the explicit snapshot owns distinct storage before the write. Unproven or overlapping same-root requests are rejected before lowering rather than depending on NumPy overlap behavior.
 
 ## Generated C and native execution
 
@@ -152,6 +154,8 @@ const int32_t *p3 = p0 + 5;
 Logical reads then use the layout strides rather than assuming the view type is physically row-major. A `(3, 3)` reversed slice with strides `(6, -2)` computes offsets from `i0 * 6 + i1 * -2`; a transposed reversed view with strides `(-2, 6)` uses those same verified signed strides in its logical index expression.
 
 `LoopCopyInto` is emitted as a deterministic serial copy over the verified logical target/source shapes. Destination addresses use the current fresh root handle plus the target's root-relative offset and signed strides; source addresses use the source layout. After each copy, generated C exposes a **mutable** typed pointer for the fresh full-root generation handle so a later verified `copy_into` may write through it. Read-only views derived from that handle remain `const` aliases. The copy itself is deliberately not OpenMP-scheduled.
+
+For a proven disjoint same-root request, generated C first executes the ordinary reshape snapshot kernel. That kernel reads the source view in logical C-order, including signed or permuted layouts, into distinct storage. Only then does the existing serial `LoopCopyInto` run. No backend needs same-root copy or `memmove` semantics.
 
 Backend eligibility remains conservative:
 
@@ -169,7 +173,7 @@ Verified borrowed inputs still split an external read epoch when planned storage
 
 The signed layout descriptor is preserved by that transform, so a borrowed input may flow directly through slice, reverse, and transpose aliases into downstream CPU/native kernels without hidden normalization or view copies.
 
-The borrowing transform also preserves every `LoopCopyInto` handle and remaps root/target/source references. A copy into an internally owned root counts as a write for lifetime splitting, while Loop verification continues to reject any attempt to mutate a runtime-input root. Ordered writable generations therefore remain compatible with borrowed external sources without exposing caller-owned storage to mutation.
+The borrowing transform also preserves every `LoopCopyInto` handle and remaps root/target/source references. A copy into an internally owned root counts as a write for lifetime splitting, while Loop verification continues to reject any attempt to mutate a runtime-input root. Ordered writable generations therefore remain compatible with borrowed external sources without exposing caller-owned storage to mutation. A same-root disjoint request is already an explicit snapshot plus ordinary write by this stage, so borrowing needs no new overlap-specific path.
 
 ## Optimization and fusion boundary
 
@@ -177,7 +181,7 @@ The borrowing transform also preserves every `LoopCopyInto` handle and remaps ro
 
 `copy_into` is an explicit effect barrier. Optimizer passes that assume a pure expression graph still do not move, duplicate, canonicalize through, or fold across a module containing any writable effect. This is deliberately conservative even though the verifier now supports computation between ordered generations; effect-aware motion requires a separate dependence model and is not inferred from generation freshness alone.
 
-Views and writable effects remain explicit fusion boundaries. Elementwise fusion does not absorb or cross view/slice/reverse/transpose creation or `copy_into`, and the planner treats alias creation from a producer as an observable later use.
+Views and writable effects remain explicit fusion boundaries. Elementwise fusion does not absorb or cross view/slice/reverse/transpose creation or `copy_into`, and the planner treats alias creation from a producer as an observable later use. The inserted reshape snapshot for a same-root disjoint request is also an explicit operation rather than hidden alias-aware fusion.
 
 ## Verification evidence
 
@@ -198,14 +202,16 @@ Regression coverage includes:
 - DCE purity for read-only aliases;
 - writable copies through verified positive/signed-stride view layouts in reference, Loop CPU, generated C, and native execution;
 - multiple ordered writes to one internal root, with pure computation and fresh-view derivation between generations;
-- rejection of input/constant roots, non-full-root handles, same-root sources, type mismatches, and every stale post-write root/view use or return;
+- conservative high-level same-root copies when concrete root-relative bounding spans are disjoint, including signed-stride source snapshots whose logical order is preserved across reference, Loop CPU, GCC/MSVC native, borrowed-input, and OpenMP execution;
+- fail-closed rejection for interleaved strided regions whose bounding intervals overlap and for unresolved symbolic same-root regions;
+- rejection of input/constant roots, non-full-root handles, direct low-level same-root sources, type mismatches, and every stale post-write root/view use or return;
 - preservation of writable effects through borrowed-input rewriting;
 - native ordered-write execution with OpenMP kernels between writes on GCC-style and MSVC toolchains;
 - optimizer effect-barrier behavior;
 - canonical zero offsets for empty reshape/slice/reverse/transpose layouts;
 - Ubuntu and Windows execution under Python 3.11 and 3.13.
 
-These tests establish alias/layout correctness and ordered generation semantics. They do not establish a wall-clock speedup, measured memory-footprint reduction, overlap-safe mutation, or general in-place elementwise execution.
+These tests establish alias/layout correctness, ordered generation semantics, and one conservative same-root dependence proof. They do not establish a wall-clock speedup, measured memory-footprint reduction, general overlap-safe mutation, or general in-place elementwise execution.
 
 ## Deliberately out of scope
 
@@ -214,7 +220,10 @@ The storage-layout and mutation abstraction is still intentionally bounded. This
 - zero strides;
 - generic negative-step `slice` syntax or arbitrary reverse slicing bounds;
 - writable caller-owned input roots;
-- same-root or partial-overlap copy semantics / `memmove` behavior;
+- direct same-root `copy_into` in tensor, Buffer, or Loop IR;
+- overlapping same-root or `memmove`-style copy semantics;
+- exact set-intersection solving for interleaved signed/strided regions whose bounding spans overlap;
+- runtime/symbolic region-disjointness proofs;
 - unordered, concurrent, or automatically rescheduled writable effects;
 - in-place elementwise kernels or arbitrary destination-bearing operators;
 - effect-aware optimizer motion across `copy_into`;
@@ -224,4 +233,4 @@ The storage-layout and mutation abstraction is still intentionally bounded. This
 - advanced indexing/gather semantics;
 - a performance or peak-memory claim.
 
-The ordered writable-generation phase removes the former one-write/terminal restriction by making freshness explicit at tensor IR, Buffer IR, and Loop IR. A fresh post-write root may feed ordinary computation, new views, and later writes; each subsequent mutation must consume the current generation, while every older root/view handle is deterministically stale. The next storage milestone should add a genuinely new effect capability—such as verifier-proven non-overlapping region writes, overlap-safe copy semantics, or a bounded in-place kernel contract—rather than merely increasing a write count.
+The ordered writable-generation phase removed the former one-write/terminal restriction by making freshness explicit at tensor IR, Buffer IR, and Loop IR. This phase adds one deliberately conservative dependence capability above that model: concrete same-root source/target regions with disjoint bounding spans are canonicalized through an explicit source snapshot, while every actual low-level write remains different-root. The next storage milestone should only broaden the proof/effect model—such as an exact bounded affine-stride intersection solver, explicit overlap-safe snapshot semantics, or a bounded in-place kernel contract—rather than adding more examples that already fit the same interval proof.
