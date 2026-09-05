@@ -16,6 +16,7 @@ from .loop_ir import (
     LoopKernel,
     LoopProgram,
     LoopReturn,
+    LoopView,
     fused_expression_for_kernel,
 )
 from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
@@ -23,7 +24,7 @@ from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
 
 def generate_c(program: LoopProgram) -> str:
     """Generate deterministic C11 source for a verified explicit loop program."""
-    types = {op.buffer: op.type for op in program.allocations}
+    types = program.buffer_types
     return_type = types[program.return_slot]
     parameters = [f"{_c_type(return_type.dtype)} *out"]
     parameters.extend(
@@ -72,6 +73,12 @@ def generate_c(program: LoopProgram) -> str:
             continue
         if isinstance(op, LoopInput):
             lines.extend(_emit_input(op, types[op.output]))
+            continue
+        if isinstance(op, LoopView):
+            lines.append(
+                f"    const {_c_type(op.type.dtype)} *p{op.output} = p{op.source};"
+            )
+            lines.append("")
             continue
         if isinstance(op, LoopReturn):
             lines.extend(_emit_return(op, types[op.buffer]))
