@@ -46,27 +46,50 @@ class ReductionOperator(str, Enum):
 
 
 REDUCTION_OPCODES = frozenset(operator.value for operator in ReductionOperator)
+ReductionAxis = int | tuple[int, ...] | None
 
 
 @dataclass(frozen=True)
 class ReductionPlan:
-    """One deterministic reduction operator over all elements or one logical axis."""
+    """One deterministic reduction operator over all elements or canonical logical axes."""
 
     operator: ReductionOperator
-    axis: int | None = None
+    axis: ReductionAxis = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.operator, ReductionOperator):
             raise TypeError("reduction plan operator must be a ReductionOperator")
-        if self.axis is not None and (
-            not isinstance(self.axis, int) or isinstance(self.axis, bool) or self.axis < 0
-        ):
-            raise ValueError("reduction plan axis must be a non-negative integer or None")
+        if self.axis is None:
+            return
+        if isinstance(self.axis, int) and not isinstance(self.axis, bool):
+            if self.axis < 0:
+                raise ValueError("reduction plan axis must be non-negative")
+            return
+        if not isinstance(self.axis, tuple) or not self.axis:
+            raise ValueError(
+                "reduction plan axis must be a non-negative integer, non-empty canonical tuple, or None"
+            )
+        previous = -1
+        for axis in self.axis:
+            if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0:
+                raise ValueError("reduction plan axes must be non-negative integers")
+            if axis <= previous:
+                raise ValueError("reduction plan axis tuple must be strictly increasing")
+            previous = axis
 
     @classmethod
-    def from_opcode(cls, opcode: str, axis: int | None = None) -> ReductionPlan:
+    def from_opcode(cls, opcode: str, axis: ReductionAxis = None) -> ReductionPlan:
         return cls(ReductionOperator.from_opcode(opcode), axis)
 
     @property
     def opcode(self) -> str:
         return self.operator.value
+
+    @property
+    def axes(self) -> tuple[int, ...] | None:
+        """Canonical reduced axes, or None for the historical full-tensor domain."""
+        if self.axis is None:
+            return None
+        if isinstance(self.axis, int):
+            return (self.axis,)
+        return self.axis
