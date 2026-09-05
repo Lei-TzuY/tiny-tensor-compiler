@@ -47,7 +47,7 @@ Borrowed inputs must already be `numpy.ndarray` objects with the exact compiled 
 
 ## Runtime symbolic-shape specialization
 
-`compile_dynamic_module()` is the separate entrypoint for runtime-specialized tensor shapes. Tensor IR may contain one or more named `SymbolicDim` values on arbitrary axes:
+`compile_dynamic_module()` is the separate entrypoint for runtime-specialized tensor shapes. Tensor IR may contain one or more named `SymbolicDim` values on arbitrary axes, and may use bounded one-variable affine terms with a positive integer scale and non-negative integer offset:
 
 ```python
 import numpy as np
@@ -57,46 +57,41 @@ from tiny_tensor_compiler import GraphBuilder, SymbolicDim, compile_dynamic_modu
 B = SymbolicDim("B")
 W = SymbolicDim("W")
 builder = GraphBuilder()
-lhs = builder.input((B, 1), dtype="float32")
-rhs = builder.input((1, W), dtype="float32")
+lhs = builder.input((2 * B + 1, 1), dtype="float32")
+rhs = builder.input((1, 3 * W + 2), dtype="float32")
 module = builder.finish((lhs + rhs).relu())
 
 executable = compile_dynamic_module(module)
-
-result_2x3 = executable(
+result = executable(
     inputs=[
-        np.zeros((2, 1), dtype=np.float32),
-        np.ones((1, 3), dtype=np.float32),
-    ]
-)
-result_2x7 = executable(
-    inputs=[
-        np.zeros((2, 1), dtype=np.float32),
-        np.ones((1, 7), dtype=np.float32),
+        np.zeros((5, 1), dtype=np.float32),
+        np.ones((1, 8), dtype=np.float32),
     ]
 )
 ```
 
+The runtime contract solves `2*B+1 = 5` and `3*W+2 = 8`, producing `B=2,W=2`. An affine axis is accepted only when `(runtime_extent - offset)` is non-negative and exactly divisible by the positive scale. A repeated direct or affine occurrence of the same symbol must resolve to the identical integer binding.
+
 The symbolic path does not introduce runtime-sized Buffer IR, Loop IR, C arrays, or variable-length native ABI types. Instead it preserves a strict specialization boundary:
 
 ```text
-symbolic tensor Module
+symbolic / affine tensor Module
 -> tensor IR verification
 -> exact runtime input rank/static-axis/dtype validation
--> bind every named SymbolicDim from runtime input axes
--> clone tensor IR and replace all symbols with concrete integers
+-> solve every named symbol from direct or affine runtime input axes
+-> clone tensor IR and evaluate all symbolic/affine terms to concrete integers
 -> reverify the concrete tensor Module
 -> ordinary compile_module() pipeline
 -> NativeExecutable cached by the complete binding tuple
 ```
 
-Every symbol must occur in at least one runtime input and every repeated occurrence of that symbol must resolve to the same non-negative dimension. Static axes and dtypes remain exact. A symbol may broadcast with the same symbol or dimension `1`. Distinct symbols may coexist on independent broadcast axes, such as `(B, 1)` with `(1, W)`, but a `B` aligned directly against `W` is not treated as an implicit equality constraint. `compile_module()` explicitly rejects unspecialized symbolic IR so the physical backend never accidentally receives unresolved dimensions.
+Symbolic broadcasting remains conservative. The same `SymbolicDim` may broadcast with itself or dimension `1`, and structurally identical affine terms may align with one another. Distinct symbols are not implicitly unified, and a direct `B` aligned against `2*B` is not treated as conditionally equal for selected runtime values. This keeps type inference deterministic before specialization.
 
 `bind_dynamic_shapes(module, inputs)` exposes the same runtime-binding validation and returns the complete `{SymbolicDim: int}` mapping. `DynamicExecutable.symbolic_dims` reports the deterministic symbol order, `cached_bindings` reports the concrete binding tuples already compiled, and `specialize({...})` accepts either `SymbolicDim` or string keys. For a one-symbol executable, the existing convenience surface remains compatible: `symbolic_dim`, integer `specialize(2)`, and `cached_batch_sizes` still work. Those single-symbol convenience properties deliberately reject multi-symbol executables rather than returning ambiguous data.
 
-`DynamicExecutable` deep-clones the symbolic module when it is created, including constant payloads. Later caller mutation of the original `Module` therefore cannot make existing and future specializations represent different programs. Each distinct complete binding lazily creates one ordinary `NativeExecutable`; repeated calls with the same binding reuse that specialization. `cache_dir=` and `borrow_inputs=True` are forwarded into every specialization, so persistent native caching, multi-output execution, and verified zero-copy inputs remain available. Zero-valued symbolic dimensions are valid because the concrete compiler already defines zero-extent execution.
+`DynamicExecutable` deep-clones the symbolic module when it is created, including constant payloads. Later caller mutation of the original `Module` therefore cannot make existing and future specializations represent different programs. Each distinct complete binding lazily creates one ordinary `NativeExecutable`; repeated calls with the same binding reuse that specialization. `cache_dir=` and `borrow_inputs=True` are forwarded into every specialization, so persistent native caching, multi-output execution, and verified zero-copy inputs remain available. Zero-valued symbolic dimensions are valid when the affine expression evaluates to a legal zero extent, such as `2*B` with `B=0`.
 
-The current dynamic contract intentionally stops at named integer dimensions. Arbitrary symbolic arithmetic or affine expressions, implicit equality solving between different symbols, reshape-style symbolic transforms, and runtime-sized physical buffers are not claimed.
+The current affine contract is intentionally bounded: each expression contains exactly one named symbol, a strictly positive integer scale, and a non-negative integer offset. Multi-variable expressions, subtraction, division, implicit equality solving between distinct symbols, reshape-style symbolic transforms, and runtime-sized physical buffers are not claimed.
 
 ## Outputs
 
