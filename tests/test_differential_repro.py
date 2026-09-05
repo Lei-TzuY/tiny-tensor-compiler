@@ -77,7 +77,8 @@ def test_reference_candidate_campaign_is_deterministically_clean():
 def test_native_campaign_executes_generated_views_and_elementwise_graphs():
     result = run_differential_campaign(start_seed=4, cases=3)
 
-    assert result.passed
+    signature = None if result.failure is None else result.failure.signature
+    assert result.passed, f"unexpected differential failure: {signature}"
     assert result.checked_cases == 3
     assert result.failure is None
 
