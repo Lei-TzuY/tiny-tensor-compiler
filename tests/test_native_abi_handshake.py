@@ -12,7 +12,7 @@ import pytest
 import tiny_tensor_compiler.native as native_module
 from tiny_tensor_compiler import GraphBuilder, NativeCompilationError, lower_to_cpu, lower_to_loops
 from tiny_tensor_compiler.c_abi_codegen import generate_c
-from tiny_tensor_compiler.native_abi import native_abi_sha256
+from tiny_tensor_compiler.native_abi import append_native_abi_export, native_abi_sha256
 
 
 def _default_compiler_or_skip() -> None:
@@ -25,6 +25,10 @@ def _loops(*, shape: tuple[int, ...] = (3,), dtype: str = "int32"):
     builder = GraphBuilder()
     value = builder.input(shape, dtype=dtype)
     return lower_to_loops(lower_to_cpu(builder.finish(value.relu())))
+
+
+def _native_build_source(loops) -> str:
+    return append_native_abi_export(generate_c(loops), native_abi_sha256(loops))
 
 
 def _wrong_abi_source(fingerprint: str) -> str:
@@ -56,13 +60,16 @@ def test_native_abi_fingerprint_is_deterministic_and_type_sensitive():
     assert len(native_abi_sha256(baseline)) == 64
 
 
-def test_generated_c_exports_exact_native_abi_fingerprint():
+def test_native_build_source_exports_exact_abi_without_changing_public_c_source():
     loops = _loops()
     fingerprint = native_abi_sha256(loops)
-    source = generate_c(loops)
+    public_source = generate_c(loops)
+    build_source = _native_build_source(loops)
 
-    assert "TINY_TENSOR_EXPORT const char *tiny_tensor_abi_sha256(void)" in source
-    assert f'return "{fingerprint}";' in source
+    assert "tiny_tensor_abi_sha256" not in public_source
+    assert "TINY_TENSOR_EXPORT const char *tiny_tensor_abi_sha256(void)" in build_source
+    assert f'return "{fingerprint}";' in build_source
+    assert build_source.startswith(public_source)
 
 
 def test_native_loader_rejects_real_library_with_wrong_embedded_abi():
@@ -89,7 +96,7 @@ def test_persistent_cache_rebuilds_self_consistent_wrong_abi_artifact(tmp_path, 
     _default_compiler_or_skip()
     loops = _loops()
     command = native_module._compiler_command(None)
-    source = generate_c(loops)
+    source = _native_build_source(loops)
     expected = native_abi_sha256(loops)
     library_path = native_module._persistent_library_path(tmp_path, source, command)
     assert library_path is not None
