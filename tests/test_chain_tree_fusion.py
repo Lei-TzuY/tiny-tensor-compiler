@@ -155,7 +155,7 @@ def test_integer_chain_tree_fusion_refuses_intermediate_with_later_use(reused):
     assert all(not kernel.opcode.startswith("chain_tree_") for kernel in fused.kernels)
 
 
-def test_integer_chain_tree_fusion_keeps_mirrored_shape_out_of_scope():
+def test_integer_chain_tree_fusion_supports_mirrored_shape():
     builder = GraphBuilder()
     a = builder.input((2, 1), dtype="int32")
     b = builder.input((1, 3), dtype="int32")
@@ -169,10 +169,21 @@ def test_integer_chain_tree_fusion_keeps_mirrored_shape_out_of_scope():
 
     fused = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
 
-    assert all(not kernel.opcode.startswith("chain_tree_") for kernel in fused.kernels)
+    assert [kernel.opcode for kernel in fused.kernels] == ["chain_tree_mul_add_add_mul"]
+    inputs = [
+        np.array([[2], [-3]], dtype=np.int32),
+        np.array([[5, -7, 11]], dtype=np.int32),
+        np.array([[-13], [17]], dtype=np.int32),
+        np.array([[19, -23, 29]], dtype=np.int32),
+        np.array([[31, 37, -41]], dtype=np.int32),
+    ]
+    np.testing.assert_array_equal(
+        execute_loop(fused, inputs=inputs),
+        execute_reference(module, inputs=inputs),
+    )
 
 
-def test_integer_chain_tree_fusion_keeps_reversed_root_out_of_scope():
+def test_integer_chain_tree_fusion_supports_reversed_root():
     builder = GraphBuilder()
     a = builder.input((2, 1), dtype="int32")
     b = builder.input((1, 3), dtype="int32")
@@ -186,7 +197,18 @@ def test_integer_chain_tree_fusion_keeps_reversed_root_out_of_scope():
 
     fused = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
 
-    assert all(not kernel.opcode.startswith("chain_tree_") for kernel in fused.kernels)
+    assert [kernel.opcode for kernel in fused.kernels] == ["chain_tree_add_mul_add_mul"]
+    inputs = [
+        np.array([[2], [-3]], dtype=np.int32),
+        np.array([[5, -7, 11]], dtype=np.int32),
+        np.array([[13, 17, -19]], dtype=np.int32),
+        np.array([[-23], [29]], dtype=np.int32),
+        np.array([[31, -37, 41]], dtype=np.int32),
+    ]
+    np.testing.assert_array_equal(
+        execute_loop(fused, inputs=inputs),
+        execute_reference(module, inputs=inputs),
+    )
 
 
 def test_integer_chain_tree_fusion_does_not_absorb_trailing_relu():
