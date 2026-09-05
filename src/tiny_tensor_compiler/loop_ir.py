@@ -258,6 +258,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
     types: dict[int, TensorType] = {}
     roots: dict[int, int] = {}
     written: set[int] = set()
+    root_generations: dict[int, int] = {}
+    value_generations: dict[int, int] = {}
     next_input_index = 0
     saw_execution = False
     saw_return = False
@@ -276,6 +278,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             allocated[op.buffer] = op.type
             types[op.buffer] = op.type
             roots[op.buffer] = op.buffer
+            root_generations[op.buffer] = 0
             continue
 
         if isinstance(op, LoopInput):
@@ -287,6 +290,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     f"input index {op.index} is not the next dense input index {next_input_index}"
                 )
             next_input_index += 1
+            root_generations[op.output] += 1
+            value_generations[op.output] = root_generations[op.output]
             written.add(op.output)
             continue
 
@@ -300,11 +305,13 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 raise ValueError(f"loop view source p{op.source} is not defined")
             if op.source not in written:
                 raise ValueError(f"loop view source p{op.source} is not written")
+            _verify_fresh_value(op.source, roots, root_generations, value_generations)
             expected = infer_reshape(types[op.source], op.type.shape)
             if expected != op.type:
                 raise ValueError("loop view type does not match contiguous reshape inference")
             types[op.output] = op.type
             roots[op.output] = roots[op.source]
+            value_generations[op.output] = value_generations[op.source]
             written.add(op.output)
             continue
 
@@ -317,6 +324,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError(f"loop input p{buffer} is not defined")
                 if buffer not in written:
                     raise ValueError(f"loop input p{buffer} is read before being written")
+                _verify_fresh_value(buffer, roots, root_generations, value_generations)
             output_root = roots[op.output]
             if any(roots[buffer] == output_root for buffer in op.inputs):
                 raise ValueError("loop kernels do not permit output/input storage aliasing")
@@ -374,6 +382,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError(f"unsupported loop kernel: {op.opcode}")
                 _verify_fused_expression(op, expression, types, output_type)
 
+            root_generations[output_root] += 1
+            value_generations[op.output] = root_generations[output_root]
             written.add(op.output)
             continue
 
@@ -383,12 +393,26 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             raise ValueError(f"returned loop value p{op.buffer} is not defined")
         if op.buffer not in written:
             raise ValueError(f"returned loop value p{op.buffer} is not written")
+        _verify_fresh_value(op.buffer, roots, root_generations, value_generations)
         saw_return = True
 
     if not saw_return:
         raise ValueError("loop IR must end with a return")
     if allocated and set(allocated) != set(range(len(allocated))):
         raise ValueError("physical loop buffer ids must be dense starting at p0")
+
+
+def _verify_fresh_value(
+    buffer: int,
+    roots: dict[int, int],
+    root_generations: dict[int, int],
+    value_generations: dict[int, int],
+) -> None:
+    root = roots[buffer]
+    if value_generations.get(buffer) != root_generations[root]:
+        raise ValueError(
+            f"stale loop view/alias p{buffer} refers to an older generation of storage p{root}"
+        )
 
 
 def _verify_fused_expression(
