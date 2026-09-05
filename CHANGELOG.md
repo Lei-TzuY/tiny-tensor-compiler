@@ -21,9 +21,10 @@ All notable project milestones are recorded here.
 - Canonical multi-symbol `LinearDim` shape relations such as `B+W` and `2*B+W+3`, with exact rational elimination over runtime input-axis equations, unique-solution enforcement, and non-negative integer binding checks.
 - Dynamic reference execution plus native multi-output, verified borrowed-input, multi-symbol broadcast, affine/relational-shape, and zero-extent coverage across distinct runtime bindings.
 - First-class structured fused expressions carried by Loop IR and consumed directly by verification, CPU execution, generated C, and SIMD planning while retaining legacy opcode spelling as a checked compatibility encoding.
-- A bounded topology-driven elementwise fusion planner for two- through four-node integer `add`/`mul` DAGs, with logical-value lifetime checks that remain correct across physical-slot reuse.
-- Fusion of safe mirrored producer order and reversed-root chain-tree layouts without reassociation or expansion of the existing fused opcode families.
-- Expression-driven SSE2 selection for exact contiguous `int32` fused kernels whose canonical semantic steps use only addition and ReLU, including ReLU add-trees and all-add chain-trees without fused-opcode whitelists.
+- A topology-driven elementwise fusion planner with logical-value lifetime checks that remain correct across physical-slot reuse.
+- Structured `fused_dag` kernels for bounded five- and six-node integer `add`/`mul` DAGs. Candidate selection ranks already-legal windows by eliminated intermediate materializations and then external-input footprint; this is a static compiler heuristic rather than a wall-clock performance claim.
+- Fusion of safe mirrored producer order and reversed-root chain-tree layouts without reassociation or expansion of the existing legacy fused opcode families.
+- Expression-driven SSE2 selection for exact contiguous `int32` fused kernels whose canonical semantic steps use only addition and ReLU, including generic all-add DAGs without fused-opcode whitelists.
 
 ### Compatibility
 
@@ -34,6 +35,8 @@ All notable project milestones are recorded here.
 - Plain `SymbolicDim` and one-variable `AffineDim` shapes keep their existing direct runtime-binding behavior. `LinearDim` adds positive-coefficient/non-negative-offset relations across multiple named symbols, but all relations are solved to one complete integer binding before Buffer/Loop IR.
 - Symbolic broadcasting stays structural: exact matching symbolic/affine/linear expressions may align or broadcast with dimension `1`; runtime equation solving does not implicitly equate different expressions during type inference.
 - Subtraction, division, negative coefficients, nonlinear symbolic products, reshape-style symbolic transforms, and runtime-sized physical IR remain out of scope.
+- Two- through four-node fused kernels keep the existing chain/tree/chain-tree compatibility spellings. Five- and six-node generic DAG kernels use the fixed `fused_dag` opcode and require first-class `FusedExpression` metadata because their semantics are intentionally not encoded into an expanding opcode name family.
+- Generic DAG fusion remains bounded to adjacent integer binary windows with single-consumer internal values, no later external use, identity internal indexing, compatible shapes/dtypes, and no final-output/leaf alias. Shared internal subexpressions, reassociation, kernel reordering, non-adjacent fusion, floating-point generic DAGs, and windows larger than six binary nodes remain out of scope.
 - `tiny_tensor_compiler.loop_ir.fuse_elementwise()` remains as a compatibility entry point but delegates to the sole topology-driven fusion planner; the former family-specific fusion engine has been retired.
 - SSE2 eligibility still requires exact contiguous `int32` storage. Expressions containing multiplication, broadcast indexing, scalar shapes, and other unsupported forms retain the general generated-C fallback.
 
