@@ -85,7 +85,8 @@ def compile_parallel_native(
             key = _artifact_key(source, command, persistent_library)
             pinned_artifact = _WINDOWS_PINNED_ARTIFACTS.get(key)
             if pinned_artifact is None:
-                pinned_artifact = native_module._get_or_compile_artifact(
+                pinned_artifact = native_module._get_or_compile_verified_artifact(
+                    program,
                     source,
                     command,
                     persistent_library,
@@ -94,7 +95,12 @@ def compile_parallel_native(
                 _mark_windows_process_pin(pinned_artifact)
                 _WINDOWS_PINNED_ARTIFACTS[key] = pinned_artifact
         else:
-            native_module._get_or_compile_artifact(source, command, persistent_library)
+            native_module._get_or_compile_verified_artifact(
+                program,
+                source,
+                command,
+                persistent_library,
+            )
 
     return ParallelNativeExecutable(
         program=program,
