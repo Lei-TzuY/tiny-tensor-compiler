@@ -46,7 +46,7 @@ class BorrowedLoopProgram:
 
     def __post_init__(self) -> None:
         input_by_index = {op.index: op for op in self.program.inputs}
-        types = {alloc.buffer: alloc.type for alloc in self.program.allocations}
+        types = self.program.buffer_types
         kernel_outputs = {kernel.output for kernel in self.program.kernels}
 
         seen_indices: set[int] = set()
@@ -89,6 +89,14 @@ class BorrowedLoopProgram:
         return self.program.inputs
 
     @property
+    def views(self):
+        return self.program.views
+
+    @property
+    def buffer_types(self):
+        return self.program.buffer_types
+
+    @property
     def input_types(self) -> InputTypeContract:
         types = tuple(self.program.input_types)
         return InputTypeContract(types=types, borrow_mask=(True,) * len(types))
@@ -113,12 +121,18 @@ class BorrowedLoopProgram:
     def borrowed_input_slots(self) -> frozenset[int]:
         return frozenset(binding.buffer for binding in self.borrowed_inputs)
 
+    def storage_root(self, buffer: int) -> int:
+        return self.program.storage_root(buffer)
+
     def dump(self) -> str:
         return self.program.dump()
 
 
 def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
     """Split reused input lifetimes so every runtime input can be bound zero-copy."""
+    if program.views:
+        raise ValueError("borrow_inputs must run before contiguous alias-view rewriting")
+
     types = {alloc.buffer: alloc.type for alloc in program.allocations}
     next_buffer = len(types)
     extra_allocations: list[LoopAlloc] = []
