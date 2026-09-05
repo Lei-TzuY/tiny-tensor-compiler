@@ -7,6 +7,7 @@ from .compiler import (
     compile_module,
 )
 from .frontend import GraphBuilder, Tensor
+from .fusion_planner import fuse_elementwise
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
 from .ir import SymbolicDim
@@ -17,7 +18,6 @@ from .loop_ir import (
     LoopKernel,
     LoopProgram,
     LoopReturn,
-    fuse_elementwise,
     lower_to_loops,
 )
 from .lowering import (
