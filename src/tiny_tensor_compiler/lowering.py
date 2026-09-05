@@ -16,7 +16,7 @@ from .inference import (
 )
 from .ir import Module, TensorType, Value
 from .layout import StorageLayout, element_count
-from .reduction import REDUCTION_OPCODES, ReductionOperator, ReductionPlan
+from .reduction import REDUCTION_OPCODES, ReductionPlan
 from .verifier import verify
 
 
