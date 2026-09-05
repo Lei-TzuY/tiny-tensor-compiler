@@ -43,19 +43,23 @@ CI establishes executable correctness and portability only. It is not evidence o
 
 ## Optimization boundary
 
-`sum` remains a known-pure operation for DCE. Exact CSE now includes its canonical attribute payload, so two sums of the same operand on the same axis may merge while sums on different axes remain distinct. Full-tensor attribute-free sums retain their previous CSE behavior.
+`sum` remains a known-pure operation for DCE. Exact CSE includes its canonical attribute payload, so two sums of the same operand on the same axis may merge while sums on different axes remain distinct. Full-tensor attribute-free sums retain their previous CSE behavior.
 
 Reduction/elementwise fusion, constant folding of reductions, and reduction reassociation are not introduced here.
 
-## Non-goals and next promotion
+## Promotion after this phase
 
-This phase intentionally does not add:
+The sum-only implementation has now been promoted into a shared reduction model used by both `sum` and `prod`. `ReductionOperator` owns each operator's identity/combine semantics, while `ReductionPlan` represents the full-tensor or one-axis domain. Existing `reduction_axis` metadata remains as a compatibility view, but verifier, lowering, reference/CPU execution, generated C, DCE, and CSE no longer require a sum-only semantic path.
+
+See `docs/product-reduction.md` for the second-operator executable milestone and its validation evidence.
+
+The next reduction promotion is therefore **multi-axis reduction domains**, not more one-axis spelling or another operator micro-case. A multi-axis phase must canonicalize and verify the reduced axis set, preserve deterministic logical traversal across views, keep same-dtype fixed-width/float fold semantics, and execute through native/OpenMP/serialization/repro/dynamic-specialization paths without introducing an operator-specific lowering engine.
+
+Still out of scope here:
 
 - multiple-axis or axis-tuple reductions;
 - `keepdims`;
-- `mean`, `max`, or another reduction operator;
 - parallel/tree/SIMD reduction of one output value;
 - runtime-selected axes;
+- reduction-elementwise fusion or reassociation;
 - performance claims.
-
-The reduction subsystem now has two executable domain shapes: full-tensor and one compile-time axis. The next promotion should not merely add more axis spellings. A higher-value reduction phase should introduce a reusable reduction-domain/operator plan only together with a genuinely new executable capability (for example a second reduction operator or verifier-backed multi-axis domain), or the project should move to another architectural frontier rather than farming reduction syntax.
