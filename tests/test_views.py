@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 from tiny_tensor_compiler import (
-    DType,
     GraphBuilder,
     IndexMap,
     LoopAlloc,
@@ -15,8 +14,6 @@ from tiny_tensor_compiler import (
     LoopReturn,
     LoopView,
     SymbolicDim,
-    TensorType,
-    VerificationError,
     borrow_inputs,
     common_subexpression_eliminate,
     compile_dynamic_module,
@@ -29,6 +26,7 @@ from tiny_tensor_compiler import (
     lower_to_loops,
     plan_memory,
 )
+from tiny_tensor_compiler.ir import DType, TensorType
 
 
 def _default_compiler_or_skip() -> None:
@@ -98,6 +96,24 @@ def test_loop_view_has_no_storage_allocation_and_storage_root_alias_blocks_write
                 LoopView(1, 0, type_),
                 LoopKernel("relu", 0, (1,), (2, 3), (identity,)),
                 LoopReturn(0),
+            )
+        )
+
+
+def test_loop_verifier_rejects_stale_view_after_storage_root_is_rewritten():
+    type_ = TensorType((2, 3), DType.INT32)
+    identity = IndexMap((0, 1))
+
+    with pytest.raises(ValueError, match="stale.*view|stale.*alias"):
+        LoopProgram(
+            (
+                LoopAlloc(0, type_),
+                LoopAlloc(1, type_),
+                LoopInput(0, 0),
+                LoopView(2, 0, type_),
+                LoopInput(1, 1),
+                LoopKernel("relu", 0, (1,), (2, 3), (identity,)),
+                LoopReturn(2),
             )
         )
 
@@ -176,7 +192,7 @@ def test_view_is_pure_for_dce_and_exact_cse_but_remains_a_fusion_boundary():
     value = builder.input((2, 3), dtype="int32")
     first = value.view((3, 2))
     duplicate = value.view((3, 2))
-    unused = value.view((6,))
+    value.view((6,))
     module = builder.finish(first + duplicate)
 
     assert common_subexpression_eliminate(module) == 1
