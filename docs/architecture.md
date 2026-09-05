@@ -4,10 +4,11 @@
 
 ```mermaid
 flowchart LR
-    A[Python tensor expressions\n+ static typed inputs]
-    B[Typed tensor IR]
+    A[Python tensor expressions\n+ typed inputs]
+    B[Typed tensor IR\nstatic or leading SymbolicDim]
     C[Verifier]
     D[Optimization passes\nfold / simplify / DCE / canonicalize / CSE]
+    S[Runtime batch binding\nconcrete clone + reverify]
     E[Virtual-buffer CPU IR]
     F[Liveness memory planner]
     G[Loop / kernel IR\nexplicit broadcast maps]
@@ -17,7 +18,9 @@ flowchart LR
     K[Reusable native executable\nprocess + persistent cache]
     R[NumPy reference executor]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K
+    A --> B --> C --> D
+    D --> E
+    D --> S --> E
     B --> R
 ```
 
@@ -26,6 +29,9 @@ flowchart LR
 The project treats verification and explicit semantics as compiler features, not test-only conveniences.
 
 - Tensor IR verifies operation arity, ordering/dominance, inferred result types, return structure, legal opcodes, constants, input indices, and use-def consistency.
+- Symbolic tensor IR is deliberately bounded: runtime-dynamic compilation accepts exactly one shared `SymbolicDim`, and every occurrence must be the leading axis. The symbol may broadcast only with itself or dimension `1`; it is never silently unified with an unrelated symbol or a non-unit concrete dimension.
+- Runtime symbolic binding derives that one dimension from actual input shapes, requires every occurrence to agree, validates all static axes and dtypes, then clones the tensor module with a concrete integer binding and reruns the existing verifier before any physical lowering.
+- `DynamicExecutable` owns a deep-cloned symbolic template, including copied constant payloads, so caller mutation after compilation cannot make old and new batch-size specializations represent different programs.
 - Buffer IR keeps virtual values single-write and separates virtual liveness from physical slot reuse.
 - Memory reuse is allowed only after the previous value's last use and only for an exact `TensorType` match.
 - Multiple returned tensors remain live through the terminal return block, so simultaneously returned same-typed values cannot be accidentally assigned one physical slot.
@@ -36,18 +42,18 @@ The project treats verification and explicit semantics as compiler features, not
 - Borrowed runtime arrays must match exact shape/dtype and already be NumPy, C-contiguous, and aligned; the zero-copy contract rejects any input that would require hidden normalization.
 - Integer lowering preserves fixed-width wrapping semantics across the scalar and generated-C paths.
 - Floating-point ReLU preserves NaN behavior and canonicalizes negative zero to match the reference semantics.
-- Runtime inputs are exact: count, static shape, and dtype must match the compiled graph; there is no silent cast.
+- Runtime inputs are exact: concrete execution requires exact count, shape, and dtype; dynamic-batch execution relaxes only the one declared leading symbol and resolves it before physical lowering. There is no silent cast.
 - Native outputs are exact: every returned tensor has its own typed ABI pointer, and preallocated outputs must match shape/dtype/layout/alignment/mutability while remaining disjoint from runtime inputs and from one another.
 
 ## Execution paths
 
 There are intentionally separate execution paths so optimized lowering can be checked against a simpler semantic baseline.
 
-1. **Reference** — executes verified tensor IR with NumPy and defines the semantic baseline. Supports one or multiple returned tensors.
-2. **Loop interpreter** — executes explicit planned loop IR one output index at a time. Supports one or multiple returned tensors after memory planning and fusion. A `BorrowedLoopProgram` binds verified external input slots directly to caller NumPy arrays instead of materializing `LoopInput` copies.
-3. **Native** — emits deterministic C11, compiles a shared library, and invokes one stable output-first ABI entrypoint through `ctypes`. A program with `N` returned tensors exposes `N` ordered typed output pointers followed by its input pointers; single-output programs retain the historical one-`out` signature. Borrowed inputs become typed `const` aliases to those ABI input pointers, so generated input-copy loops disappear while kernel code continues to read the same physical-buffer names.
+1. **Reference** — executes verified tensor IR with NumPy and defines the semantic baseline. For a symbolic-batch module it first applies the same runtime binding and concrete specialization rules used by dynamic native execution. Supports one or multiple returned tensors.
+2. **Loop interpreter** — executes explicit planned loop IR one output index at a time. Supports one or multiple returned tensors after memory planning and fusion. A `BorrowedLoopProgram` binds verified external input slots directly to caller NumPy arrays instead of materializing `LoopInput` copies. Loop IR itself remains concrete-shape IR.
+3. **Native** — emits deterministic C11, compiles a shared library, and invokes one stable output-first ABI entrypoint through `ctypes`. A program with `N` returned tensors exposes `N` ordered typed output pointers followed by its input pointers; single-output programs retain the historical one-`out` signature. Borrowed inputs become typed `const` aliases to those ABI input pointers, so generated input-copy loops disappear while kernel code continues to read the same physical-buffer names. Dynamic execution compiles this same concrete native pipeline separately for each observed batch size.
 
-Native code may be reused in-process or persisted by content-addressed cache identity. Persistent library bytes are staged before loading so the cache remains immutable and Windows DLL locking does not poison reusable artifacts.
+Native code may be reused in-process or persisted by content-addressed cache identity. Persistent library bytes are staged before loading so the cache remains immutable and Windows DLL locking does not poison reusable artifacts. `DynamicExecutable` adds a higher-level batch-size specialization cache whose values are ordinary `NativeExecutable` handles, so identical batch sizes reuse the exact concrete specialization while different sizes retain independent generated-source/cache identities.
 
 ## Optimization philosophy
 
@@ -59,6 +65,7 @@ The compiler is correctness-first and conservative by design.
 - Contiguous-loop linearization happens only when identity indexing proves a row-major flat loop equivalent.
 - Compiler vectorization hints do not select a vector width or change fallback semantics.
 - SSE2 paths are guarded specializations for selected exact contiguous `int32` kernels; unsupported forms fall back to the general generated-C path.
+- Symbolic dimensions are resolved before Buffer/Loop IR instead of introducing variable-length physical storage, symbolic loop arithmetic, or platform-dependent VLA behavior into the existing backend.
 
 ## Phase boundaries
 
@@ -84,6 +91,14 @@ When an input's original physical slot is never written by another input or kern
 
 The historical copied-input path remains the default compatibility behavior. Borrowed mode deliberately rejects Python sequences, non-contiguous views, wrong dtypes/shapes, or misaligned arrays rather than materializing a copy while claiming zero-copy execution.
 
+### Post-v0.1 — runtime symbolic batch phase
+
+`SymbolicDim("B")` extends typed tensor shapes without making the physical backend symbolic. The current contract allows exactly one shared leading runtime dimension. Elementwise type inference preserves `B` when paired with the same `B` or a broadcast dimension of `1`, while incompatible concrete dimensions or distinct symbols are rejected during inference.
+
+`compile_dynamic_module()` validates and deep-clones the symbolic tensor module into a `DynamicExecutable`. Each call binds `B` from the supplied runtime inputs, checks that every symbolic input agrees on the same value and that all static axes/dtypes match, then lazily creates a concrete specialization. Specialization clones the tensor IR, replaces `B` with that integer, reruns the normal verifier, and only then enters the existing concrete `compile_module()` pipeline. Batch sizes are cached independently, so one reusable dynamic executable can run, for example, `B=2`, `B=7`, then `B=2` again without recompiling the second `B=2` native program.
+
+Zero-sized batches are valid because the concrete compiler already has explicit zero-extent semantics. Multi-output and `borrow_inputs=True` are carried through the same specialization boundary. Arbitrary symbolic arithmetic, multiple independent symbols, non-leading symbolic axes, reshape-style shape transforms, and a runtime-sized Buffer/Loop IR remain explicitly outside this phase.
+
 ### Next architectural frontier
 
-Candidate frontiers now include dynamic shapes, generalized SIMD abstraction, general expression-DAG matching, parallel scheduling, and accelerator backends. The next phase should be selected by executable cross-layer value rather than by enumerating more opcode × SIMD corner cases.
+Candidate frontiers now include generalized SIMD abstraction, broader symbolic-shape algebra, general expression-DAG matching, parallel scheduling, and accelerator backends. The next phase should be selected by executable cross-layer value rather than by enumerating more batch-shape or opcode × SIMD corner cases.
