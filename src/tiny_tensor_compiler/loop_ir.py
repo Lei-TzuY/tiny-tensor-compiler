@@ -8,6 +8,7 @@ import numpy as np
 from . import fused_expr
 from .inference import infer_binary, infer_relu, infer_reshape
 from .ir import DType, TensorType
+from .layout import StorageLayout, element_count
 from .lowering import (
     BufferAlloc,
     BufferInput,
@@ -50,6 +51,7 @@ class LoopView:
     output: int
     source: int
     type: TensorType
+    layout: StorageLayout | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,27 @@ class LoopProgram:
         return types
 
     @property
+    def value_layouts(self) -> dict[int, StorageLayout]:
+        types = self.value_types
+        layouts = {
+            alloc.buffer: StorageLayout.contiguous(alloc.type.shape) for alloc in self.allocations
+        }
+        roots = {alloc.buffer: alloc.buffer for alloc in self.allocations}
+        root_types = {alloc.buffer: alloc.type for alloc in self.allocations}
+        for view in self.views:
+            source_layout = layouts[view.source]
+            root = roots[view.source]
+            layout = (
+                source_layout.reshaped(types[view.source].shape, view.type.shape)
+                if view.layout is None
+                else view.layout
+            )
+            layout.validate_bounds(view.type.shape, element_count(root_types[root].shape))
+            layouts[view.output] = layout
+            roots[view.output] = root
+        return layouts
+
+    @property
     def input_types(self) -> tuple[TensorType, ...]:
         types = self.value_types
         return tuple(types[op.output] for op in self.inputs)
@@ -140,7 +163,12 @@ class LoopProgram:
                 lines.append(f"p{op.output} = input {op.index}")
                 continue
             if isinstance(op, LoopView):
-                lines.append(f"p{op.output} = view p{op.source} : {op.type}")
+                suffix = (
+                    ""
+                    if op.layout is None
+                    else f" offset={op.layout.offset} strides={op.layout.strides}"
+                )
+                lines.append(f"p{op.output} = view p{op.source}{suffix} : {op.type}")
                 continue
             if isinstance(op, LoopReturn):
                 lines.append(f"return p{op.buffer}")
@@ -198,7 +226,10 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
             handle = next_handle
             next_handle += 1
             virtual_handles[op.output] = handle
-            operations.append(LoopView(handle, source, virtual_types[op.output]))
+            alias = plan.alias_for(op.output)
+            if alias is None:
+                raise RuntimeError("planned buffer view unexpectedly has no alias descriptor")
+            operations.append(LoopView(handle, source, virtual_types[op.output], alias.layout))
             continue
         if isinstance(op, BufferReturn):
             operations.append(LoopReturn(virtual_handles[op.buffer]))
@@ -256,6 +287,7 @@ def _broadcast_index_map(input_shape: tuple[int, ...], output_shape: tuple[int, 
 def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
     allocated: dict[int, TensorType] = {}
     types: dict[int, TensorType] = {}
+    layouts: dict[int, StorageLayout] = {}
     roots: dict[int, int] = {}
     written: set[int] = set()
     root_generations: dict[int, int] = {}
@@ -277,6 +309,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 raise ValueError(f"physical buffer p{op.buffer} is allocated more than once")
             allocated[op.buffer] = op.type
             types[op.buffer] = op.type
+            layouts[op.buffer] = StorageLayout.contiguous(op.type.shape)
             roots[op.buffer] = op.buffer
             root_generations[op.buffer] = 0
             continue
@@ -306,11 +339,20 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             if op.source not in written:
                 raise ValueError(f"loop view source p{op.source} is not written")
             _verify_fresh_value(op.source, roots, root_generations, value_generations)
-            expected = infer_reshape(types[op.source], op.type.shape)
-            if expected != op.type:
-                raise ValueError("loop view type does not match contiguous reshape inference")
+            if op.type.dtype != types[op.source].dtype:
+                raise ValueError("loop view cannot change storage dtype")
+            root = roots[op.source]
+            if op.layout is None:
+                expected = infer_reshape(types[op.source], op.type.shape)
+                if expected != op.type:
+                    raise ValueError("loop view type does not match contiguous reshape inference")
+                layout = layouts[op.source].reshaped(types[op.source].shape, op.type.shape)
+            else:
+                layout = op.layout
+            layout.validate_bounds(op.type.shape, element_count(allocated[root].shape))
             types[op.output] = op.type
-            roots[op.output] = roots[op.source]
+            layouts[op.output] = layout
+            roots[op.output] = root
             value_generations[op.output] = value_generations[op.source]
             written.add(op.output)
             continue
