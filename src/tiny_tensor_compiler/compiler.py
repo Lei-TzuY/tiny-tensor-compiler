@@ -146,11 +146,17 @@ def compile_module(
     loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
     if borrow_inputs:
         loops = bind_borrowed_inputs(loops)
+    if parallel:
+        return compile_native(
+            loops,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            parallel=True,
+        )
     return compile_native(
         loops,
         compiler=compiler,
         cache_dir=cache_dir,
-        parallel=parallel,
     )
 
 
