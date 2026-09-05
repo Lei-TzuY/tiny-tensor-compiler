@@ -44,6 +44,7 @@ def execute_loop(
     """Execute explicit loop IR over planned physical or borrowed NumPy buffers."""
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     direct_slots = borrowed_slots(program)
+    layouts = program.value_layouts
     buffers: dict[int, np.ndarray] = {}
     return_buffers: list[int] = []
 
@@ -61,9 +62,18 @@ def execute_loop(
             continue
 
         if isinstance(op, LoopView):
-            source = buffers[op.source]
-            viewed = np.reshape(source, op.type.shape, order="C")
-            if not np.shares_memory(viewed, source):
+            root = program.storage_root(op.output)
+            root_array = buffers[root]
+            layout = layouts[op.output]
+            itemsize = root_array.dtype.itemsize
+            viewed = np.ndarray(
+                shape=op.type.shape,
+                dtype=op.type.dtype.to_numpy(),
+                buffer=root_array,
+                offset=layout.offset * itemsize,
+                strides=tuple(stride * itemsize for stride in layout.strides),
+            )
+            if viewed.size and not np.shares_memory(viewed, root_array):
                 raise RuntimeError("verified loop view unexpectedly required a copy")
             buffers[op.output] = viewed
             continue
