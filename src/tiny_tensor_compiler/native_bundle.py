@@ -207,7 +207,7 @@ def load_native_bundle(
         library = _load_library(staged_library)
         artifact = _NativeArtifact(staging_directory, library)
         try:
-            getattr(library, "tiny_tensor_run")
+            _ = library.tiny_tensor_run
         except AttributeError as error:
             artifact.close()
             raise NativeBundleError("native bundle is missing tiny_tensor_run") from error
