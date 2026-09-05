@@ -4,7 +4,7 @@ from collections import Counter
 
 import numpy as np
 
-from .inference import TypeInferenceError, infer_binary, infer_relu
+from .inference import TypeInferenceError, infer_binary, infer_relu, infer_reshape
 from .ir import DType, Module, Operation, TensorType, Value
 
 
@@ -44,6 +44,8 @@ def verify(module: Module) -> None:
             _verify_binary(op_index, op)
         elif op.opcode == "relu":
             _verify_relu(op_index, op)
+        elif op.opcode == "reshape":
+            _verify_reshape(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -128,6 +130,22 @@ def _verify_relu(op_index: int, op: Operation) -> None:
             op_index,
             op,
             f"result type {op.results[0].type} does not match operand type {expected_type}",
+        )
+
+
+def _verify_reshape(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=1, results=1)
+    if op.attrs:
+        _fail(op_index, op, "reshape does not accept attributes")
+    try:
+        expected_type = infer_reshape(op.operands[0].type, op.results[0].type.shape)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if op.results[0].type != expected_type:
+        _fail(
+            op_index,
+            op,
+            f"reshape result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
