@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from .alias_regions import provably_disjoint_storage_spans
 from .inference import (
     TypeInferenceError,
     infer_binary,
@@ -234,10 +235,19 @@ class GraphBuilder:
             raise ValueError("copy_into root must use internal computed storage")
         if _storage_root(target.value) is not owner:
             raise ValueError("copy_into target must alias the supplied root storage")
-        if _storage_root(source.value) is owner:
-            raise ValueError("copy_into source must use a different storage root")
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
+        if _storage_root(source.value) is owner:
+            if not provably_disjoint_storage_spans(target.value, source.value):
+                raise ValueError(
+                    "copy_into source must use a different storage root or a statically "
+                    "provable disjoint same-root region"
+                )
+            # Preserve the lower-level different-root write invariant by materializing an
+            # explicit row-major snapshot before the write. The canonical tensor IR thus
+            # records the extra storage/effect ordering instead of hiding overlap handling
+            # inside Buffer/Loop/native codegen.
+            source = self.reshape(source, source.type.shape)
 
         op = self.function.add_op(
             "copy_into",
