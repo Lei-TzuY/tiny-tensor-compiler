@@ -21,13 +21,12 @@ from .ir import DType, TensorType
 from .loop_ir import LoopProgram
 from .native import (
     ExecutionResult,
-    NativeCompilationError,
     NativeOutput,
-    _NativeArtifact,
     _compile_source,
     _compiler_command,
     _library_name,
     _load_library,
+    _NativeArtifact,
     _pointer_type,
 )
 
@@ -110,14 +109,6 @@ class NativeBundleExecutable:
         out: NativeOutput = None,
     ) -> ExecutionResult:
         return self.execute(inputs, out=out)
-
-    def __enter__(self) -> NativeBundleExecutable:
-        if self.closed:
-            raise RuntimeError("native bundle executable is closed")
-        return self
-
-    def __exit__(self, _exc_type, _exc, _traceback) -> None:
-        self.close()
 
 
 def compile_native_bundle(
@@ -216,7 +207,7 @@ def load_native_bundle(
         library = _load_library(staged_library)
         artifact = _NativeArtifact(staging_directory, library)
         try:
-            library.tiny_tensor_run
+            getattr(library, "tiny_tensor_run")
         except AttributeError as error:
             artifact.close()
             raise NativeBundleError("native bundle is missing tiny_tensor_run") from error
@@ -253,7 +244,10 @@ def _encode_tensor_type(type_: TensorType) -> dict[str, object]:
 def _decode_type_sequence(value: object, *, label: str) -> tuple[TensorType, ...]:
     if not isinstance(value, list):
         raise NativeBundleError(f"native bundle {label} must be a list")
-    return tuple(_decode_tensor_type(item, label=f"{label} entry {index}") for index, item in enumerate(value))
+    return tuple(
+        _decode_tensor_type(item, label=f"{label} entry {index}")
+        for index, item in enumerate(value)
+    )
 
 
 def _decode_tensor_type(value: object, *, label: str) -> TensorType:
