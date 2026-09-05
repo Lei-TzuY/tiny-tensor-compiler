@@ -5,7 +5,9 @@ import numpy as np
 from .ir import DType, Module, Operation, Value
 from .verifier import verify
 
-_PURE_OPCODES = frozenset({"const", "add", "mul", "relu", "reshape", "view", "slice"})
+_PURE_OPCODES = frozenset(
+    {"const", "add", "mul", "relu", "reshape", "view", "slice", "transpose"}
+)
 _CSE_OPCODES = frozenset({"add", "mul", "relu", "reshape", "view"})
 _CANONICAL_COMMUTATIVE_OPCODES = frozenset({"add", "mul"})
 
