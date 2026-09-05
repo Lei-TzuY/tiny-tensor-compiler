@@ -95,7 +95,7 @@ def execute_loop(
         reduction = op.reduction
         if reduction is not None:
             source = buffers[op.inputs[0]]
-            if reduction.axis is None:
+            if reduction.axes is None:
                 accumulator = reduction.operator.identity(output.dtype)
                 for input_index in np.ndindex(source.shape):
                     accumulator = reduction.operator.combine(
@@ -105,14 +105,14 @@ def execute_loop(
                     )
                 output[()] = accumulator
             else:
-                axis = reduction.axis
+                reduction_shape = reduction.reduction_shape(source.shape)
                 for output_index in np.ndindex(op.iteration_shape):
                     accumulator = reduction.operator.identity(output.dtype)
-                    for reduction_index in range(source.shape[axis]):
-                        input_index = (
-                            output_index[:axis]
-                            + (reduction_index,)
-                            + output_index[axis:]
+                    for reduction_index in np.ndindex(reduction_shape):
+                        input_index = reduction.input_index(
+                            source.ndim,
+                            output_index,
+                            reduction_index,
                         )
                         accumulator = reduction.operator.combine(
                             output.dtype,
