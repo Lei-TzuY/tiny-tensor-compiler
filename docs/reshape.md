@@ -6,9 +6,9 @@ This phase adds `Tensor.reshape(shape)` as a first-class typed tensor operation 
 
 `reshape` preserves dtype and the row-major element sequence. It changes only the logical tensor shape.
 
-The current implementation is intentionally a **copy operation**, not a view. Lowering allocates a distinct output buffer and copies elements in C-order. The existing memory planner still requires one exact `TensorType` for every reused physical slot, and Loop IR still rejects kernel output/input aliasing. A rank- or shape-changing reshape therefore cannot silently become an aliasing view.
+`reshape` intentionally remains a **copy operation**. Lowering allocates a distinct output buffer and copies elements in C-order. Callers that want the separately verified zero-copy whole-storage alias contract use `Tensor.view(shape)` instead; the two operations remain distinct in tensor IR and physical lowering.
 
-This boundary keeps the existing zero-copy input contract honest: borrowed runtime inputs may be read directly, but reshape writes a distinct internal/output buffer. No hidden input normalization copy is introduced by borrowing, and no reshape view is claimed.
+This boundary keeps the existing zero-copy input contract honest: borrowed runtime inputs may be read directly, but reshape writes a distinct internal/output buffer. No hidden input normalization copy is introduced by borrowing, and `reshape` itself never claims view semantics.
 
 ## Exact element-count proof
 
@@ -34,6 +34,8 @@ A reshape target also may not introduce a symbolic dimension that is absent from
 
 After dynamic bindings are solved, normal module specialization concretizes both the operand and reshape result types and reruns the verifier before physical lowering. Buffer IR, Loop IR, generated C, and the native ABI therefore remain concrete-sized exactly as before.
 
+The same shape proof is reused by `view`; the distinction between the two operations is physical copy versus alias semantics, not a weaker shape rule.
+
 ## Physical lowering
 
 Buffer IR represents reshape as a normal one-input pure kernel with a distinct virtual output buffer.
@@ -44,9 +46,11 @@ Generated C emits the same flat `n` copy loop. The ordinary serial path keeps th
 
 The reference executor explicitly copies the NumPy C-order reshape result, and the loop CPU executor copies between flattened C-contiguous physical buffers. This preserves one observable semantic contract across all execution layers.
 
+By contrast, `view` receives no copy kernel or new physical allocation; its separate contract is documented in `docs/views.md`.
+
 ## Fusion and optimization
 
-Reshape is a fusion boundary in this phase. Elementwise fusion may not absorb a reshape or reinterpret its rank change as identity indexing.
+Reshape is a fusion boundary. Elementwise fusion may not absorb a reshape or reinterpret its rank change as identity indexing.
 
 Reshape is nevertheless a known pure operation for existing optimizer infrastructure:
 
@@ -75,14 +79,13 @@ The tests establish correctness and executable interoperability. They do not est
 
 ## Deliberately out of scope
 
-This phase does not add:
+`reshape` itself does not add:
 
 - inferred `-1` dimensions;
 - transpose or arbitrary stride transforms;
-- zero-copy reshape views;
-- view/alias-aware physical-buffer lifetimes;
+- implicit zero-copy behavior;
 - reshape-chain folding or constant-reshape folding;
 - runtime-sized Buffer/Loop IR;
 - a performance/profitability policy for parallel reshape copies.
 
-A zero-copy view would require a real alias-aware memory model rather than a flag on the current copy kernel. That should be treated as a separate architectural phase. After this reshape-copy milestone, the higher-value frontiers are therefore either an explicit view/stride/alias subsystem with verifier-backed lifetime semantics, or a genuinely new executable backend/ISA rather than micro-tuning the copy loop.
+A separate `view` operation now provides verified whole-storage C-contiguous zero-copy shape aliases with alias-aware lifetimes and storage-generation checks. Non-zero offsets, arbitrary strides, transpose/permutation, slicing, partial overlapping views, and writable/in-place view kernels remain a later layout phase rather than being hidden inside reshape.
