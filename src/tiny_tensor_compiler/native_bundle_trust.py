@@ -17,7 +17,6 @@ from .native_bundle_archive import (
     load_dynamic_bundle_set_archive,
 )
 from .native_bundle_attestation import (
-    NativeBundleTrustError,
     PublisherTrustPolicy,
     create_archive_attestation,
     normalize_publisher_id,
@@ -204,7 +203,6 @@ def fetch_attested_dynamic_bundle_set_archive(
         )
     )
     staged_archive = staging_root / "payload.ttca"
-    published = False
     try:
         fetch_dynamic_bundle_set_archive(
             base_url,
@@ -231,12 +229,9 @@ def fetch_attested_dynamic_bundle_set_archive(
                 f"attested bundle registry destination already exists: {destination_path}"
             )
         os.replace(staged_archive, destination_path)
-        published = True
         return destination_path
     finally:
         shutil.rmtree(staging_root, ignore_errors=True)
-        if not published:
-            destination_path.unlink(missing_ok=True)
 
 
 def load_attested_dynamic_bundle_set_registry(
