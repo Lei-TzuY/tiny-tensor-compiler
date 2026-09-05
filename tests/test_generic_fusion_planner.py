@@ -17,6 +17,7 @@ from tiny_tensor_compiler import (
 )
 from tiny_tensor_compiler.fused_expr import binary_tree_expression, chain_tree_expression
 from tiny_tensor_compiler.ir import DType, TensorType
+from tiny_tensor_compiler.loop_ir import fuse_elementwise as loop_ir_fuse_elementwise
 
 
 def _default_compiler_or_skip() -> None:
@@ -144,3 +145,8 @@ def test_generic_planner_is_idempotent_for_mirrored_topologies() -> None:
     for program in (_mirror_tree_program(), _mirror_chain_tree_program()):
         fused = fuse_elementwise(program)
         assert fuse_elementwise(fused).dump() == fused.dump()
+
+
+def test_loop_ir_compatibility_entry_point_uses_same_planner() -> None:
+    for program in (_mirror_tree_program(), _mirror_chain_tree_program()):
+        assert loop_ir_fuse_elementwise(program).dump() == fuse_elementwise(program).dump()
