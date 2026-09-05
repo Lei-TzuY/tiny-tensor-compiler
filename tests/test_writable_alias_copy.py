@@ -19,7 +19,7 @@ from tiny_tensor_compiler import (
     plan_memory,
     verify,
 )
-from tiny_tensor_compiler.ir import DType, Function, Module, TensorType
+from tiny_tensor_compiler.ir import DType, TensorType
 
 
 def _default_compiler_or_skip() -> None:
@@ -144,7 +144,7 @@ def test_copy_into_is_terminal_effect_and_old_handles_cannot_be_used_after_write
     patch = builder.input((2, 2), dtype="int32")
     owned = base.relu()
     target = owned.slice(axis=1, start=0, stop=4, step=2)
-    updated = owned.copy_into(target, patch)
+    owned.copy_into(target, patch)
     stale_use = owned.relu()
     module = builder.finish(stale_use)
 
@@ -163,17 +163,30 @@ def test_copy_into_is_terminal_effect_and_old_handles_cannot_be_used_after_write
 
 
 def test_copy_into_loop_verifier_rejects_same_storage_source():
-    from tiny_tensor_compiler import LoopAlloc, LoopCopyInto, LoopInput, LoopProgram, LoopReturn, LoopView, StorageLayout
+    from tiny_tensor_compiler import (
+        IndexMap,
+        LoopAlloc,
+        LoopCopyInto,
+        LoopInput,
+        LoopKernel,
+        LoopProgram,
+        LoopReturn,
+        LoopView,
+        StorageLayout,
+    )
 
     type_ = TensorType((4,), DType.INT32)
+    layout = StorageLayout.contiguous((4,))
     with pytest.raises(ValueError, match="different storage root"):
         LoopProgram(
             (
                 LoopAlloc(0, type_),
-                LoopInput(0, 0),
-                LoopView(1, 0, type_, StorageLayout.contiguous((4,))),
-                LoopCopyInto(2, 0, 1, 0, type_, StorageLayout.contiguous((4,))),
-                LoopReturn(2),
+                LoopAlloc(1, type_),
+                LoopInput(1, 0),
+                LoopKernel("relu", 0, (1,), (4,), (IndexMap((0,)),)),
+                LoopView(2, 0, type_, layout),
+                LoopCopyInto(3, 0, 2, 0, type_, layout),
+                LoopReturn(3),
             )
         )
 
