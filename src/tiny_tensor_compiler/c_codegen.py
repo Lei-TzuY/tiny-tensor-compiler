@@ -9,6 +9,7 @@ import numpy as np
 
 from .ir import DType, TensorType
 from .loop_ir import IndexMap, LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
+from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
 
 _BINARY_CHAIN_OPERATORS = {
     "chain_add_add": ("+", "+"),
@@ -134,8 +135,15 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
-    if _can_emit_sse2_i32(op, types):
-        lines.extend(_emit_sse2_i32(op, output_type))
+    sse2_plan = _select_i32_sse2_plan(op, types)
+    if sse2_plan is not None:
+        lines.extend(
+            emit_i32_sse2_plan(
+                sse2_plan,
+                output=op.output,
+                count=_element_count(output_type),
+            )
+        )
         lines.append("    }")
         lines.append("")
         return lines
@@ -214,7 +222,7 @@ def _emit_kernel(
             lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
         else:
             lines.append(
-                f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail});"
+                f"{indent}{output_ref} = (({c_type})inner {outer_operator} ({c_type}){tail};"
             )
     elif op.opcode in _BINARY_TREE_OPERATORS or op.opcode in _RELU_BINARY_TREE_OPCODES:
         left_lhs = input_ref(0)
@@ -279,201 +287,20 @@ def _emit_kernel(
     return lines
 
 
-def _can_emit_sse2_i32(op: LoopKernel, types: dict[int, TensorType]) -> bool:
-    return (
-        op.opcode in {
-            "add",
-            "relu",
-            "relu_add",
-            "chain_add_add",
-            "relu_chain_add_add",
-            "tree_add_add_add",
-        }
-        and types[op.output].dtype == DType.INT32
-        and all(types[buffer].dtype == DType.INT32 for buffer in op.inputs)
-        and _can_linearize_kernel(op, types)
-    )
-
-
-def _emit_sse2_i32(op: LoopKernel, output_type: TensorType) -> list[str]:
-    if op.opcode == "relu":
-        return _emit_sse2_i32_relu(op, output_type)
-    if op.opcode in {"chain_add_add", "relu_chain_add_add"}:
-        return _emit_sse2_i32_chain_add_add(op, output_type)
-    if op.opcode == "tree_add_add_add":
-        return _emit_sse2_i32_tree_add_add_add(op, output_type)
-
-    lhs, rhs = op.inputs
-    count = _element_count(output_type)
-    output = op.output
-    relu = op.opcode == "relu_add"
-    lines = [
-        "        #if TINY_TENSOR_HAS_SSE2",
-        "        int64_t n = 0;",
-        f"        for (; n + 4 <= {count}; n += 4) {{",
-        f"            __m128i lhs = _mm_loadu_si128((const __m128i *)&p{lhs}[n]);",
-        f"            __m128i rhs = _mm_loadu_si128((const __m128i *)&p{rhs}[n]);",
-        "            __m128i sum = _mm_add_epi32(lhs, rhs);",
-    ]
-    if relu:
-        lines.extend(
-            [
-                "            __m128i zero = _mm_setzero_si128();",
-                "            __m128i positive = _mm_cmpgt_epi32(sum, zero);",
-                "            __m128i relu = _mm_and_si128(sum, positive);",
-                f"            _mm_storeu_si128((__m128i *)&p{output}[n], relu);",
-            ]
-        )
-    else:
-        lines.append(f"            _mm_storeu_si128((__m128i *)&p{output}[n], sum);")
-    lines.extend(["        }", f"        for (; n < {count}; ++n) {{"])
-    if relu:
-        lines.extend(
-            [
-                f"            int32_t value = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
-                f"            p{output}[n] = value < 0 ? 0 : value;",
-            ]
-        )
-    else:
-        lines.append(f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);")
-    lines.extend(["        }", "        #else", "        TINY_TENSOR_VECTORIZE_LOOP"])
-    lines.append(f"        for (int64_t n = 0; n < {count}; ++n) {{")
-    if relu:
-        lines.extend(
-            [
-                f"            int32_t value = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
-                f"            p{output}[n] = value < 0 ? 0 : value;",
-            ]
-        )
-    else:
-        lines.append(f"            p{output}[n] = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);")
-    lines.extend(["        }", "        #endif"])
-    return lines
-
-
-def _emit_sse2_i32_chain_add_add(op: LoopKernel, output_type: TensorType) -> list[str]:
-    lhs, rhs, tail = op.inputs
-    count = _element_count(output_type)
-    output = op.output
-    relu = op.opcode == "relu_chain_add_add"
-    lines = [
-        "        #if TINY_TENSOR_HAS_SSE2",
-        "        int64_t n = 0;",
-        f"        for (; n + 4 <= {count}; n += 4) {{",
-        f"            __m128i lhs = _mm_loadu_si128((const __m128i *)&p{lhs}[n]);",
-        f"            __m128i rhs = _mm_loadu_si128((const __m128i *)&p{rhs}[n]);",
-        f"            __m128i tail = _mm_loadu_si128((const __m128i *)&p{tail}[n]);",
-        "            __m128i inner = _mm_add_epi32(lhs, rhs);",
-        "            __m128i result = _mm_add_epi32(inner, tail);",
-    ]
-    if relu:
-        lines.extend(
-            [
-                "            __m128i zero = _mm_setzero_si128();",
-                "            __m128i positive = _mm_cmpgt_epi32(result, zero);",
-                "            __m128i relu = _mm_and_si128(result, positive);",
-                f"            _mm_storeu_si128((__m128i *)&p{output}[n], relu);",
-            ]
-        )
-    else:
-        lines.append(f"            _mm_storeu_si128((__m128i *)&p{output}[n], result);")
-    lines.extend(
-        [
-            "        }",
-            f"        for (; n < {count}; ++n) {{",
-            f"            int32_t inner = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
-        ]
-    )
-    if relu:
-        lines.extend(
-            [
-                f"            int32_t value = ((int32_t)inner + (int32_t)p{tail}[n]);",
-                f"            p{output}[n] = value < 0 ? 0 : value;",
-            ]
-        )
-    else:
-        lines.append(f"            p{output}[n] = ((int32_t)inner + (int32_t)p{tail}[n]);")
-    lines.extend(
-        [
-            "        }",
-            "        #else",
-            "        TINY_TENSOR_VECTORIZE_LOOP",
-            f"        for (int64_t n = 0; n < {count}; ++n) {{",
-            f"            int32_t inner = ((int32_t)p{lhs}[n] + (int32_t)p{rhs}[n]);",
-        ]
-    )
-    if relu:
-        lines.extend(
-            [
-                f"            int32_t value = ((int32_t)inner + (int32_t)p{tail}[n]);",
-                f"            p{output}[n] = value < 0 ? 0 : value;",
-            ]
-        )
-    else:
-        lines.append(f"            p{output}[n] = ((int32_t)inner + (int32_t)p{tail}[n]);")
-    lines.extend(["        }", "        #endif"])
-    return lines
-
-
-def _emit_sse2_i32_tree_add_add_add(op: LoopKernel, output_type: TensorType) -> list[str]:
-    a, b, c, d = op.inputs
-    count = _element_count(output_type)
-    output = op.output
-    return [
-        "        #if TINY_TENSOR_HAS_SSE2",
-        "        int64_t n = 0;",
-        f"        for (; n + 4 <= {count}; n += 4) {{",
-        f"            __m128i a = _mm_loadu_si128((const __m128i *)&p{a}[n]);",
-        f"            __m128i b = _mm_loadu_si128((const __m128i *)&p{b}[n]);",
-        f"            __m128i c = _mm_loadu_si128((const __m128i *)&p{c}[n]);",
-        f"            __m128i d = _mm_loadu_si128((const __m128i *)&p{d}[n]);",
-        "            __m128i left = _mm_add_epi32(a, b);",
-        "            __m128i right = _mm_add_epi32(c, d);",
-        "            __m128i result = _mm_add_epi32(left, right);",
-        f"            _mm_storeu_si128((__m128i *)&p{output}[n], result);",
-        "        }",
-        f"        for (; n < {count}; ++n) {{",
-        f"            int32_t left = ((int32_t)p{a}[n] + (int32_t)p{b}[n]);",
-        f"            int32_t right = ((int32_t)p{c}[n] + (int32_t)p{d}[n]);",
-        f"            p{output}[n] = ((int32_t)left + (int32_t)right);",
-        "        }",
-        "        #else",
-        "        TINY_TENSOR_VECTORIZE_LOOP",
-        f"        for (int64_t n = 0; n < {count}; ++n) {{",
-        f"            int32_t left = ((int32_t)p{a}[n] + (int32_t)p{b}[n]);",
-        f"            int32_t right = ((int32_t)p{c}[n] + (int32_t)p{d}[n]);",
-        f"            p{output}[n] = ((int32_t)left + (int32_t)right);",
-        "        }",
-        "        #endif",
-    ]
-
-
-def _emit_sse2_i32_relu(op: LoopKernel, output_type: TensorType) -> list[str]:
-    (operand,) = op.inputs
-    count = _element_count(output_type)
-    output = op.output
-    return [
-        "        #if TINY_TENSOR_HAS_SSE2",
-        "        int64_t n = 0;",
-        f"        for (; n + 4 <= {count}; n += 4) {{",
-        f"            __m128i value = _mm_loadu_si128((const __m128i *)&p{operand}[n]);",
-        "            __m128i zero = _mm_setzero_si128();",
-        "            __m128i positive = _mm_cmpgt_epi32(value, zero);",
-        "            __m128i relu = _mm_and_si128(value, positive);",
-        f"            _mm_storeu_si128((__m128i *)&p{output}[n], relu);",
-        "        }",
-        f"        for (; n < {count}; ++n) {{",
-        f"            int32_t value = (int32_t)p{operand}[n];",
-        f"            p{output}[n] = value < 0 ? 0 : value;",
-        "        }",
-        "        #else",
-        "        TINY_TENSOR_VECTORIZE_LOOP",
-        f"        for (int64_t n = 0; n < {count}; ++n) {{",
-        f"            int32_t value = (int32_t)p{operand}[n];",
-        f"            p{output}[n] = value < 0 ? 0 : value;",
-        "        }",
-        "        #endif",
-    ]
+def _select_i32_sse2_plan(
+    op: LoopKernel,
+    types: dict[int, TensorType],
+) -> I32SSE2Plan | None:
+    plan = build_i32_sse2_plan(op)
+    if plan is None:
+        return None
+    if types[op.output].dtype != DType.INT32:
+        return None
+    if any(types[buffer].dtype != DType.INT32 for buffer in op.inputs):
+        return None
+    if not _can_linearize_kernel(op, types):
+        return None
+    return plan
 
 
 def _can_linearize_kernel(op: LoopKernel, types: dict[int, TensorType]) -> bool:
