@@ -10,6 +10,7 @@ from ..input_binding import borrow_inputs as bind_borrowed_inputs
 from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
     LoopAlloc,
+    LoopCopyInto,
     LoopInput,
     LoopKernel,
     LoopProgram,
@@ -76,6 +77,11 @@ def execute_loop(
             if viewed.size and not np.shares_memory(viewed, root_array):
                 raise RuntimeError("verified loop view unexpectedly required a copy")
             buffers[op.output] = viewed
+            continue
+
+        if isinstance(op, LoopCopyInto):
+            np.copyto(buffers[op.target], buffers[op.source])
+            buffers[op.output] = buffers[op.root]
             continue
 
         if isinstance(op, LoopReturn):
