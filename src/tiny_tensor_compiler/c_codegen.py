@@ -113,6 +113,21 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
+    if op.opcode == "reshape":
+        if len(op.inputs) != 1:
+            raise RuntimeError("verified reshape loop unexpectedly has invalid arity")
+        lines.extend(
+            [
+                "        TINY_TENSOR_VECTORIZE_LOOP",
+                f"        for (int64_t n = 0; n < {_element_count(output_type)}; ++n) {{",
+                f"            p{op.output}[n] = p{op.inputs[0]}[n];",
+                "        }",
+                "    }",
+                "",
+            ]
+        )
+        return lines
+
     sse2_plan = _select_i32_sse2_plan(op, types)
     if sse2_plan is not None:
         lines.extend(
