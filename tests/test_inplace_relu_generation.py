@@ -109,7 +109,7 @@ def test_generated_c_keeps_inplace_relu_serial_and_exposes_fresh_mutable_root():
     module = _module()
     loops = lower_to_loops(lower_to_cpu(module))
     source = generate_c(loops, parallel=True)
-    effects = getattr(loops, "relu_writes")
+    effects = loops.relu_writes
     assert len(effects) == 1
     effect = effects[0]
 
