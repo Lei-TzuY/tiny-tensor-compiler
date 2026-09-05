@@ -7,9 +7,17 @@ from typing import Any
 
 import numpy as np
 
-from .fused_expr import FusedExpression, describe_fused_opcode
+from .fused_expr import FusedExpression
 from .ir import DType, TensorType
-from .loop_ir import IndexMap, LoopAlloc, LoopInput, LoopKernel, LoopProgram, LoopReturn
+from .loop_ir import (
+    IndexMap,
+    LoopAlloc,
+    LoopInput,
+    LoopKernel,
+    LoopProgram,
+    LoopReturn,
+    fused_expression_for_kernel,
+)
 from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
 
 
@@ -174,7 +182,7 @@ def _emit_kernel(
         lines.append(f"{indent}{c_type} value = (({c_type}){lhs} {operator} ({c_type}){rhs});")
         lines.extend(_emit_relu_assignment(output_ref, output_type.dtype, zero, indent))
     else:
-        expression = describe_fused_opcode(op.opcode)
+        expression = fused_expression_for_kernel(op)
         if expression is None:
             raise RuntimeError(f"unsupported verified loop kernel: {op.opcode}")
         lines.extend(
