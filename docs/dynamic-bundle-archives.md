@@ -2,7 +2,7 @@
 
 The archive transport wraps one already-verified finite `native-bundle-set-v1` directory in a single deterministic file without weakening any child bundle, ABI, target, or runtime-shape checks.
 
-It is a transport boundary, not a new executable backend and not a package-authenticity system.
+It is a transport boundary, not a new executable backend and not by itself a package-authenticity system.
 
 ## API
 
@@ -22,7 +22,7 @@ finally:
 
 Packing still happens after compilation: `pack_dynamic_bundle_set_archive()` never invokes a compiler. Loading and dispatch are likewise compiler-free.
 
-Verified archive bytes may also be distributed through the separate content-addressed registry layer documented in `content-addressed-bundle-registry.md`. That layer pins the exact archive SHA-256, streams/downloads with explicit transport bounds, and then reuses this archive loader unchanged for complete payload verification.
+Verified archive bytes may also be distributed through the separate content-addressed registry layer documented in `content-addressed-bundle-registry.md`. That layer pins the exact archive SHA-256, streams/downloads with explicit transport bounds, and then reuses this archive loader unchanged for complete payload verification. Callers that additionally require publisher authorization may use the optional Ed25519 layer documented in `bundle-publisher-attestations.md`.
 
 ## Transport schema
 
@@ -72,9 +72,13 @@ Archive validation composes existing internal consistency checks:
 - ABI identity exported by the loaded shared library;
 - current target identity.
 
-These checks detect corruption, partial replacement, path-confusion attempts, and incoherent package substitution. They do **not** authenticate who produced the archive. There is no signature, trusted publisher key, certificate chain, transparency log, or publisher-trust policy in this phase. A party able to replace an entire coherent archive can still construct another internally consistent package.
+These checks detect corruption, partial replacement, path-confusion attempts, and incoherent package substitution. The bare archive format still does **not** authenticate who produced the archive. A party able to replace an entire coherent archive can construct another internally consistent package.
 
-The content-addressed registry layer narrows remote substitution by requiring a caller-pinned SHA-256 for the exact archive bytes and by reusing this full verifier after download. It still does not establish publisher identity: a caller who is persuaded to trust a different digest can be directed to a different coherent archive.
+The content-addressed registry narrows remote substitution by requiring a caller-pinned SHA-256 for the exact archive bytes and by reusing this full verifier after download. It still does not establish publisher identity on its own.
+
+Publisher authorization is an optional layer above both contracts. `PublisherTrustPolicy` pins accepted Ed25519 public keys, and the attested registry APIs verify a detached authorization over the exact archive digest before a staged download can become a caller-visible destination or executable. See `bundle-publisher-attestations.md` for its threat model and limitations.
+
+This layering is intentional: archive consistency, content-addressed byte identity, and publisher authorization remain distinct properties with independent failure modes.
 
 ## Evidence scope
 
@@ -84,6 +88,6 @@ No compression-ratio, deployment-size, network-transfer, or runtime-performance 
 
 ## Next promotion
 
-The local single-file transport and the first controlled content-addressed HTTP(S) distribution boundary are now separate completed layers. Further ZIP metadata/compression variants or mutable registry naming would be low-value format farming.
+The deterministic archive, controlled content-addressed HTTP(S) transport, and optional caller-pinned publisher-authorization layer are now separate bounded contracts. Further ZIP metadata/compression variants, mutable registry naming, alternate signature encodings, or extra key formats would be low-value format farming.
 
-A later trust phase should add genuine publisher authenticity/provenance using a standard reviewable mechanism with explicit key/trust/revocation semantics. Until such a mechanism can be validated cross-platform without inventing a bespoke cryptographic stack, other independent compiler/runtime frontiers remain preferable to fake signing claims.
+Further trust work should add a genuinely new property such as standardized freshness/rollback metadata or transparency evidence; otherwise the project should promote on another independent compiler/runtime frontier.
