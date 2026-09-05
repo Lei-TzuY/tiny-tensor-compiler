@@ -5,7 +5,6 @@ from typing import Any
 
 import numpy as np
 
-from .alias_regions import provably_disjoint_storage_spans
 from .inference import (
     TypeInferenceError,
     infer_binary,
@@ -238,15 +237,12 @@ class GraphBuilder:
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
         if _storage_root(source.value) is owner:
-            if not provably_disjoint_storage_spans(target.value, source.value):
-                raise ValueError(
-                    "copy_into source must use a different storage root or a statically "
-                    "provable disjoint same-root region"
-                )
-            # Preserve the lower-level different-root write invariant by materializing an
-            # explicit row-major snapshot before the write. The canonical tensor IR thus
-            # records the extra storage/effect ordering instead of hiding overlap handling
-            # inside Buffer/Loop/native codegen.
+            # Same-root writes have explicit snapshot semantics at the public builder
+            # boundary. Materialize the logical source in C order before mutating the
+            # owning root, so overlapping, interleaved, reversed, transposed, and
+            # unresolved-symbolic layouts all reduce to the existing different-root
+            # copy_into contract. The lower verifier/backend invariant therefore stays
+            # fail-closed rather than acquiring hidden memmove behavior.
             source = self.reshape(source, source.type.shape)
 
         op = self.function.add_op(
