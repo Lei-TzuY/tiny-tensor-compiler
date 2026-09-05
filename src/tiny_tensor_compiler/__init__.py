@@ -10,7 +10,7 @@ from .frontend import GraphBuilder, Tensor
 from .fusion_planner import fuse_elementwise
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
-from .ir import SymbolicDim
+from .ir import AffineDim, SymbolicDim
 from .loop_ir import (
     IndexMap,
     LoopAlloc,
@@ -56,6 +56,7 @@ from .symbolic import (
 from .verifier import VerificationError, verify
 
 __all__ = [
+    "AffineDim",
     "BorrowedInput",
     "BorrowedLoopProgram",
     "BufferAlloc",
