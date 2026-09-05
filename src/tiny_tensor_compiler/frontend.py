@@ -10,6 +10,7 @@ from .inference import (
     infer_binary,
     infer_relu,
     infer_reshape,
+    infer_reverse,
     infer_slice,
     infer_transpose,
 )
@@ -55,6 +56,9 @@ class Tensor:
         step: int = 1,
     ) -> Tensor:
         return self._builder.slice(self, axis=axis, start=start, stop=stop, step=step)
+
+    def reverse(self, axis: int) -> Tensor:
+        return self._builder.reverse(self, axis)
 
     def transpose(self, axes: Iterable[int] | None = None) -> Tensor:
         return self._builder.transpose(self, axes)
@@ -181,6 +185,18 @@ class GraphBuilder:
                 "stop": normalized_stop,
                 "step": step,
             },
+        )
+        return Tensor(self, op.results[0])
+
+    def reverse(self, tensor: Tensor, axis: int) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        result_type = infer_reverse(tensor.type, axis)
+        op = self.function.add_op(
+            "reverse",
+            operands=[tensor.value],
+            result_types=[result_type],
+            attrs={"axis": axis},
         )
         return Tensor(self, op.results[0])
 
