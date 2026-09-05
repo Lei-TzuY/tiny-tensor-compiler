@@ -43,10 +43,25 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
         elif op.opcode == "sum":
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]]
-            accumulator = dtype.type(0)
-            for index in np.ndindex(operand.shape):
-                accumulator = dtype.type(np.add(accumulator, operand[index]))
-            values[op.results[0]] = np.array(accumulator, dtype=dtype)
+            axis = op.attrs.get("axis")
+            if axis is None:
+                accumulator = dtype.type(0)
+                for index in np.ndindex(operand.shape):
+                    accumulator = dtype.type(np.add(accumulator, operand[index]))
+                values[op.results[0]] = np.array(accumulator, dtype=dtype)
+            else:
+                output = np.empty(op.results[0].type.shape, dtype=dtype)
+                for output_index in np.ndindex(output.shape):
+                    accumulator = dtype.type(0)
+                    for reduction_index in range(operand.shape[axis]):
+                        input_index = (
+                            output_index[:axis]
+                            + (reduction_index,)
+                            + output_index[axis:]
+                        )
+                        accumulator = dtype.type(np.add(accumulator, operand[input_index]))
+                    output[output_index] = accumulator
+                values[op.results[0]] = output
         elif op.opcode == "reshape":
             operand = values[op.operands[0]]
             values[op.results[0]] = np.array(

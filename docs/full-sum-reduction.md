@@ -17,11 +17,11 @@ The semantic oracle therefore uses an explicit left fold instead of delegating t
 
 ## IR and lowering
 
-Tensor IR represents `sum` as one pure operand/result operation with no attributes. The verifier requires the result to equal `infer_sum(input)`, which is a scalar tensor of the same numeric dtype.
+Tensor IR represents attribute-free `sum` as one pure operand/result operation. The verifier requires the result to equal `infer_sum(input)`, which is a scalar tensor of the same numeric dtype.
 
 Buffer IR lowers the operation to one ordinary owning output buffer. The output does not alias the input, including when the input is itself a read-only view.
 
-Loop IR represents `sum` as a scalar-output reduction kernel:
+Loop IR represents full-tensor `sum` as a scalar-output reduction kernel:
 
 - `iteration_shape == ()` describes the output domain;
 - there is exactly one input;
@@ -38,7 +38,7 @@ The Python Loop executor walks the logical NumPy view with `np.ndindex`. Generat
 
 ## Native and parallel execution
 
-Generated C emits one sequential accumulator loop. It does not emit the ordinary independent-loop vectorization hint, SSE2 reduction code, or OpenMP `parallel for` in this phase. This keeps integer wrap points and floating-point operation order identical across serial and `parallel=True` compilation.
+Generated C emits one sequential accumulator loop. It does not emit the ordinary independent-loop vectorization hint, SSE2 reduction code, or OpenMP `parallel for` for the scalar full reduction. This keeps integer wrap points and floating-point operation order identical across serial and `parallel=True` compilation.
 
 The same reduction executes through GCC-style and MSVC native paths and composes with:
 
@@ -51,8 +51,8 @@ The same reduction executes through GCC-style and MSVC native paths and composes
 
 `sum` is known pure, so an unused reduction may be removed by DCE and exact duplicate attribute-free sums may be merged by CSE. Constant folding and reduction/elementwise fusion are not added here.
 
-## Non-goals and next promotion
+## Phase boundary
 
-This phase does not add axis selection, axis tuples, `keepdims`, `mean`, `max`, parallel/tree reductions, vector reduction intrinsics, or performance claims. CI proves executable correctness and portability, not reduction speed.
+The original full-tensor phase did not add axis selection, axis tuples, `keepdims`, `mean`, `max`, parallel/tree reductions, vector reduction intrinsics, or performance claims. CI proves executable correctness and portability, not reduction speed.
 
-The next reduction milestone should add a genuinely richer reduction-domain model—most naturally one compile-time axis whose output preserves the unreduced axes—rather than farming additional full-tensor reduction opcodes.
+The immediately promoted milestone, one compile-time axis whose output preserves the unreduced axes, is now documented in [`single-axis-sum.md`](single-axis-sum.md). The attribute-free full-tensor spelling and deterministic logical-C-order semantics described here remain unchanged.
