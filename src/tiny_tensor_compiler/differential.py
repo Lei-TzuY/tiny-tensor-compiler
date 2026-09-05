@@ -56,6 +56,16 @@ _FLOAT32_VALUES = (
 
 CandidateRunner = Callable[[Module, tuple[np.ndarray, ...]], ExecutionResult]
 
+_CANDIDATE_FAILURE_EXCEPTIONS = (
+    AssertionError,
+    ArithmeticError,
+    LookupError,
+    OSError,
+    RuntimeError,
+    TypeError,
+    ValueError,
+)
+
 
 @dataclass(frozen=True)
 class DifferentialFailure:
@@ -257,7 +267,7 @@ def _failure_signature(spec: _CaseSpec, runner: CandidateRunner) -> str | None:
     expected = execute_reference(module, inputs=inputs)
     try:
         actual = runner(module, inputs)
-    except Exception as exc:
+    except _CANDIDATE_FAILURE_EXCEPTIONS as exc:
         type_ = type(exc)
         return f"exception:{type_.__module__}.{type_.__qualname__}"
     return _compare_results(actual, expected)
@@ -349,10 +359,7 @@ def _shrink_failure(
 
 
 def _with_side(spec: _CaseSpec, side: int) -> _CaseSpec:
-    inputs = tuple(
-        _freeze_array(value[:side, :side])
-        for value in spec.inputs
-    )
+    inputs = tuple(_freeze_array(value[:side, :side]) for value in spec.inputs)
     return _CaseSpec(
         dtype=spec.dtype,
         side=side,
