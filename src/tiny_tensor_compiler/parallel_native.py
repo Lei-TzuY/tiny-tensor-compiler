@@ -13,6 +13,7 @@ from .c_abi_codegen import generate_c
 from .input_binding import BorrowedLoopProgram
 from .input_validation import prepare_runtime_inputs
 from .loop_ir import LoopProgram
+from .native_abi import append_native_abi_export, native_abi_sha256
 
 LoopExecutionProgram = LoopProgram | BorrowedLoopProgram
 
@@ -76,7 +77,10 @@ def compile_parallel_native(
 ) -> native_module.NativeExecutable:
     """Compile one verified Loop IR program with barriered OpenMP kernel scheduling."""
     command = _enable_openmp(native_module._compiler_command(compiler))
-    source = generate_c(program, parallel=True)
+    source = append_native_abi_export(
+        generate_c(program, parallel=True),
+        native_abi_sha256(program),
+    )
     persistent_library = native_module._persistent_library_path(cache_dir, source, command)
 
     pinned_artifact: native_module._NativeArtifact | None = None
