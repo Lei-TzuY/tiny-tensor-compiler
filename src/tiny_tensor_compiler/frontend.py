@@ -66,7 +66,7 @@ class Tensor:
         return self._builder.transpose(self, axes)
 
     def copy_into(self, target: Tensor, source: Tensor) -> Tensor:
-        """Copy ``source`` into one alias region of this internal storage root."""
+        """Copy ``source`` into one alias region of this fresh internal root generation."""
         return self._builder.copy_into(self, target, source)
 
 
@@ -226,15 +226,15 @@ class GraphBuilder:
         for tensor in (root, target, source):
             self._check_tensor_owner(tensor)
 
-        root_value = _storage_root(root.value)
-        if root_value is not root.value:
-            raise ValueError("copy_into root must be an owning internal tensor")
-        producer = root.value.producer
+        owner = _storage_root(root.value)
+        if not _is_full_root_handle(root.value):
+            raise ValueError("copy_into root must be an owning tensor or fresh full-root result")
+        producer = owner.producer
         if producer is None or producer.opcode in {"input", "const"}:
             raise ValueError("copy_into root must use internal computed storage")
-        if _storage_root(target.value) is not root.value:
-            raise ValueError("copy_into target must alias the supplied root")
-        if _storage_root(source.value) is root.value:
+        if _storage_root(target.value) is not owner:
+            raise ValueError("copy_into target must alias the supplied root storage")
+        if _storage_root(source.value) is owner:
             raise ValueError("copy_into source must use a different storage root")
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
@@ -294,6 +294,19 @@ class GraphBuilder:
     def _ensure_open(self) -> None:
         if self._finished:
             raise RuntimeError("graph has already been finished")
+
+
+def _is_full_root_handle(value: Value) -> bool:
+    owner = _storage_root(value)
+    if value is owner:
+        return True
+    producer = value.producer
+    return (
+        producer is not None
+        and producer.opcode == "copy_into"
+        and producer.results[0] is value
+        and value.type == owner.type
+    )
 
 
 def _storage_root(value: Value) -> Value:
