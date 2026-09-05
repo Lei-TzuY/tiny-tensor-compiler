@@ -111,16 +111,13 @@ The registry transport does not weaken the archive loader's path, ZIP-entry, chi
 
 Content addressing answers one narrow question: *did the client receive the exact bytes identified by the caller's digest?*
 
-It does **not** answer who created or approved those bytes. This phase does not add:
+The unsigned registry APIs still do **not** answer who created or approved those bytes. A malicious party that can convince the caller to trust a different SHA-256 digest can direct the unsigned loader to another internally coherent archive.
 
-- publisher public keys or signatures;
-- certificate-chain or transparency-log semantics beyond the normal HTTPS transport stack;
-- trusted release names/tags;
-- remote registry server attestation;
-- key rotation/revocation policy;
-- cross-target portability.
+An optional, separate Ed25519 publisher-authorization layer is now available through `publish_attested_dynamic_bundle_set_archive()`, `fetch_attested_dynamic_bundle_set_archive()`, and `load_attested_dynamic_bundle_set_registry()`. It requires a caller-pinned `PublisherTrustPolicy` and verifies a detached signature over the exact archive digest before publishing or loading the fetched artifact. See `bundle-publisher-attestations.md` for the key, revocation, signature, fail-closed staging, and threat boundaries.
 
-A malicious party that can convince the caller to trust a different SHA-256 digest can still direct the caller to a different internally coherent archive. Publisher authenticity therefore remains a separate trust-layer milestone.
+That optional layer does not retroactively turn SHA-256 into an authenticity primitive. Callers choosing the historical unsigned APIs receive the same integrity-only contract as before.
+
+Neither layer by itself provides trusted release names/tags, freshness or rollback protection, transparency-log semantics, global revocation distribution, or cross-target portability.
 
 ## Evidence scope
 
@@ -132,6 +129,6 @@ No network throughput, registry scalability, CDN behavior, TLS hardening, or run
 
 ## Next promotion
 
-This closes the first controlled content-addressed distribution phase. Adding more HTTP verbs, mutable tags, or alternate checksum spellings would be protocol farming.
+The content-addressed transport remains the completed byte-integrity layer; publisher authorization is a separate optional layer documented in `bundle-publisher-attestations.md`. Adding more HTTP verbs, mutable tags, alternate checksum spellings, or pretending that signatures provide freshness would be protocol farming.
 
-The next deployment/trust milestone should establish genuine publisher authenticity/provenance using a standard, reviewable cryptographic mechanism with explicit key/trust/revocation semantics and cross-platform evidence. If that cannot be done without introducing an unverified crypto stack, the project should promote on another independent executable frontier instead.
+Further deployment-security work should add a separately verifiable trust property such as standardized freshness/rollback metadata or transparency evidence. Otherwise the project should promote on another independent compiler/runtime frontier.

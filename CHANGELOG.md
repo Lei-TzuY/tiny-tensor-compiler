@@ -43,6 +43,9 @@ All notable project milestones are recorded here.
 - Ordered writable generations: each write must consume the current fresh full-root handle plus fresh target/source values, invalidates every older handle on that root, and produces the next fresh full-root handle. Fresh generations may feed ordinary computation, new views, and later writes without allocating new root storage.
 - Generated C keeps post-write full-root handles mutable for subsequent verified writes; native regressions cover multiple writes with an intervening OpenMP kernel on GCC-style and MSVC toolchains while borrowed runtime inputs remain read-only.
 - Overlap-safe same-root source semantics at the public builder boundary. Every same-root source is first materialized through an explicit owning C-order `reshape` snapshot before mutation, including shifted overlap, interleaved strides, reversed/permuted layouts, and runtime-symbolic axes; canonical tensor/Buffer/Loop `copy_into` therefore keeps its existing different-root source invariant.
+- Optional caller-pinned Ed25519 publisher attestations for exact content-addressed bundle archives, using the standard `cryptography` primitive, canonical domain-separated detached signatures, stable public-key fingerprints, and explicit local revocation policy.
+- Publisher-authenticated registry publish/fetch/load APIs that compose the existing SHA-256/archive verifier with immutable attestation read-back and fail-closed staging; a downloaded archive is not published to the caller destination until both byte integrity and pinned publisher authorization succeed.
+- Cross-platform regression coverage for deterministic signatures, modified/wrong-digest refusal, untrusted/revoked publishers, real Bearer-authenticated loopback transport, and compiler-free execution of an attested finite symbolic native bundle family.
 
 ### Compatibility
 
@@ -65,6 +68,7 @@ All notable project milestones are recorded here.
 - Parallel native scheduling is opt-in; `parallel=False` retains the serial call shape and code-generation behavior. Scalar and zero-extent kernels remain serial, and the existing explicit SSE2 path keeps priority instead of stacking OpenMP onto its vector loop and scalar tail.
 - OpenMP input materialization and terminal output copies remain serial. Only verified kernel iteration is scheduled in parallel, and each emitted `parallel for` retains its implicit barrier; this phase does not introduce asynchronous kernel execution or graph-level reordering.
 - The OpenMP phase establishes executable scheduling semantics and cross-platform correctness only. It does not claim wall-clock speedup, optimal thread count, grain-size selection, or benchmark superiority.
+- Historical unsigned bundle archive/registry APIs retain their integrity-only contract. Publisher authentication is opt-in through the attested APIs and a caller-owned `PublisherTrustPolicy`; a valid Ed25519 signature does not imply freshness, rollback protection, PKI/organizational identity, transparency, trusted timestamps, global revocation distribution, or cross-target portability.
 
 ## [0.1.0] - 2026-09-04
 

@@ -50,6 +50,14 @@ from .native_bundle_archive import (
     load_dynamic_bundle_set_archive,
     pack_dynamic_bundle_set_archive,
 )
+from .native_bundle_attestation import (
+    NativeBundleTrustError,
+    PublisherTrustPolicy,
+    create_archive_attestation,
+    publisher_id_from_public_key,
+    publisher_public_key_from_private_key,
+    verify_archive_attestation,
+)
 from .native_bundle_registry import (
     NativeBundleRegistryError,
     NativeBundleRegistryExecutable,
@@ -57,6 +65,12 @@ from .native_bundle_registry import (
     fetch_dynamic_bundle_set_archive,
     load_dynamic_bundle_set_registry,
     publish_dynamic_bundle_set_archive,
+)
+from .native_bundle_trust import (
+    AttestedNativeBundleRegistryExecutable,
+    fetch_attested_dynamic_bundle_set_archive,
+    load_attested_dynamic_bundle_set_registry,
+    publish_attested_dynamic_bundle_set_archive,
 )
 from .passes import (
     algebraic_simplify,
@@ -77,6 +91,7 @@ from .verifier import VerificationError, verify
 
 __all__ = [
     "AffineDim",
+    "AttestedNativeBundleRegistryExecutable",
     "BorrowedInput",
     "BorrowedLoopProgram",
     "BufferAlias",
@@ -104,8 +119,10 @@ __all__ = [
     "NativeBundleRegistryError",
     "NativeBundleRegistryExecutable",
     "NativeBundleSetArchiveExecutable",
+    "NativeBundleTrustError",
     "NativeCompilationError",
     "NativeExecutable",
+    "PublisherTrustPolicy",
     "StorageLayout",
     "SymbolicDim",
     "SymbolicShapeError",
@@ -123,23 +140,30 @@ __all__ = [
     "compile_module",
     "compile_native",
     "constant_fold",
+    "create_archive_attestation",
     "dead_code_eliminate",
     "digest_dynamic_bundle_set_archive",
     "execute_cpu",
     "execute_loop",
     "execute_native",
     "execute_reference",
+    "fetch_attested_dynamic_bundle_set_archive",
     "fetch_dynamic_bundle_set_archive",
     "fuse_elementwise",
     "generate_c",
     "has_symbolic_shapes",
+    "load_attested_dynamic_bundle_set_registry",
     "load_dynamic_bundle_set_archive",
     "load_dynamic_bundle_set_registry",
     "lower_to_cpu",
     "lower_to_loops",
     "pack_dynamic_bundle_set_archive",
     "plan_memory",
+    "publish_attested_dynamic_bundle_set_archive",
     "publish_dynamic_bundle_set_archive",
+    "publisher_id_from_public_key",
+    "publisher_public_key_from_private_key",
     "specialize_module",
     "verify",
+    "verify_archive_attestation",
 ]
