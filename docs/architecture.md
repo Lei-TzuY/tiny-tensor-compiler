@@ -67,7 +67,7 @@ The compiler is correctness-first and conservative by design.
 - Fusion is verifier-backed and topology-driven, but deliberately bounded to two- through four-node integer `add`/`mul` DAGs that can be represented by the existing chain/tree/chain-tree fused expressions. Producer materialization order and root-side placement are not semantic restrictions; reassociation and arbitrary DAG growth remain out of scope.
 - Contiguous-loop linearization happens only when identity indexing proves a row-major flat loop equivalent.
 - Compiler vectorization hints do not select a vector width or change fallback semantics.
-- SSE2 paths are guarded specializations for selected exact contiguous `int32` kernels; unsupported forms fall back to the general generated-C path.
+- SSE2 selection is semantic-step-driven for exact contiguous `int32` kernels: primitive or fused expressions are eligible only when the required fixed-width operations are representable by the backend's current `add`/ReLU plan. Multiplication, broadcast indexing, scalar/zero-extent shapes, other dtypes, and unsupported forms fall back to the general generated-C path.
 - Symbolic dimensions are resolved before Buffer/Loop IR instead of introducing variable-length physical storage, symbolic loop arithmetic, or platform-dependent VLA behavior into the existing backend.
 
 ## Phase boundaries
@@ -110,6 +110,14 @@ The family-specific matching engine has now been replaced by one bounded topolog
 
 `tiny_tensor_compiler.loop_ir.fuse_elementwise()` remains only as a lazy compatibility delegate to the sole planner, so there is no second executable fusion implementation to drift from the public/compiler path.
 
+### Post-v0.1 — expression-driven SSE2 selection phase
+
+The SSE2 backend no longer maintains a fused-opcode whitelist. `build_i32_sse2_plan()` first handles the existing primitive `add`, `relu`, and `relu_add` kernels, then consumes the canonical `FusedExpression` for any fused kernel and accepts it only when every semantic step is representable by the backend's current fixed-width `add`/ReLU operations.
+
+That semantic capability check automatically extends the existing compositional plan to exact contiguous `int32` forms such as `relu_tree_add_add_add` and `chain_tree_add_add_add_add` without adding family-specific emitters. The same plan drives the guarded SSE2 body and its fixed-width scalar tail/fallback, and native differential tests verify those newly eligible expressions against the reference semantics on both GCC-style and MSVC CI paths.
+
+This is not a generalized SIMD or performance claim. The backend remains SSE2-specific, multiplication remains scalar because SSE2 has no 32-bit integer multiply-low instruction, and dtype/layout/indexing eligibility is still enforced separately by C codegen before a plan can be selected.
+
 ### Next architectural frontier
 
-With fused semantics and bounded topology matching centralized, the next high-value frontiers are expression-general lowering/SIMD selection, broader symbolic-shape algebra, larger structured DAG representation with an explicit cost model, parallel scheduling, or accelerator backends. The next phase should be selected by executable cross-layer value rather than by adding another family-specific fusion matcher or enumerating opcode × SIMD corner cases.
+With fused semantics, topology matching, and SSE2 selection now driven by structured expression semantics rather than opcode whitelists, the next high-value frontiers are an ISA-neutral vector-plan layer with explicit per-ISA capability selection, broader symbolic-shape algebra, larger structured DAG representation with an explicit cost model, parallel scheduling, or accelerator backends. The next phase should be selected by executable cross-layer value rather than by adding another fused-opcode or SSE2 family special case.
