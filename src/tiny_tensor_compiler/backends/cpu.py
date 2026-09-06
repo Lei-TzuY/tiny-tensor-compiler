@@ -9,6 +9,7 @@ from ..input_binding import BorrowedLoopProgram, borrowed_slots
 from ..input_binding import borrow_inputs as bind_borrowed_inputs
 from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
+    IndexMap,
     LoopAlloc,
     LoopBinaryInto,
     LoopCopyInto,
@@ -89,7 +90,18 @@ def execute_loop(
 
         if isinstance(op, LoopBinaryInto):
             binary = np.add if op.operator == "add" else np.multiply
-            binary(buffers[op.target], buffers[op.source], out=buffers[op.target])
+            target = buffers[op.target]
+            source = buffers[op.source]
+            source_map = op.source_map
+            if source_map is None:
+                source_map = IndexMap(tuple(range(source.ndim)))
+            for target_index in np.ndindex(target.shape):
+                source_index = source_map.apply(target_index)
+                target[target_index] = binary(
+                    target[target_index],
+                    source[source_index],
+                    dtype=target.dtype,
+                )
             buffers[op.output] = buffers[op.root]
             continue
 
