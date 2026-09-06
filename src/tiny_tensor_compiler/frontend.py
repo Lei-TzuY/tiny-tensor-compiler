@@ -46,6 +46,12 @@ class Tensor:
     def __rmul__(self, other: Any) -> Tensor:
         return self._builder.binary("mul", other, self)
 
+    def __matmul__(self, other: Any) -> Tensor:
+        return self._builder.matmul(self, other)
+
+    def matmul(self, other: Any) -> Tensor:
+        return self._builder.matmul(self, other)
+
     def relu(self) -> Tensor:
         return self._builder.relu(self)
 
@@ -165,6 +171,28 @@ class GraphBuilder:
             result_types=[result_type],
         )
         return Tensor(self, op.results[0])
+
+    def matmul(self, lhs: Tensor, rhs: Any) -> Tensor:
+        """Compose deterministic rank-2 matmul from verified reshape/mul/sum primitives."""
+        self._ensure_open()
+        self._check_tensor_owner(lhs)
+        if not isinstance(rhs, Tensor):
+            raise TypeInferenceError("matmul requires two Tensor operands")
+        self._check_tensor_owner(rhs)
+        if len(lhs.type.shape) != 2 or len(rhs.type.shape) != 2:
+            raise TypeInferenceError("matmul requires rank-2 Tensor operands")
+
+        m, k = lhs.type.shape
+        rhs_k, n = rhs.type.shape
+        if k != rhs_k:
+            raise TypeInferenceError(
+                f"matmul inner dimensions must match exactly, got {k} and {rhs_k}"
+            )
+
+        lhs_expanded = self.reshape(lhs, (m, k, 1))
+        rhs_expanded = self.reshape(rhs, (1, k, n))
+        products = self.binary("mul", lhs_expanded, rhs_expanded)
+        return self.sum(products, axis=1)
 
     def relu(self, tensor: Tensor) -> Tensor:
         self._ensure_open()
