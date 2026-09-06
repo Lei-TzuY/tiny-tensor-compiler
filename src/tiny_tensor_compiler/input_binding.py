@@ -260,6 +260,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
                     literal=op.literal,
                     fused_expression=op.fused_expression,
                     reduction_axis=op.reduction_axis,
+                    concat_axis=op.concat_axis,
                 )
             )
             active_aliases.pop(op.output, None)
