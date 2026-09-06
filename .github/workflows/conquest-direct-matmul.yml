@@ -50,7 +50,7 @@ jobs:
             exit "$status"
           fi
           rm construction-error.txt
-      - name: Normalize patch style
+      - name: Normalize patch style and test imports
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -65,6 +65,19 @@ jobs:
                   raise RuntimeError("direct matmul C style normalization anchor mismatch")
               text = text.replace(old, new, 1)
           path.write_text(text, encoding="utf-8")
+
+          test = Path("tests/test_direct_matmul_lowering.py")
+          text = test.read_text(encoding="utf-8")
+          old = '''from tiny_tensor_compiler import (\n    GraphBuilder,\n    analyze_module,\n'''
+          new = '''from tiny_tensor_compiler import (\n    GraphBuilder,\n'''
+          if text.count(old) != 1:
+              raise RuntimeError("direct matmul analysis import anchor mismatch")
+          text = text.replace(old, new, 1)
+          insertion = 'import numpy as np\n\nfrom tiny_tensor_compiler import ('
+          replacement = 'import numpy as np\n\nfrom tiny_tensor_compiler.analysis import analyze_module\nfrom tiny_tensor_compiler import ('
+          if text.count(insertion) != 1:
+              raise RuntimeError("direct matmul analysis import insertion mismatch")
+          test.write_text(text.replace(insertion, replacement, 1), encoding="utf-8")
           PY
           ruff check . --fix
       - name: Verify
