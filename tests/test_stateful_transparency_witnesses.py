@@ -11,11 +11,13 @@ from tiny_tensor_compiler import (
     TransparencyStateStore,
     TransparencyWitnessPolicy,
     create_release_checkpoint,
-    create_stateful_transparency_witness_quorum,
     create_transparency_checkpoint,
     publisher_public_key_from_private_key,
     verify_transparency_checkpoint,
     verify_transparency_witness_quorum,
+)
+from tiny_tensor_compiler.native_bundle_transparency_witness_state import (
+    create_stateful_transparency_witness_quorum,
 )
 
 
@@ -169,7 +171,10 @@ def test_stateful_quorum_rejects_rollback_and_same_size_fork_without_advancing(
         )
     assert all(store.current() == head3 for store in stores)
 
-    fork = [*releases[:2], create_release_checkpoint(_key(8), "stable", 99, f"sha256:{99:064x}")]
+    fork = [
+        *releases[:2],
+        create_release_checkpoint(_key(8), "stable", 99, f"sha256:{99:064x}"),
+    ]
     fork_encoded = _checkpoint(log_private, fork)
     with pytest.raises(NativeBundleTransparencyError, match="same-size transparency fork"):
         create_stateful_transparency_witness_quorum(
