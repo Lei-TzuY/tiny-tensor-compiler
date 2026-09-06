@@ -23,6 +23,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
+      - name: Narrow construction-only changelog anchor
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("tools/apply_direct_matmul_lowering.py")
+          text = path.read_text(encoding="utf-8")
+          old = '    "### Added\\n\\n",\n    "### Added\\n\\n- Direct verified physical lowering'
+          new = '    "## [Unreleased]\\n\\n### Added\\n\\n",\n    "## [Unreleased]\\n\\n### Added\\n\\n- Direct verified physical lowering'
+          if text.count(old) != 1:
+              raise RuntimeError("construction changelog anchor rewrite did not match exactly once")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
       - name: Apply anchored production patch
         run: |
           set +e
