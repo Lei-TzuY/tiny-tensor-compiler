@@ -17,7 +17,6 @@ from .native_bundle_attestation import (
 )
 from .native_bundle_release import _canonical_json
 from .native_bundle_transparency import (
-    NativeBundleTransparencyError,
     TransparencyCheckpoint,
     TransparencyStateStore,
     verify_transparency_checkpoint,
