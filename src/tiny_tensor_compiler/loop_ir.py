@@ -11,6 +11,7 @@ from .ir import DType, TensorType
 from .layout import StorageLayout, element_count
 from .lowering import (
     BufferAlloc,
+    BufferBinaryInto,
     BufferCopyInto,
     BufferInplaceBinary,
     BufferInput,
@@ -68,6 +69,17 @@ class LoopCopyInto:
 
 
 @dataclass(frozen=True)
+class LoopBinaryInto:
+    output: int
+    root: int
+    target: int
+    source: int
+    operator: str
+    type: TensorType
+    layout: StorageLayout
+
+
+@dataclass(frozen=True)
 class LoopInplaceBinary:
     output: int
     root: int
@@ -100,7 +112,14 @@ class LoopReturn:
 
 
 LoopOperation = (
-    LoopAlloc | LoopInput | LoopView | LoopCopyInto | LoopInplaceBinary | LoopKernel | LoopReturn
+    LoopAlloc
+    | LoopInput
+    | LoopView
+    | LoopCopyInto
+    | LoopBinaryInto
+    | LoopInplaceBinary
+    | LoopKernel
+    | LoopReturn
 )
 
 
@@ -128,13 +147,20 @@ class LoopProgram:
         return tuple(op for op in self.operations if isinstance(op, LoopCopyInto))
 
     @property
+    def binary_intos(self) -> tuple[LoopBinaryInto, ...]:
+        return tuple(op for op in self.operations if isinstance(op, LoopBinaryInto))
+
+    @property
     def value_types(self) -> dict[int, TensorType]:
         types = {alloc.buffer: alloc.type for alloc in self.allocations}
         types.update(
             {
                 op.output: op.type
                 for op in self.operations
-                if isinstance(op, (LoopView, LoopCopyInto, LoopInplaceBinary))
+                if isinstance(
+                    op,
+                    (LoopView, LoopCopyInto, LoopBinaryInto, LoopInplaceBinary),
+                )
             }
         )
         return types
@@ -165,6 +191,15 @@ class LoopProgram:
                 root = roots[op.root]
                 if types[op.root] != root_types[root] or layouts[op.root] != layouts[root]:
                     raise ValueError("copy_into root handle must expose the full owning root")
+                op.layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
+                layouts[op.output] = op.layout
+                roots[op.output] = root
+            elif isinstance(op, LoopBinaryInto):
+                if op.root not in roots:
+                    raise ValueError("binary_into root handle has no storage root")
+                root = roots[op.root]
+                if types[op.root] != root_types[root] or layouts[op.root] != layouts[root]:
+                    raise ValueError("binary_into root handle must expose the full owning root")
                 op.layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
                 layouts[op.output] = op.layout
                 roots[op.output] = root
@@ -216,6 +251,10 @@ class LoopProgram:
                 if op.root not in roots:
                     raise KeyError(f"copy_into root handle p{op.root} has no storage root")
                 roots[op.output] = roots[op.root]
+            elif isinstance(op, LoopBinaryInto):
+                if op.root not in roots:
+                    raise KeyError(f"binary_into root handle p{op.root} has no storage root")
+                roots[op.output] = roots[op.root]
             elif isinstance(op, LoopInplaceBinary):
                 if op.root not in roots:
                     raise KeyError(f"binary_inplace root handle p{op.root} has no storage root")
@@ -246,6 +285,12 @@ class LoopProgram:
                 lines.append(
                     f"p{op.output} = copy_into root=p{op.root} target=p{op.target} "
                     f"source=p{op.source} : {op.type}"
+                )
+                continue
+            if isinstance(op, LoopBinaryInto):
+                lines.append(
+                    f"p{op.output} = binary_into[{op.operator}] root=p{op.root} "
+                    f"target=p{op.target} source=p{op.source} : {op.type}"
                 )
                 continue
             if isinstance(op, LoopInplaceBinary):
@@ -336,6 +381,25 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                     root=virtual_handles[op.root],
                     target=virtual_handles[op.target],
                     source=virtual_handles[op.source],
+                    type=virtual_types[op.output],
+                    layout=alias.layout,
+                )
+            )
+            continue
+        if isinstance(op, BufferBinaryInto):
+            handle = next_handle
+            next_handle += 1
+            virtual_handles[op.output] = handle
+            alias = plan.alias_for(op.output)
+            if alias is None:
+                raise RuntimeError("planned binary_into result unexpectedly has no alias descriptor")
+            operations.append(
+                LoopBinaryInto(
+                    output=handle,
+                    root=virtual_handles[op.root],
+                    target=virtual_handles[op.target],
+                    source=virtual_handles[op.source],
+                    operator=op.operator,
                     type=virtual_types[op.output],
                     layout=alias.layout,
                 )
@@ -523,6 +587,49 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             written.add(op.output)
             continue
 
+        if isinstance(op, LoopBinaryInto):
+            saw_execution = True
+            if op.output < 0:
+                raise ValueError(f"invalid negative binary_into result id p{op.output}")
+            if op.output in types:
+                raise ValueError(f"binary_into result p{op.output} collides with an existing loop value")
+            for buffer in (op.root, op.target, op.source):
+                if buffer not in types:
+                    raise ValueError(f"binary_into input p{buffer} is not defined")
+                if buffer not in written:
+                    raise ValueError(f"binary_into input p{buffer} is not written")
+                _verify_fresh_value(buffer, roots, root_generations, value_generations)
+            root = roots[op.root]
+            if root not in allocated:
+                raise ValueError("binary_into root handle has no owning storage")
+            if root in input_roots:
+                raise ValueError("binary_into cannot mutate borrowed or copied runtime input storage")
+            if types[op.root] != allocated[root] or layouts[op.root] != layouts[root]:
+                raise ValueError("binary_into root must be a fresh full-root handle")
+            if roots[op.target] != root:
+                raise ValueError("binary_into target must alias its owning root")
+            if roots[op.source] == root:
+                raise ValueError("binary_into source must use a different storage root")
+            if op.operator not in {"add", "mul"}:
+                raise ValueError("binary_into operator must be add or mul")
+            if types[op.target] != types[op.source]:
+                raise ValueError("binary_into target and source types must exactly match")
+            if not _layout_is_non_overlapping(types[op.target].shape, layouts[op.target]):
+                raise ValueError("binary_into target layout must not overlap itself")
+            if op.type != allocated[root]:
+                raise ValueError("binary_into fresh result type must match its owning root")
+            if op.layout != layouts[root]:
+                raise ValueError("binary_into fresh result must expose the full owning root layout")
+            op.layout.validate_bounds(op.type.shape, element_count(allocated[root].shape))
+
+            root_generations[root] += 1
+            types[op.output] = op.type
+            layouts[op.output] = op.layout
+            roots[op.output] = root
+            value_generations[op.output] = root_generations[root]
+            written.add(op.output)
+            continue
+
         if isinstance(op, LoopInplaceBinary):
             saw_execution = True
             if op.output < 0:
@@ -674,6 +781,26 @@ def _verify_fresh_value(
         raise ValueError(
             f"stale loop view/alias p{buffer} refers to an older generation of storage p{root}"
         )
+
+
+def _layout_is_non_overlapping(shape: tuple[int, ...], layout: StorageLayout) -> bool:
+    """Conservatively prove that each logical index reaches a distinct storage element."""
+    if any(dim == 0 for dim in shape):
+        return True
+    axes = sorted(
+        (
+            (abs(stride), dim)
+            for dim, stride in zip(shape, layout.strides, strict=True)
+            if dim > 1
+        ),
+        key=lambda item: item[0],
+    )
+    required_span = 1
+    for stride, dim in axes:
+        if stride < required_span:
+            return False
+        required_span *= dim
+    return True
 
 
 def _verify_fused_expression(

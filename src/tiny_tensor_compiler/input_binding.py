@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from .ir import TensorType
 from .loop_ir import (
     LoopAlloc,
+    LoopBinaryInto,
     LoopCopyInto,
     LoopInplaceBinary,
     LoopInput,
@@ -104,6 +105,10 @@ class BorrowedLoopProgram:
     @property
     def copies(self):
         return self.program.copies
+
+    @property
+    def binary_intos(self):
+        return self.program.binary_intos
 
     @property
     def inplace_binaries(self):
@@ -218,6 +223,20 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
             )
             continue
 
+        if isinstance(op, LoopBinaryInto):
+            transformed_operations.append(
+                LoopBinaryInto(
+                    output=op.output + split_count,
+                    root=remap_handle(op.root),
+                    target=remap_handle(op.target),
+                    source=remap_handle(op.source),
+                    operator=op.operator,
+                    type=op.type,
+                    layout=op.layout,
+                )
+            )
+            continue
+
         if isinstance(op, LoopInplaceBinary):
             transformed_operations.append(
                 LoopInplaceBinary(
@@ -273,6 +292,8 @@ def _has_other_write(operations, position: int, buffer: int) -> bool:
         if isinstance(other, LoopKernel) and other.output == buffer:
             return True
         if isinstance(other, LoopCopyInto) and other.root == buffer:
+            return True
+        if isinstance(other, LoopBinaryInto) and other.root == buffer:
             return True
         if isinstance(other, LoopInplaceBinary) and other.root == buffer:
             return True

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .ir import DType, TensorType
 from .layout import StorageLayout
-from .loop_ir import LoopCopyInto, LoopInplaceBinary
+from .loop_ir import LoopBinaryInto, LoopCopyInto, LoopInplaceBinary
 
 
 def emit_copy_into(
@@ -36,6 +36,53 @@ def emit_copy_into(
         destination = _root_ref(op.root, target_layout.offset, target_layout.strides)
         source_offset = _stride_offset(axes, source_layout.strides)
         lines.append(f"{indent}{destination} = p{op.source}[{source_offset}];")
+        for _ in target_type.shape:
+            indent = indent[:-4]
+            lines.append(f"{indent}}}")
+
+    lines.append("    }")
+    root_offset = op.layout.offset
+    pointer = f"p{op.root}" if root_offset == 0 else f"p{op.root} + {root_offset}"
+    lines.append(f"    {c_type} *p{op.output} = {pointer};")
+    lines.append("")
+    return lines
+
+
+def emit_binary_into(
+    op: LoopBinaryInto,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+) -> list[str]:
+    """Emit one serial exact-typed binary update through a verified target view."""
+    target_type = types[op.target]
+    source_type = types[op.source]
+    if target_type != source_type:
+        raise RuntimeError("verified binary_into unexpectedly has mismatched source/target types")
+    if op.operator not in {"add", "mul"}:
+        raise RuntimeError("verified binary_into unexpectedly has an unsupported operator")
+
+    target_layout = layouts[op.target]
+    source_layout = layouts[op.source]
+    operator = "+" if op.operator == "add" else "*"
+    c_type = _c_type(target_type.dtype)
+    lines = ["    {"]
+
+    if not target_type.shape:
+        destination = _root_ref(op.root, target_layout.offset, ())
+        lines.append(f"        {destination} = {destination} {operator} p{op.source}[0];")
+    else:
+        indent = "        "
+        axes = tuple(range(len(target_type.shape)))
+        for axis, bound in enumerate(target_type.shape):
+            lines.append(
+                f"{indent}for (int64_t i{axis} = 0; i{axis} < {bound}; ++i{axis}) {{"
+            )
+            indent += "    "
+        destination = _root_ref(op.root, target_layout.offset, target_layout.strides)
+        source_offset = _stride_offset(axes, source_layout.strides)
+        lines.append(
+            f"{indent}{destination} = {destination} {operator} p{op.source}[{source_offset}];"
+        )
         for _ in target_type.shape:
             indent = indent[:-4]
             lines.append(f"{indent}}}")

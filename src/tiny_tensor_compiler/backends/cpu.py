@@ -10,6 +10,7 @@ from ..input_binding import borrow_inputs as bind_borrowed_inputs
 from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
     LoopAlloc,
+    LoopBinaryInto,
     LoopCopyInto,
     LoopInplaceBinary,
     LoopInput,
@@ -83,6 +84,12 @@ def execute_loop(
 
         if isinstance(op, LoopCopyInto):
             np.copyto(buffers[op.target], buffers[op.source])
+            buffers[op.output] = buffers[op.root]
+            continue
+
+        if isinstance(op, LoopBinaryInto):
+            binary = np.add if op.operator == "add" else np.multiply
+            binary(buffers[op.target], buffers[op.source], out=buffers[op.target])
             buffers[op.output] = buffers[op.root]
             continue
 
