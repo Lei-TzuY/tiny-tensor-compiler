@@ -1,3 +1,4 @@
+from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
@@ -172,6 +173,8 @@ __all__ = [
     "BufferReturn",
     "BufferView",
     "CPUProgram",
+    "CompileBudget",
+    "CompileBudgetExceeded",
     "DynamicExecutable",
     "GraphBuilder",
     "IndexMap",
@@ -247,6 +250,7 @@ __all__ = [
     "create_transparency_witness_quorum",
     "dead_code_eliminate",
     "digest_dynamic_bundle_set_archive",
+    "enforce_compile_budget",
     "execute_cpu",
     "execute_loop",
     "execute_native",
