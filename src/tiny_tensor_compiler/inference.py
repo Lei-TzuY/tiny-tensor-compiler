@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 
@@ -26,6 +26,54 @@ def infer_relu(input_type: TensorType) -> TensorType:
     if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
         raise TypeInferenceError(f"relu requires a numeric tensor, got {input_type.dtype.value}")
     return input_type
+
+
+def normalize_concat_axis(input_type: TensorType, axis: int) -> int:
+    """Normalize one Python-style concatenate axis to canonical non-negative form."""
+    if not isinstance(axis, int) or isinstance(axis, bool):
+        raise TypeInferenceError("concatenate axis must be an integer")
+    rank = len(input_type.shape)
+    if rank == 0:
+        raise TypeInferenceError("concatenate requires tensors with rank at least one")
+    if axis < -rank or axis >= rank:
+        raise TypeInferenceError(f"concatenate axis {axis} is out of range for rank {rank}")
+    return axis + rank if axis < 0 else axis
+
+
+def infer_concat(input_types: Sequence[TensorType], axis: int) -> TensorType:
+    """Infer exact-dtype variadic concatenation along one canonical tensor axis."""
+    inputs = tuple(input_types)
+    if len(inputs) < 2:
+        raise TypeInferenceError("concatenate requires at least two tensor inputs")
+
+    canonical_axis = normalize_concat_axis(inputs[0], axis)
+    rank = len(inputs[0].shape)
+    dtype = inputs[0].dtype
+    for type_ in inputs[1:]:
+        if len(type_.shape) != rank:
+            raise TypeInferenceError("concatenate inputs must have the same rank")
+        if type_.dtype != dtype:
+            raise TypeInferenceError("concatenate inputs must use the same exact dtype")
+        for position, (expected, actual) in enumerate(
+            zip(inputs[0].shape, type_.shape, strict=True)
+        ):
+            if position == canonical_axis:
+                continue
+            if actual != expected:
+                raise TypeInferenceError(
+                    "concatenate non-concatenated dimensions must match exactly"
+                )
+
+    concat_extent: ShapeDim = 0
+    try:
+        for type_ in inputs:
+            concat_extent = concat_extent + type_.shape[canonical_axis]
+    except (TypeError, ValueError) as exc:
+        raise TypeInferenceError(str(exc)) from exc
+
+    shape = list(inputs[0].shape)
+    shape[canonical_axis] = concat_extent
+    return TensorType(tuple(shape), dtype)
 
 
 def normalize_reduction_axis(
