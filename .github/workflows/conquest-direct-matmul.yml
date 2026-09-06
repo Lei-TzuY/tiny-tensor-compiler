@@ -24,7 +24,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Apply anchored production patch
-        run: python tools/apply_direct_matmul_lowering.py
+        run: |
+          set +e
+          python tools/apply_direct_matmul_lowering.py > construction-error.txt 2>&1
+          status=$?
+          cat construction-error.txt
+          if [ "$status" -ne 0 ]; then
+            git config user.name "LeiZ"
+            git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+            git add construction-error.txt
+            git commit -m "chore: capture direct matmul patch failure"
+            git push origin HEAD:feat/direct-matmul-kernel
+            exit "$status"
+          fi
+          rm construction-error.txt
       - name: Verify
         run: |
           ruff check .
