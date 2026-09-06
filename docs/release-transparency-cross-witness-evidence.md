@@ -8,9 +8,16 @@ system globally prevents split views.
 ## Signed observation
 
 A witness may create a `ttc-release-transparency-witness-observation-v1` envelope only
-for the exact signed log checkpoint that its `TransparencyStateStore` currently records
-as accepted. An empty state store or a checkpoint that does not match the persisted
-current state is rejected before the witness signs anything.
+for a signed log checkpoint that matches its persisted `TransparencyStateStore` during
+the pre-sign validation. An empty state store or a checkpoint that does not match that
+persisted accepted state is rejected before the witness signs anything.
+
+The state-file lock is not held across the Ed25519 signature operation. Another process
+may advance the same state store immediately after validation, so an observation proves
+that the checkpoint passed the witness's persisted-state check; it does **not** prove
+that the checkpoint remained the latest local state at signature return time, carries
+no transactional freshness guarantee, and does not become invalid merely because the
+witness later accepts a consistent newer checkpoint.
 
 The canonical observation envelope contains exactly:
 
@@ -28,9 +35,9 @@ pinned log identity, witness policy membership and revocation state, and the wit
 signature.
 
 The observation therefore proves only that the named eligible witness signed a digest
-of the embedded valid log checkpoint under the named witness policy. Creation adds the
-stronger local rule that the checkpoint had already become that witness's persisted
-current accepted state.
+of the embedded valid log checkpoint under the named witness policy after that
+checkpoint matched its persisted accepted state during validation. It is deliberately
+historical evidence rather than a freshness statement.
 
 ## Deterministic cross-witness comparison
 
@@ -79,6 +86,7 @@ This phase does **not** implement or claim:
 - a network gossip daemon or peer-to-peer transport;
 - witness discovery or rendezvous;
 - timestamps, trusted freshness, maximum checkpoint age, or clock synchronization;
+- an atomic read/check/sign transaction across processes;
 - global uniqueness of the latest checkpoint;
 - transactional state updates across multiple witnesses;
 - automatic evidence publication, aggregation, retention, or adjudication; or
