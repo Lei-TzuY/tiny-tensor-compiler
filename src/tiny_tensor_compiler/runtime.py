@@ -7,7 +7,7 @@ import numpy as np
 
 from .input_validation import prepare_runtime_inputs
 from .ir import Module, Value
-from .reduction import REDUCTION_OPCODES, ReductionPlan
+from .reduction import REDUCTION_OPCODES, ReductionOperator, ReductionPlan
 from .symbolic import has_symbolic_shapes, specialize_for_inputs
 from .verifier import verify
 
@@ -42,9 +42,13 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             operand = values[op.operands[0]].astype(dtype, copy=False)
             values[op.results[0]] = np.maximum(operand, np.array(0, dtype=dtype))
         elif op.opcode in REDUCTION_OPCODES:
-            dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]]
             plan = ReductionPlan.from_opcode(op.opcode, op.attrs.get("axis"))
+            if plan.operator is ReductionOperator.ARGMAX:
+                values[op.results[0]] = _execute_argmax(plan, operand)
+                continue
+
+            dtype = op.results[0].type.dtype.to_numpy()
             if plan.axes is None:
                 accumulator = plan.operator.identity(dtype)
                 for index in np.ndindex(operand.shape):
@@ -112,3 +116,45 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             outputs = tuple(np.array(values[operand], copy=True) for operand in op.operands)
             return outputs[0] if len(outputs) == 1 else outputs
     raise RuntimeError("verified module unexpectedly has no return")
+
+
+def _execute_argmax(plan: ReductionPlan, operand: np.ndarray) -> np.ndarray:
+    if plan.axes is None:
+        best_index = 0
+        iterator = iter(enumerate(np.ndindex(operand.shape)))
+        _, first_coordinate = next(iterator)
+        best = operand[first_coordinate]
+        for logical_index, coordinate in iterator:
+            candidate = operand[coordinate]
+            if plan.operator.candidate_wins(best, candidate):
+                best = candidate
+                best_index = logical_index
+        return np.array(best_index, dtype=np.int64)
+
+    output_shape = tuple(
+        dim for position, dim in enumerate(operand.shape) if position not in set(plan.axes)
+    )
+    output = np.empty(output_shape, dtype=np.int64)
+    reduction_shape = plan.reduction_shape(operand.shape)
+    for output_index in np.ndindex(output.shape):
+        reduction_iterator = iter(np.ndindex(reduction_shape))
+        first_reduction_index = next(reduction_iterator)
+        best_input_index = plan.input_index(
+            operand.ndim,
+            output_index,
+            first_reduction_index,
+        )
+        best = operand[best_input_index]
+        best_index = first_reduction_index[0]
+        for reduction_index in reduction_iterator:
+            input_index = plan.input_index(
+                operand.ndim,
+                output_index,
+                reduction_index,
+            )
+            candidate = operand[input_index]
+            if plan.operator.candidate_wins(best, candidate):
+                best = candidate
+                best_index = reduction_index[0]
+        output[output_index] = best_index
+    return output
