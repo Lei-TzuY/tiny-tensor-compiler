@@ -41,6 +41,11 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             dtype = op.results[0].type.dtype.to_numpy()
             operand = values[op.operands[0]].astype(dtype, copy=False)
             values[op.results[0]] = np.maximum(operand, np.array(0, dtype=dtype))
+        elif op.opcode == "concat":
+            values[op.results[0]] = np.array(
+                np.concatenate(tuple(values[operand] for operand in op.operands), axis=op.attrs["axis"]),
+                copy=True,
+            )
         elif op.opcode in REDUCTION_OPCODES:
             operand = values[op.operands[0]]
             plan = ReductionPlan.from_opcode(op.opcode, op.attrs.get("axis"))
