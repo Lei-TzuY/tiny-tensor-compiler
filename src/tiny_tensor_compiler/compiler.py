@@ -8,6 +8,7 @@ from typing import Any, Literal
 from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
 from .analysis import CompilerReport
 from .backends.cpu import execute_loop
+from .compiler_control import normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
 from .input_binding import BorrowedLoopProgram
 from .input_binding import borrow_inputs as bind_borrowed_inputs
@@ -93,6 +94,7 @@ class DynamicExecutable:
         borrow_inputs: bool = False,
         parallel: bool = False,
         budget: CompileBudget | None = None,
+        compiler_timeout: float | int | None = None,
     ) -> None:
         if budget is not None and not isinstance(budget, CompileBudget):
             raise TypeError("budget must be a CompileBudget or None")
@@ -103,6 +105,7 @@ class DynamicExecutable:
         self._borrow_inputs = borrow_inputs
         self._parallel = parallel
         self._budget = budget
+        self._compiler_timeout = normalize_compiler_timeout(compiler_timeout)
         self._specializations: dict[tuple[int, ...], NativeExecutable] = {}
         self._lock = threading.RLock()
 
@@ -150,12 +153,31 @@ class DynamicExecutable:
                 return executable
             concrete = specialize_module(self._module, normalized)
             if self._budget is None:
+                if self._compiler_timeout is None:
+                    executable = compile_module(
+                        concrete,
+                        compiler=self._compiler,
+                        cache_dir=self._cache_dir,
+                        borrow_inputs=self._borrow_inputs,
+                        parallel=self._parallel,
+                    )
+                else:
+                    executable = compile_module(
+                        concrete,
+                        compiler=self._compiler,
+                        cache_dir=self._cache_dir,
+                        borrow_inputs=self._borrow_inputs,
+                        parallel=self._parallel,
+                        compiler_timeout=self._compiler_timeout,
+                    )
+            elif self._compiler_timeout is None:
                 executable = compile_module(
                     concrete,
                     compiler=self._compiler,
                     cache_dir=self._cache_dir,
                     borrow_inputs=self._borrow_inputs,
                     parallel=self._parallel,
+                    budget=self._budget,
                 )
             else:
                 executable = compile_module(
@@ -165,6 +187,7 @@ class DynamicExecutable:
                     borrow_inputs=self._borrow_inputs,
                     parallel=self._parallel,
                     budget=self._budget,
+                    compiler_timeout=self._compiler_timeout,
                 )
             self._specializations[key] = executable
             return executable
@@ -197,6 +220,7 @@ class AdaptiveDynamicExecutable:
         *,
         borrow_inputs: bool = False,
         parallel: bool = False,
+        compiler_timeout: float | int | None = None,
     ) -> None:
         if not isinstance(budget, CompileBudget):
             raise TypeError("budget must be a CompileBudget")
@@ -207,6 +231,7 @@ class AdaptiveDynamicExecutable:
         self._cache_dir = cache_dir
         self._borrow_inputs = borrow_inputs
         self._parallel = parallel
+        self._compiler_timeout = normalize_compiler_timeout(compiler_timeout)
         self._specializations: dict[tuple[int, ...], AdaptiveExecutable] = {}
         self._lock = threading.RLock()
 
@@ -266,14 +291,25 @@ class AdaptiveDynamicExecutable:
             if executable is not None:
                 return executable
             concrete = specialize_module(self._module, normalized)
-            executable = compile_adaptive_module(
-                concrete,
-                budget=self._budget,
-                compiler=self._compiler,
-                cache_dir=self._cache_dir,
-                borrow_inputs=self._borrow_inputs,
-                parallel=self._parallel,
-            )
+            if self._compiler_timeout is None:
+                executable = compile_adaptive_module(
+                    concrete,
+                    budget=self._budget,
+                    compiler=self._compiler,
+                    cache_dir=self._cache_dir,
+                    borrow_inputs=self._borrow_inputs,
+                    parallel=self._parallel,
+                )
+            else:
+                executable = compile_adaptive_module(
+                    concrete,
+                    budget=self._budget,
+                    compiler=self._compiler,
+                    cache_dir=self._cache_dir,
+                    borrow_inputs=self._borrow_inputs,
+                    parallel=self._parallel,
+                    compiler_timeout=self._compiler_timeout,
+                )
             self._specializations[key] = executable
             return executable
 
@@ -293,8 +329,10 @@ def compile_module(
     borrow_inputs: bool = False,
     parallel: bool = False,
     budget: CompileBudget | None = None,
+    compiler_timeout: float | int | None = None,
 ) -> NativeExecutable:
     """Lower verified concrete tensor IR through the native pipeline and compile eagerly."""
+    normalized_timeout = normalize_compiler_timeout(compiler_timeout)
     if has_symbolic_shapes(module):
         raise ValueError(
             "compile_module requires concrete tensor shapes; use compile_dynamic_module "
@@ -304,16 +342,31 @@ def compile_module(
         enforce_compile_budget(module, budget)
     loops = _lower_concrete_module(module, borrow_inputs=borrow_inputs)
     if parallel:
+        if normalized_timeout is None:
+            return compile_native(
+                loops,
+                compiler=compiler,
+                cache_dir=cache_dir,
+                parallel=True,
+            )
         return compile_native(
             loops,
             compiler=compiler,
             cache_dir=cache_dir,
             parallel=True,
+            compiler_timeout=normalized_timeout,
+        )
+    if normalized_timeout is None:
+        return compile_native(
+            loops,
+            compiler=compiler,
+            cache_dir=cache_dir,
         )
     return compile_native(
         loops,
         compiler=compiler,
         cache_dir=cache_dir,
+        compiler_timeout=normalized_timeout,
     )
 
 
@@ -325,10 +378,12 @@ def compile_adaptive_module(
     cache_dir: str | os.PathLike[str] | None = None,
     borrow_inputs: bool = False,
     parallel: bool = False,
+    compiler_timeout: float | int | None = None,
 ) -> AdaptiveExecutable:
     """Select native compilation or verified Loop CPU from one structural budget decision."""
     if not isinstance(budget, CompileBudget):
         raise TypeError("budget must be a CompileBudget")
+    normalized_timeout = normalize_compiler_timeout(compiler_timeout)
     if has_symbolic_shapes(module):
         raise ValueError(
             "compile_adaptive_module requires concrete tensor shapes; use "
@@ -346,13 +401,23 @@ def compile_adaptive_module(
             budget_exceeded=error,
         )
 
-    native = compile_module(
-        module,
-        compiler=compiler,
-        cache_dir=cache_dir,
-        borrow_inputs=borrow_inputs,
-        parallel=parallel,
-    )
+    if normalized_timeout is None:
+        native = compile_module(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            borrow_inputs=borrow_inputs,
+            parallel=parallel,
+        )
+    else:
+        native = compile_module(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            borrow_inputs=borrow_inputs,
+            parallel=parallel,
+            compiler_timeout=normalized_timeout,
+        )
     return AdaptiveExecutable(
         backend="native",
         report=report,
@@ -368,6 +433,7 @@ def compile_dynamic_module(
     borrow_inputs: bool = False,
     parallel: bool = False,
     budget: CompileBudget | None = None,
+    compiler_timeout: float | int | None = None,
 ) -> DynamicExecutable:
     """Prepare lazy native specializations for runtime symbolic dimensions."""
     return DynamicExecutable(
@@ -377,6 +443,7 @@ def compile_dynamic_module(
         borrow_inputs=borrow_inputs,
         parallel=parallel,
         budget=budget,
+        compiler_timeout=compiler_timeout,
     )
 
 
@@ -388,6 +455,7 @@ def compile_adaptive_dynamic_module(
     cache_dir: str | os.PathLike[str] | None = None,
     borrow_inputs: bool = False,
     parallel: bool = False,
+    compiler_timeout: float | int | None = None,
 ) -> AdaptiveDynamicExecutable:
     """Prepare per-binding adaptive native-or-loop specializations."""
     if not isinstance(budget, CompileBudget):
@@ -399,6 +467,7 @@ def compile_adaptive_dynamic_module(
         cache_dir=cache_dir,
         borrow_inputs=borrow_inputs,
         parallel=parallel,
+        compiler_timeout=compiler_timeout,
     )
 
 
