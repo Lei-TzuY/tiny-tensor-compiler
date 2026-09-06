@@ -10,6 +10,7 @@ from .c_codegen import (
 from .input_binding import BorrowedLoopProgram
 from .loop_ir import (
     LoopAlloc,
+    LoopBinaryInto,
     LoopCopyInto,
     LoopInplaceBinary,
     LoopInput,
@@ -18,7 +19,7 @@ from .loop_ir import (
     LoopView,
 )
 from .parallel_codegen import emit_parallel_kernel
-from .write_codegen import emit_copy_into, emit_inplace_binary
+from .write_codegen import emit_binary_into, emit_copy_into, emit_inplace_binary
 
 
 def generate_c(
@@ -106,6 +107,9 @@ def generate_c(
             continue
         if isinstance(op, LoopCopyInto):
             lines.extend(emit_copy_into(op, types, layouts))
+            continue
+        if isinstance(op, LoopBinaryInto):
+            lines.extend(emit_binary_into(op, types, layouts))
             continue
         if isinstance(op, LoopInplaceBinary):
             lines.extend(emit_inplace_binary(op, types, layouts))
