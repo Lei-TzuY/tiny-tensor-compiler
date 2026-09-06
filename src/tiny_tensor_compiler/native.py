@@ -114,7 +114,7 @@ def compile_native(
     compiler: str | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     *,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> NativeExecutable:
     """Eagerly compile/load a loop program and return a reusable executable."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
@@ -146,7 +146,7 @@ def execute_native(
     cache_dir: str | os.PathLike[str] | None = None,
     out: NativeOutput = None,
     *,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> ExecutionResult:
     """Compile or reuse generated C and execute it on the native CPU."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
@@ -407,14 +407,23 @@ def _compile_source(
     source_path.write_text(source, encoding="utf-8")
     compile_command = _build_compile_command(command, source_path.name, library_path.name)
     try:
-        completed = subprocess.run(
-            compile_command,
-            cwd=directory_path,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=compiler_timeout,
-        )
+        if compiler_timeout is None:
+            completed = subprocess.run(
+                compile_command,
+                cwd=directory_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            completed = subprocess.run(
+                compile_command,
+                cwd=directory_path,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=compiler_timeout,
+            )
     except subprocess.TimeoutExpired as error:
         raise NativeCompilationTimeout(compile_command, float(error.timeout)) from error
     if completed.returncode != 0:
