@@ -140,6 +140,19 @@ def execute_loop(
                     output[output_index] = accumulator
             continue
 
+        if op.opcode == "concat":
+            if op.concat_axis is None:
+                raise RuntimeError("verified concatenate loop unexpectedly has no axis")
+            offset = 0
+            for buffer in op.inputs:
+                source = buffers[buffer]
+                extent = source.shape[op.concat_axis]
+                index = [slice(None)] * output.ndim
+                index[op.concat_axis] = slice(offset, offset + extent)
+                np.copyto(output[tuple(index)], source)
+                offset += extent
+            continue
+
         if op.opcode == "reshape":
             source = buffers[op.inputs[0]]
             np.copyto(output.reshape(-1), source.reshape(-1))
