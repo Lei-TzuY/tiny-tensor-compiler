@@ -5,7 +5,12 @@ import time
 import pytest
 
 import tiny_tensor_compiler.native as native_module
-from tiny_tensor_compiler import NativeCompilationTimeout, compile_native, lower_to_cpu, lower_to_loops
+from tiny_tensor_compiler import (
+    NativeCompilationTimeout,
+    compile_native,
+    lower_to_cpu,
+    lower_to_loops,
+)
 from tiny_tensor_compiler.frontend import GraphBuilder
 
 
