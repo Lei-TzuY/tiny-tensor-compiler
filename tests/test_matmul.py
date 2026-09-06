@@ -37,7 +37,7 @@ def _manual_i32_matmul(lhs: np.ndarray, rhs: np.ndarray) -> np.ndarray:
     return out
 
 
-def test_rank2_matmul_executes_across_reference_loop_and_native() -> None:
+def test_rank2_matmul_builds_verified_primitives_and_executes_end_to_end() -> None:
     builder = GraphBuilder()
     lhs = builder.input((2, 3), dtype="float32")
     rhs = builder.input((3, 4), dtype="float32")
@@ -45,6 +45,17 @@ def test_rank2_matmul_executes_across_reference_loop_and_native() -> None:
     module = builder.finish(result)
 
     assert result.type.shape == (2, 4)
+    assert [op.opcode for op in module.function.ops] == [
+        "input",
+        "input",
+        "reshape",
+        "reshape",
+        "mul",
+        "sum",
+        "return",
+    ]
+    assert module.function.ops[-2].attrs == {"axis": 1}
+
     lhs_value = np.arange(6, dtype=np.float32).reshape(2, 3) - 2
     rhs_value = np.arange(12, dtype=np.float32).reshape(3, 4) / 3
     expected = lhs_value @ rhs_value
@@ -138,18 +149,18 @@ def test_symbolic_matmul_specializes_and_reuses_complete_bindings() -> None:
     assert len(executable.cached_bindings) == 2
 
 
-def test_matmul_is_a_fusion_boundary_and_parallelizes_only_output_rows() -> None:
+def test_matmul_expansion_remains_a_fusion_boundary_and_runs_openmp_native() -> None:
     builder = GraphBuilder()
     lhs = builder.input((3, 4), dtype="float32")
     rhs = builder.input((4, 2), dtype="float32")
     module = builder.finish((lhs @ rhs).relu())
     loops = _loops(module)
 
-    assert [kernel.opcode for kernel in loops.kernels] == ["matmul", "relu"]
+    assert [kernel.opcode for kernel in loops.kernels] == ["reshape", "reshape", "mul", "sum", "relu"]
     source = generate_c(loops, parallel=True)
     assert "#pragma omp parallel for schedule(static)" in source
     assert "for (i0 = 0; i0 < 3; ++i0)" in source
-    assert "for (int64_t k = 0; k < 4; ++k)" in source
+    assert "for (int64_t r = 0; r < 4; ++r)" in source
 
     lhs_value = np.arange(12, dtype=np.float32).reshape(3, 4) - 6
     rhs_value = np.arange(8, dtype=np.float32).reshape(4, 2) - 2
@@ -160,15 +171,14 @@ def test_matmul_is_a_fusion_boundary_and_parallelizes_only_output_rows() -> None
     )
 
 
-def test_matmul_participates_in_pure_dce_and_exact_cse() -> None:
+def test_matmul_composition_participates_in_existing_dce_and_cse() -> None:
     builder = GraphBuilder()
     lhs = builder.input((2, 3), dtype="float32")
     rhs = builder.input((3, 2), dtype="float32")
-    unused = lhs @ rhs
+    _ = lhs @ rhs
     live = lhs @ rhs
     module = builder.finish(live.relu())
-    assert unused.value.uses == []
-    assert dead_code_eliminate(module) == 1
+    assert dead_code_eliminate(module) == 4
 
     builder2 = GraphBuilder()
     lhs2 = builder2.input((2, 3), dtype="float32")
@@ -176,11 +186,11 @@ def test_matmul_participates_in_pure_dce_and_exact_cse() -> None:
     first = lhs2 @ rhs2
     second = lhs2 @ rhs2
     module2 = builder2.finish(first + second)
-    assert common_subexpression_eliminate(module2) == 1
-    assert [op.opcode for op in module2.function.ops].count("matmul") == 1
+    assert common_subexpression_eliminate(module2) == 4
+    assert [op.opcode for op in module2.function.ops].count("sum") == 1
 
 
-def test_matmul_round_trips_through_canonical_serialization() -> None:
+def test_matmul_expansion_round_trips_through_canonical_serialization() -> None:
     builder = GraphBuilder("matmul_roundtrip")
     lhs = builder.input((2, 3), dtype="float32")
     rhs = builder.input((3, 4), dtype="float32")
