@@ -337,6 +337,12 @@ class GraphBuilder:
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
         if _storage_root(source.value) is owner:
+            # Same-root writes have explicit snapshot semantics at the public builder
+            # boundary. Materialize the logical source in C order before mutating the
+            # owning root, so overlapping, interleaved, reversed, transposed, and
+            # unresolved-symbolic layouts all reduce to the existing different-root
+            # copy_into contract. The lower verifier/backend invariant therefore stays
+            # fail-closed rather than acquiring hidden memmove behavior.
             source = self.reshape(source, source.type.shape)
 
         op = self.function.add_op(
@@ -375,6 +381,8 @@ class GraphBuilder:
         if rhs_tensor is not None:
             self._check_tensor_owner(rhs_tensor)
 
+        # Python scalar literals are coerced to the peer tensor's dtype. This keeps
+        # tensor<float32> * 2 as float32 while tensor-vs-tensor promotion remains explicit.
         if lhs_tensor is None:
             peer_dtype = (
                 rhs_tensor.type.dtype if rhs_tensor is not None and np.isscalar(lhs) else None
