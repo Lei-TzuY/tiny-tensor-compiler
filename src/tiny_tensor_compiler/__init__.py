@@ -41,6 +41,7 @@ from .lowering import (
     plan_memory,
 )
 from .native_api import (
+    NativeCompilationDeadlineExceeded,
     NativeCompilationError,
     NativeCompilationTimeout,
     NativeExecutable,
@@ -203,6 +204,7 @@ __all__ = [
     "NativeBundleTransparencyRollbackError",
     "NativeBundleTransparencyWitnessError",
     "NativeBundleTrustError",
+    "NativeCompilationDeadlineExceeded",
     "NativeCompilationError",
     "NativeCompilationTimeout",
     "NativeExecutable",
