@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Self
 
 from .admission import CompileBudget
 from .compiler import compile_module
@@ -23,7 +23,7 @@ class ResourceManagedNativeExecutable:
         if not isinstance(executable, NativeExecutable):
             raise TypeError("managed native ownership requires a NativeExecutable")
         if isinstance(executable, ParallelNativeExecutable):
-            raise ValueError(
+            raise TypeError(
                 "managed native ownership does not support process-pinned OpenMP artifacts"
             )
         self._executable = executable
@@ -62,7 +62,7 @@ class ResourceManagedNativeExecutable:
         self._closed = True
         return _release_managed_serial_artifact(self, self._executable)
 
-    def __enter__(self) -> ResourceManagedNativeExecutable:
+    def __enter__(self) -> Self:
         if self._closed:
             raise RuntimeError("resource-managed native executable is closed")
         return self
