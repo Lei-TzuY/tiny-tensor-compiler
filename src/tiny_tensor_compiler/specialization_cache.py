@@ -194,6 +194,7 @@ def compile_resource_managed_dynamic_module(
     *,
     max_cached_specializations: int,
     borrow_inputs: bool = False,
+    parallel: bool = False,
     budget: CompileBudget | None = None,
     compiler_timeout: float | None = None,
     compile_deadline: float | None = None,
@@ -205,6 +206,7 @@ def compile_resource_managed_dynamic_module(
         cache_dir=cache_dir,
         max_cached_specializations=max_cached_specializations,
         borrow_inputs=borrow_inputs,
+        parallel=parallel,
         budget=budget,
         compiler_timeout=compiler_timeout,
         compile_deadline=compile_deadline,
@@ -219,6 +221,7 @@ def compile_resource_managed_adaptive_dynamic_module(
     compiler: str | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     borrow_inputs: bool = False,
+    parallel: bool = False,
     compiler_timeout: float | None = None,
     compile_deadline: float | None = None,
 ) -> ResourceManagedAdaptiveDynamicExecutable:
@@ -230,6 +233,7 @@ def compile_resource_managed_adaptive_dynamic_module(
         cache_dir=cache_dir,
         max_cached_specializations=max_cached_specializations,
         borrow_inputs=borrow_inputs,
+        parallel=parallel,
         compiler_timeout=compiler_timeout,
         compile_deadline=compile_deadline,
     )
