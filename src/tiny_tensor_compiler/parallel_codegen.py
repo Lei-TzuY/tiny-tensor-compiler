@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from .c_codegen import _element_count, _emit_kernel, _select_i32_sse2_plan
+from .effect_schedule import ParallelEffectGroup
 from .ir import TensorType
 from .layout import StorageLayout
-from .loop_ir import LoopBinaryInto, LoopKernel
-from .write_codegen import emit_binary_into
+from .loop_ir import LoopBinaryInto, LoopCopyInto, LoopInplaceBinary, LoopKernel
+from .write_codegen import (
+    emit_binary_into,
+    emit_copy_into,
+    emit_effect_result_alias,
+    emit_inplace_binary,
+)
 
 _OPENMP_PARALLEL_FOR = "#pragma omp parallel for schedule(static)"
 
@@ -74,6 +80,45 @@ def emit_parallel_binary_into(
         return lines
 
     raise RuntimeError("verified binary_into unexpectedly has no schedulable target loop")
+
+
+def emit_parallel_effect_group(
+    group: ParallelEffectGroup,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+) -> list[str]:
+    """Emit pairwise-independent effects as one barriered OpenMP sections region."""
+    if len(group.effects) < 2:
+        raise ValueError("parallel effect sections require at least two independent effects")
+
+    lines = ["    #pragma omp parallel sections", "    {"]
+    for op in group.effects:
+        lines.extend(("        #pragma omp section", "        {"))
+        body = _emit_serial_effect_body(op, types, layouts)
+        lines.extend(f"    {line}" for line in body if line)
+        lines.append("        }")
+    lines.append("    }")
+
+    # Fresh result handles become visible only after the sections barrier has completed.
+    # Keeping these declarations in original IR order preserves the existing generation
+    # contract while avoiding section-local pointer lifetimes.
+    for op in group.effects:
+        lines.extend(emit_effect_result_alias(op))
+    return lines
+
+
+def _emit_serial_effect_body(
+    op: LoopCopyInto | LoopBinaryInto | LoopInplaceBinary,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+) -> list[str]:
+    if isinstance(op, LoopCopyInto):
+        return emit_copy_into(op, types, layouts, expose_output=False)
+    if isinstance(op, LoopBinaryInto):
+        return emit_binary_into(op, types, layouts, expose_output=False)
+    if isinstance(op, LoopInplaceBinary):
+        return emit_inplace_binary(op, types, layouts, expose_output=False)
+    raise TypeError("unsupported write effect in parallel sections")
 
 
 def _externalize_openmp_induction_variable(
