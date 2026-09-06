@@ -116,7 +116,7 @@ def test_generated_c_explicitly_casts_source_to_widened_accumulator() -> None:
     module = builder.finish(value.sum(axis=1, dtype="int64"))
     source = generate_c(lower_to_loops(lower_to_cpu(module)))
 
-    assert "int64_t sum_value = 0LL;" in source
+    assert "int64_t sum_value = 0;" in source
     assert "sum_value = ((int64_t)sum_value + (int64_t)" in source
 
 
