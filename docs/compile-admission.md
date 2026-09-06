@@ -59,7 +59,9 @@ The first cardinality policy is deliberately fail-closed rather than LRU. Removi
 
 Native compilation APIs accept the optional `compiler_timeout` policy. It is either `None` or a positive finite number of seconds. Boolean, zero, negative, NaN, and infinite values are rejected before compiler lookup.
 
-The policy bounds only one launched external C compiler subprocess. It is threaded consistently through serial and OpenMP native compilation plus concrete, dynamic, and adaptive high-level compilation. A timed-out compiler raises `NativeCompilationTimeout`, which remains a `NativeCompilationError` and exposes the exact command plus configured timeout for diagnostics.
+The policy bounds one launched external C compiler invocation and, when that explicit timeout is enabled, also terminates the ordinary descendant process tree created by that compiler. It is threaded consistently through serial and OpenMP native compilation plus concrete, dynamic, and adaptive high-level compilation. A timed-out compiler raises `NativeCompilationTimeout`, which remains a `NativeCompilationError` and exposes the exact command plus configured timeout for diagnostics.
+
+With `compiler_timeout=None`, the historical `subprocess.run(...)` compilation path is preserved. With an explicit timeout, POSIX launches the compiler in a new session and kills its process group on timeout; Windows launches a new process group and uses `taskkill /T /F` for the compiler PID before reaping the parent process. Cross-platform regression coverage uses a fake compiler that spawns a delayed child writer and proves the descendant does not survive the timeout boundary.
 
 A timeout never becomes an adaptive Loop fallback. Adaptive fallback remains reserved exclusively for an explicit concrete `CompileBudgetExceeded` decision made before native compilation begins.
 
@@ -70,7 +72,7 @@ Timeout cleanup uses the existing artifact durability boundaries:
 - timeout is not part of native artifact identity, so an existing process or persistent cache hit reuses the already-compiled artifact without launching a compiler merely because the caller supplies a different timeout;
 - reusable native/dynamic handles retain the timeout policy for any later compilation that is actually required after a cache miss.
 
-The timeout is intentionally **not** a total compilation deadline. Time spent waiting for a persistent-cache lease is outside this first policy because no compiler subprocess has started yet. It also does not limit native execution after compilation.
+The timeout is intentionally **not** a total compilation deadline. Time spent waiting for a persistent-cache lease is outside this policy because no compiler process tree has started yet. It also does not limit native execution after compilation. Process-tree cancellation covers ordinary descendants that remain in the launched compiler's POSIX process group or Windows process tree; it is not a sandbox guarantee for a deliberately detached process that escapes those operating-system relationships.
 
 ## Evidence boundary
 
@@ -83,8 +85,8 @@ The concrete report metrics are structural compiler facts, not runtime resource 
 
 Accordingly, `CompileBudget` is a deterministic compiler admission policy, not a security sandbox, denial-of-service guarantee, memory limiter, or benchmark. Adaptive Loop fallback also does not claim to reduce runtime memory or improve performance; it only avoids native compilation for the explicit concrete over-budget policy case while preserving verified executable semantics.
 
-`compiler_timeout` is likewise a bounded wait for the directly launched compiler subprocess, not a process-tree sandbox, CPU quota, memory limit, trusted cancellation protocol, runtime timeout, cache-lock deadline, or general denial-of-service guarantee. No security/isolation claim is implied by subprocess timeout enforcement.
+`compiler_timeout` is likewise a bounded wait plus best-effort operating-system process-tree cancellation for the launched compiler invocation, not a CPU quota, memory limit, trusted sandbox, runtime timeout, cache-lock deadline, or general denial-of-service guarantee. It does not guarantee termination of intentionally detached descendants that escape the managed POSIX process group or Windows process tree. No security/isolation claim is implied by timeout enforcement.
 
 ## Phase boundary
 
-Concrete structural admission, adaptive native-or-Loop policy, per-handle dynamic-specialization cardinality, and bounded external compiler-subprocess timeout are now separate, composable controls. Adding more counters, cache-size aliases, eviction heuristics, fallback modes, timeout aliases, or retry knobs without a distinct enforceable lifecycle requirement would be low-value farming. The next runtime-control promotion should require genuinely new semantics—such as resource-accounted specialization eviction with proven native-artifact release, a total compilation deadline/process-tree cancellation model with cross-platform evidence, or another architectural frontier—rather than disguising another threshold as a subsystem.
+Concrete structural admission, adaptive native-or-Loop policy, per-handle dynamic-specialization cardinality, and bounded external compiler process-tree timeout are now separate, composable controls. Adding more counters, cache-size aliases, eviction heuristics, fallback modes, timeout aliases, or retry knobs without a distinct enforceable lifecycle requirement would be low-value farming. The next runtime-control promotion should require genuinely new semantics—such as resource-accounted specialization eviction with proven native-artifact release, a total compilation deadline that also bounds persistent-cache lease waiting and other pre/post-compiler phases, or another architectural frontier—rather than disguising another threshold as a subsystem.
