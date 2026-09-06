@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Any
 
 from . import native as native_module
 from .admission import CompileBudget
@@ -16,7 +15,6 @@ from .compiler import (
 from .ir import Module, SymbolicDim
 from .native_api import NativeExecutable
 
-BindingKey = tuple[int, ...]
 BindingDisplay = tuple[tuple[str, int], ...]
 
 
@@ -96,8 +94,11 @@ class ResourceManagedDynamicExecutable(DynamicExecutable):
 
     def _evict_to_limit(self) -> None:
         while len(self._specializations) > self._max_cached_specializations:
-            _, executable = self._specializations.popitem(last=False) if False else (None, None)
-            raise AssertionError("unreachable")
+            oldest_key = next(iter(self._specializations))
+            executable = self._specializations.pop(oldest_key)
+            self._eviction_count += 1
+            if _release_cached_serial_artifact(executable):
+                self._released_native_artifact_count += 1
 
 
 class ResourceManagedAdaptiveDynamicExecutable(AdaptiveDynamicExecutable):
