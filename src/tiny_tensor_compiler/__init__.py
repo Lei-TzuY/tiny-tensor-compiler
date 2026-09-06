@@ -1,4 +1,5 @@
 from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
+from .autodiff import AutodiffError, differentiate_module
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
@@ -162,6 +163,7 @@ from .verifier import VerificationError, verify
 __all__ = [
     "AffineDim",
     "AttestedNativeBundleRegistryExecutable",
+    "AutodiffError",
     "BorrowedInput",
     "BorrowedLoopProgram",
     "BufferAlias",
@@ -251,6 +253,7 @@ __all__ = [
     "create_transparency_witness_evidence_publication",
     "create_transparency_witness_quorum",
     "dead_code_eliminate",
+    "differentiate_module",
     "digest_dynamic_bundle_set_archive",
     "enforce_compile_budget",
     "execute_cpu",
