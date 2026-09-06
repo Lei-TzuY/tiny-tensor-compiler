@@ -1,4 +1,3 @@
-import contextlib
 import math
 import multiprocessing
 import shlex
@@ -189,10 +188,8 @@ def test_persistent_cache_hit_does_not_launch_compiler_under_total_deadline(
     compile_native(program, compiler=compiler, cache_dir=cache_dir)
     clear_native_cache()
 
-    @contextlib.contextmanager
     def no_compiler(*args, **kwargs):
         raise AssertionError("persistent cache hit must not launch the compiler")
-        yield
 
     monkeypatch.setattr(native_module, "_compile_source", no_compiler)
     compile_native(
