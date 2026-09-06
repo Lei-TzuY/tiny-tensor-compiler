@@ -12,6 +12,7 @@ _PURE_OPCODES = frozenset(
         "add",
         "mul",
         "relu",
+        "concat",
         *REDUCTION_OPCODES,
         "reshape",
         "view",
@@ -20,7 +21,9 @@ _PURE_OPCODES = frozenset(
         "transpose",
     }
 )
-_CSE_OPCODES = frozenset({"add", "mul", "relu", *REDUCTION_OPCODES, "reshape", "view"})
+_CSE_OPCODES = frozenset(
+    {"add", "mul", "relu", "concat", *REDUCTION_OPCODES, "reshape", "view"}
+)
 _CANONICAL_COMMUTATIVE_OPCODES = frozenset({"add", "mul"})
 _EFFECT_OPCODES = frozenset({"copy_into", "binary_into", "binary_inplace"})
 
@@ -124,10 +127,11 @@ def common_subexpression_eliminate(module: Module) -> int:
     for op in list(function.ops):
         if op.opcode not in _CSE_OPCODES or not op.results:
             continue
-        if op.attrs and op.opcode not in REDUCTION_OPCODES:
+        attrs_allowed = op.opcode in REDUCTION_OPCODES or op.opcode == "concat"
+        if op.attrs and not attrs_allowed:
             continue
 
-        attrs_key = tuple(sorted(op.attrs.items())) if op.opcode in REDUCTION_OPCODES else ()
+        attrs_key = tuple(sorted(op.attrs.items())) if attrs_allowed else ()
         key = (
             op.opcode,
             tuple(op.operands),
