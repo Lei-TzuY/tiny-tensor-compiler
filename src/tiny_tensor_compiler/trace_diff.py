@@ -7,7 +7,6 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 _TRACE_FORMAT = "tiny-tensor-compiler-trace"
 _TRACE_VERSION = 1
