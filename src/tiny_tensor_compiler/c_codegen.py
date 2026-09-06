@@ -214,6 +214,9 @@ def _emit_kernel(
         lines.append("")
         return lines
 
+    if op.opcode == "concat":
+        return _emit_concat(op, types, layouts, lines)
+
     if op.opcode == "reshape":
         if len(op.inputs) != 1:
             raise RuntimeError("verified reshape loop unexpectedly has invalid arity")
@@ -319,6 +322,65 @@ def _emit_kernel(
     lines.append("    }")
     lines.append("")
     return lines
+
+
+def _emit_concat(
+    op: LoopKernel,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+    lines: list[str],
+) -> list[str]:
+    axis = op.concat_axis
+    if axis is None or len(op.inputs) < 2:
+        raise RuntimeError("verified concatenate loop unexpectedly has invalid metadata")
+    output_type = types[op.output]
+    prefix = 0
+    for segment, buffer in enumerate(op.inputs):
+        source_type = types[buffer]
+        lines.append(f"        /* concat axis {axis} segment {segment} */")
+        indent = "        "
+        for input_axis, bound in enumerate(source_type.shape):
+            lines.append(
+                f"{indent}for (int64_t i{input_axis} = 0; "
+                f"i{input_axis} < {bound}; ++i{input_axis}) {{"
+            )
+            indent += "    "
+        source_offset = _stride_offset(
+            tuple(range(len(source_type.shape))),
+            layouts[buffer].strides,
+        )
+        output_offset = _concat_output_offset(
+            source_type.shape,
+            output_type.shape,
+            axis,
+            prefix,
+        )
+        lines.append(f"{indent}p{op.output}[{output_offset}] = p{buffer}[{source_offset}];")
+        for _ in source_type.shape:
+            indent = indent[:-4]
+            lines.append(f"{indent}}}")
+        prefix += source_type.shape[axis]
+    lines.extend(["    }", ""])
+    return lines
+
+
+def _concat_output_offset(
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    axis: int,
+    prefix: int,
+) -> str:
+    terms: list[str] = []
+    for position in range(len(input_shape)):
+        stride = reduce(mul, output_shape[position + 1 :], 1)
+        coordinate = f"i{position}"
+        if position == axis and prefix:
+            coordinate = f"(i{position} + {prefix})"
+        if stride == 1:
+            terms.append(coordinate)
+        else:
+            terms.append(f"({coordinate} * {stride})")
+    return " + ".join(terms) if terms else "0"
 
 
 def _emit_argmax_reduction(
