@@ -39,6 +39,7 @@ _CHUNK_SIZE = 16 * 1024
 _MAX_PROOFS = 16
 _MAX_PROOF_NODES = 64
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_LOG_ID_RE = re.compile(r"ed25519:[0-9a-f]{64}\Z")
 _NODE_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SIGNATURE_RE = re.compile(r"[0-9a-f]{128}\Z")
 
@@ -355,7 +356,7 @@ def _decode_publication(encoded: bytes) -> dict[str, Any]:
         raise NativeBundleTransparencyPublicationError(
             "transparency evidence publication publisher identity is invalid"
         )
-    if not isinstance(decoded.get("log_id"), str) or _DIGEST_RE.fullmatch(decoded["log_id"]) is None:
+    if not isinstance(decoded.get("log_id"), str) or _LOG_ID_RE.fullmatch(decoded["log_id"]) is None:
         raise NativeBundleTransparencyPublicationError(
             "transparency evidence publication log identity is invalid"
         )
