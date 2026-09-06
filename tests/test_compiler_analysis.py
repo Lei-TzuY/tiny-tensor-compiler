@@ -11,13 +11,14 @@ def test_report_measures_actual_fusion_pipeline():
     builder = GraphBuilder("fusion-report")
     lhs = builder.input((8,), "int32")
     rhs = builder.input((8,), "int32")
-    module = builder.finish((lhs + rhs).relu())
+    result = (lhs + rhs).relu()
+    module = builder.finish((lhs, rhs, result))
 
     report = analyze_module(module)
 
     assert report.function_name == "fusion-report"
     assert report.input_count == 2
-    assert report.output_count == 1
+    assert report.output_count == 3
     assert dict(report.tensor_op_counts) == {"add": 1, "input": 2, "relu": 1, "return": 1}
     assert dict(report.pre_fusion_kernel_counts) == {"add": 1, "relu": 1}
     assert report.post_fusion_kernel_count == 1
