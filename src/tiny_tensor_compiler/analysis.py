@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from .fusion_planner import fuse_elementwise
 from .ir import Module, TensorType
@@ -12,7 +13,6 @@ from .loop_ir import (
     LoopBinaryInto,
     LoopCopyInto,
     LoopInplaceBinary,
-    LoopKernel,
     LoopProgram,
     fused_expression_for_kernel,
     lower_to_loops,
