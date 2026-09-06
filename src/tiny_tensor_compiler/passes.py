@@ -22,7 +22,7 @@ _PURE_OPCODES = frozenset(
 )
 _CSE_OPCODES = frozenset({"add", "mul", "relu", *REDUCTION_OPCODES, "reshape", "view"})
 _CANONICAL_COMMUTATIVE_OPCODES = frozenset({"add", "mul"})
-_EFFECT_OPCODES = frozenset({"copy_into", "binary_inplace"})
+_EFFECT_OPCODES = frozenset({"copy_into", "binary_into", "binary_inplace"})
 
 
 def constant_fold(module: Module) -> int:
