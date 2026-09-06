@@ -20,6 +20,7 @@ import numpy as np
 
 from . import native_cache_lock
 from .c_abi_codegen import generate_c
+from .compiler_control import normalize_compiler_timeout
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
@@ -30,6 +31,18 @@ NativeOutput = np.ndarray | Sequence[np.ndarray] | None
 
 class NativeCompilationError(RuntimeError):
     """Raised when generated C cannot be compiled or loaded for native execution."""
+
+
+class NativeCompilationTimeout(NativeCompilationError):
+    """Raised when one external compiler process exceeds its explicit timeout."""
+
+    def __init__(self, command: Sequence[str], timeout: float) -> None:
+        self.command = tuple(command)
+        self.timeout = timeout
+        super().__init__(
+            f"native C compilation exceeded compiler timeout of {timeout:g}s: "
+            f"{shlex.join(self.command)}"
+        )
 
 
 class _NativeArtifact:
@@ -55,11 +68,13 @@ class NativeExecutable:
         command: tuple[str, ...],
         source: str,
         persistent_library: Path | None,
+        compiler_timeout: float | None = None,
     ) -> None:
         self._program = program
         self._command = command
         self._source = source
         self._persistent_library = persistent_library
+        self._compiler_timeout = compiler_timeout
 
     def execute(
         self,
@@ -75,6 +90,7 @@ class NativeExecutable:
                 self._source,
                 command,
                 self._persistent_library,
+                compiler_timeout=self._compiler_timeout,
             )
             return _execute_artifact(self._program, artifact, runtime_inputs, outputs)
 
@@ -97,20 +113,29 @@ def compile_native(
     program: LoopProgram,
     compiler: str | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    compiler_timeout: float | None = None,
 ) -> NativeExecutable:
     """Eagerly compile/load a loop program and return a reusable executable."""
+    normalized_timeout = normalize_compiler_timeout(compiler_timeout)
     command = _compiler_command(compiler)
     source = generate_c(program)
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
-        _get_or_compile_artifact(source, command, persistent_library)
+        _get_or_compile_artifact(
+            source,
+            command,
+            persistent_library,
+            compiler_timeout=normalized_timeout,
+        )
 
     return NativeExecutable(
         program=program,
         command=tuple(command),
         source=source,
         persistent_library=persistent_library,
+        compiler_timeout=normalized_timeout,
     )
 
 
@@ -120,8 +145,11 @@ def execute_native(
     inputs: Sequence[Any] = (),
     cache_dir: str | os.PathLike[str] | None = None,
     out: NativeOutput = None,
+    *,
+    compiler_timeout: float | None = None,
 ) -> ExecutionResult:
     """Compile or reuse generated C and execute it on the native CPU."""
+    normalized_timeout = normalize_compiler_timeout(compiler_timeout)
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     outputs = _prepare_native_outputs(program, out, runtime_inputs)
     command = _compiler_command(compiler)
@@ -129,7 +157,12 @@ def execute_native(
     persistent_library = _persistent_library_path(cache_dir, source, command)
 
     with _NATIVE_CACHE_LOCK:
-        artifact = _get_or_compile_artifact(source, command, persistent_library)
+        artifact = _get_or_compile_artifact(
+            source,
+            command,
+            persistent_library,
+            compiler_timeout=normalized_timeout,
+        )
         return _execute_artifact(program, artifact, runtime_inputs, outputs)
 
 
@@ -261,6 +294,8 @@ def _get_or_compile_artifact(
     source: str,
     command: list[str],
     persistent_library: Path | None,
+    *,
+    compiler_timeout: float | None = None,
 ) -> _NativeArtifact:
     persistent_identity = str(persistent_library) if persistent_library is not None else None
     key = (tuple(command), source, persistent_identity)
@@ -269,17 +304,36 @@ def _get_or_compile_artifact(
         return artifact
 
     if persistent_library is None:
-        artifact = _compile_artifact(source, command)
+        artifact = _compile_artifact(
+            source,
+            command,
+            compiler_timeout=compiler_timeout,
+        )
     else:
-        artifact = _get_or_compile_persistent_artifact(source, command, persistent_library)
+        artifact = _get_or_compile_persistent_artifact(
+            source,
+            command,
+            persistent_library,
+            compiler_timeout=compiler_timeout,
+        )
     _NATIVE_CACHE[key] = artifact
     return artifact
 
 
-def _compile_artifact(source: str, command: list[str]) -> _NativeArtifact:
+def _compile_artifact(
+    source: str,
+    command: list[str],
+    *,
+    compiler_timeout: float | None = None,
+) -> _NativeArtifact:
     directory_path = Path(tempfile.mkdtemp(prefix="tiny_tensor_compiler_"))
     try:
-        library_path = _compile_source(source, command, directory_path)
+        library_path = _compile_source(
+            source,
+            command,
+            directory_path,
+            compiler_timeout=compiler_timeout,
+        )
         library = _load_library(library_path)
     except Exception:
         shutil.rmtree(directory_path, ignore_errors=True)
@@ -292,6 +346,8 @@ def _get_or_compile_persistent_artifact(
     source: str,
     command: list[str],
     library_path: Path,
+    *,
+    compiler_timeout: float | None = None,
 ) -> _NativeArtifact:
     try:
         with _persistent_cache_lease(library_path):
@@ -302,7 +358,12 @@ def _get_or_compile_persistent_artifact(
             schema_root = library_path.parent.parent
             build_directory = Path(tempfile.mkdtemp(prefix=".build-", dir=schema_root))
             try:
-                compiled_library = _compile_source(source, command, build_directory)
+                compiled_library = _compile_source(
+                    source,
+                    command,
+                    build_directory,
+                    compiler_timeout=compiler_timeout,
+                )
                 compiled_manifest = build_directory / _PERSISTENT_MANIFEST_NAME
                 _write_persistent_manifest(
                     compiled_manifest,
@@ -334,18 +395,37 @@ def _get_or_compile_persistent_artifact(
         ) from error
 
 
-def _compile_source(source: str, command: list[str], directory_path: Path) -> Path:
+def _compile_source(
+    source: str,
+    command: list[str],
+    directory_path: Path,
+    *,
+    compiler_timeout: float | None = None,
+) -> Path:
     source_path = directory_path / "program.c"
     library_path = directory_path / _library_name()
     source_path.write_text(source, encoding="utf-8")
     compile_command = _build_compile_command(command, source_path.name, library_path.name)
-    completed = subprocess.run(
-        compile_command,
-        cwd=directory_path,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        if compiler_timeout is None:
+            completed = subprocess.run(
+                compile_command,
+                cwd=directory_path,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        else:
+            completed = subprocess.run(
+                compile_command,
+                cwd=directory_path,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=compiler_timeout,
+            )
+    except subprocess.TimeoutExpired as error:
+        raise NativeCompilationTimeout(compile_command, float(error.timeout)) from error
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "no compiler output"
         raise NativeCompilationError(
