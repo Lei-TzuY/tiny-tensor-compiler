@@ -10,7 +10,11 @@ from typing import Any
 
 from . import native as native_module
 from .c_abi_codegen import generate_c
-from .compiler_control import normalize_compiler_timeout
+from .compiler_control import (
+    CompilationDeadline,
+    normalize_compilation_timeout,
+    normalize_compiler_timeout,
+)
 from .input_binding import BorrowedLoopProgram
 from .input_validation import prepare_runtime_inputs
 from .loop_ir import LoopProgram
@@ -43,6 +47,7 @@ class ParallelNativeExecutable(native_module.NativeExecutable):
         *,
         pinned_artifact: native_module._NativeArtifact | None,
         compiler_timeout: float | None = None,
+        compilation_timeout: float | None = None,
     ) -> None:
         super().__init__(
             program=program,
@@ -50,6 +55,7 @@ class ParallelNativeExecutable(native_module.NativeExecutable):
             source=source,
             persistent_library=persistent_library,
             compiler_timeout=compiler_timeout,
+            compilation_timeout=compilation_timeout,
         )
         self._pinned_artifact = pinned_artifact
 
@@ -63,7 +69,9 @@ class ParallelNativeExecutable(native_module.NativeExecutable):
 
         runtime_inputs = prepare_runtime_inputs(self._program.input_types, inputs)
         outputs = native_module._prepare_native_outputs(self._program, out, runtime_inputs)
-        with native_module._NATIVE_CACHE_LOCK:
+        deadline = CompilationDeadline.start(self._compilation_timeout)
+        with native_module._native_cache_guard(deadline):
+            native_module._deadline_remaining(deadline, "process-pinned artifact lookup")
             return native_module._execute_artifact(
                 self._program,
                 self._pinned_artifact,
@@ -78,15 +86,21 @@ def compile_parallel_native(
     cache_dir: str | os.PathLike[str] | None = None,
     *,
     compiler_timeout: float | None = None,
+    compilation_timeout: float | None = None,
 ) -> native_module.NativeExecutable:
     """Compile one verified Loop IR program with barriered OpenMP kernel scheduling."""
-    normalized_timeout = normalize_compiler_timeout(compiler_timeout)
+    normalized_compiler_timeout = normalize_compiler_timeout(compiler_timeout)
+    normalized_compilation_timeout = normalize_compilation_timeout(compilation_timeout)
+    deadline = CompilationDeadline.start(normalized_compilation_timeout)
     command = _enable_openmp(native_module._compiler_command(compiler))
+    native_module._deadline_remaining(deadline, "compiler lookup")
     source = generate_c(program, parallel=True)
+    native_module._deadline_remaining(deadline, "source generation")
     persistent_library = native_module._persistent_library_path(cache_dir, source, command)
+    native_module._deadline_remaining(deadline, "artifact identity")
 
     pinned_artifact: native_module._NativeArtifact | None = None
-    with native_module._NATIVE_CACHE_LOCK:
+    with native_module._native_cache_guard(deadline):
         if os.name == "nt":
             key = _artifact_key(source, command, persistent_library)
             pinned_artifact = _WINDOWS_PINNED_ARTIFACTS.get(key)
@@ -95,17 +109,24 @@ def compile_parallel_native(
                     source,
                     command,
                     persistent_library,
-                    compiler_timeout=normalized_timeout,
+                    compiler_timeout=normalized_compiler_timeout,
+                    deadline=deadline,
                 )
                 native_module._NATIVE_CACHE.pop(key, None)
                 _mark_windows_process_pin(pinned_artifact)
                 _WINDOWS_PINNED_ARTIFACTS[key] = pinned_artifact
+            else:
+                native_module._deadline_remaining(
+                    deadline,
+                    "process-pinned artifact lookup",
+                )
         else:
             native_module._get_or_compile_artifact(
                 source,
                 command,
                 persistent_library,
-                compiler_timeout=normalized_timeout,
+                compiler_timeout=normalized_compiler_timeout,
+                deadline=deadline,
             )
 
     return ParallelNativeExecutable(
@@ -114,7 +135,8 @@ def compile_parallel_native(
         source=source,
         persistent_library=persistent_library,
         pinned_artifact=pinned_artifact,
-        compiler_timeout=normalized_timeout,
+        compiler_timeout=normalized_compiler_timeout,
+        compilation_timeout=normalized_compilation_timeout,
     )
 
 
