@@ -53,3 +53,24 @@ This phase does not add:
 - a matmul-specific parallel scheduler.
 
 The next matrix-multiplication milestone should only proceed if it removes the `M * K * N` materialization through direct verifier-backed contraction lowering, or otherwise adds a genuinely new executable backend capability. Adding syntax aliases or more rank-shape variants alone is not a phase promotion.
+
+## Direct physical lowering milestone
+
+After the compositional rank-2 semantic surface was established, the physical lowering
+pipeline learned one conservative contraction optimization. The exact private
+`reshape -> reshape -> mul -> sum(axis=1)` shape emitted by `Tensor.matmul()` is recognized
+only when both reshape results and the product are single-use intermediates. Buffer/Loop IR
+then contains one `matmul` kernel over the original `(M,K)` and `(K,N)` logical values, so
+compiler-owned `(M,K,N)` product storage is not materialized.
+
+The tensor IR deliberately remains compositional and serializable; reference execution is
+therefore an independent oracle for the direct physical kernel. The direct kernel preserves
+left-to-right `k=0..K-1` accumulation, casts each product and accumulator update through the
+promoted output dtype, and returns additive identity for `K=0`. Generated C uses the same
+ordered contraction. OpenMP may schedule independent output rows, but the `K` reduction is
+never parallelized or reassociated. Logical transpose/reverse/slice layouts are indexed
+through their verified strides without forcing a copy.
+
+This is a storage-elimination and executable lowering claim, not a GEMM performance claim.
+BLAS dispatch, tiling, vector-dot SIMD, batched matmul, transpose flags, and parallel K
+reductions remain separate future work.

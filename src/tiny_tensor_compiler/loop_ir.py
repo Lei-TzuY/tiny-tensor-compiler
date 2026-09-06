@@ -20,6 +20,7 @@ from .lowering import (
     CPUProgram,
     plan_memory,
 )
+from .matmul_lowering import infer_direct_matmul_type
 from .reduction import REDUCTION_OPCODES, ReductionPlan
 
 
@@ -312,6 +313,8 @@ class LoopProgram:
                 rhs = f"const {literal}{literal_index}"
             elif op.opcode == "reshape":
                 rhs = f"reshape p{op.inputs[0]}[linear]"
+            elif op.opcode == "matmul":
+                rhs = f"matmul p{op.inputs[0]}, p{op.inputs[1]} [k-order]"
             elif op.reduction is not None:
                 plan = op.reduction
                 if plan.axis is None:
@@ -427,7 +430,7 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
         input_types = tuple(virtual_types[buffer] for buffer in op.inputs)
         input_maps = (
             ()
-            if op.opcode == "reshape" or op.reduction is not None
+            if op.opcode in {"reshape", "matmul"} or op.reduction is not None
             else tuple(
                 _broadcast_index_map(input_type.shape, output_type.shape)
                 for input_type in input_types
@@ -697,6 +700,21 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     raise ValueError("const loop literal shape does not match output buffer")
                 if literal.dtype != output_type.dtype.to_numpy():
                     raise ValueError("const loop literal dtype does not match output buffer")
+            elif op.opcode == "matmul":
+                if (
+                    len(op.inputs) != 2
+                    or op.input_maps
+                    or op.literal is not None
+                    or op.reduction_axis is not None
+                ):
+                    raise ValueError(
+                        "matmul loop requires two inputs, no index maps, no literal, and no reduction axis"
+                    )
+                expected = infer_direct_matmul_type(types[op.inputs[0]], types[op.inputs[1]])
+                if expected != output_type:
+                    raise ValueError(
+                        "matmul loop output buffer type does not match inference"
+                    )
             elif op.opcode in {"add", "mul"}:
                 if len(op.inputs) != 2 or len(op.input_maps) != 2 or op.literal is not None:
                     raise ValueError(f"{op.opcode} loop requires two inputs and two index maps")

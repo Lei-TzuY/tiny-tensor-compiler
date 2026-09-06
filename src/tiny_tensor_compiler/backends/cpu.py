@@ -107,6 +107,9 @@ def execute_loop(
             raise TypeError("unsupported CPU loop operation")
 
         output = buffers[op.output]
+        if op.opcode == "matmul":
+            _execute_direct_matmul(buffers[op.inputs[0]], buffers[op.inputs[1]], output)
+            continue
         reduction = op.reduction
         if reduction is not None:
             source = buffers[op.inputs[0]]
@@ -187,6 +190,19 @@ def execute_loop(
         raise RuntimeError("verified loop IR unexpectedly has no return")
     outputs = tuple(np.array(buffers[buffer], copy=True) for buffer in return_buffers)
     return outputs[0] if len(outputs) == 1 else outputs
+
+
+def _execute_direct_matmul(lhs: np.ndarray, rhs: np.ndarray, output: np.ndarray) -> None:
+    dtype = output.dtype
+    m, k_extent = lhs.shape
+    n = rhs.shape[1]
+    for i in range(m):
+        for j in range(n):
+            accumulator = dtype.type(0)
+            for k in range(k_extent):
+                product = dtype.type(np.multiply(lhs[i, k], rhs[k, j]))
+                accumulator = dtype.type(np.add(accumulator, product))
+            output[i, j] = accumulator
 
 
 def _execute_argmax_reduction(

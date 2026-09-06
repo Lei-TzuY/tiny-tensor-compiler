@@ -16,6 +16,7 @@ from .inference import (
 )
 from .ir import Module, TensorType, Value
 from .layout import StorageLayout, element_count
+from .matmul_lowering import find_direct_matmul_patterns, infer_direct_matmul_type
 from .reduction import REDUCTION_OPCODES, ReductionPlan
 from .verifier import verify
 
@@ -300,11 +301,14 @@ class CPUProgram:
 
 def lower_to_cpu(module: Module) -> CPUProgram:
     verify(module)
+    direct_matmuls, skipped_matmul_ops = find_direct_matmul_patterns(module)
     buffers: dict[Value, int] = {}
     operations: list[BufferOperation] = []
     next_buffer = 0
 
     for op in module.function.ops:
+        if op in skipped_matmul_ops:
+            continue
         if op.opcode == "return":
             operations.extend(BufferReturn(buffers[operand]) for operand in op.operands)
             continue
@@ -379,6 +383,17 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                     root=buffers[op.operands[0]],
                     source=buffers[op.operands[1]],
                     operator=op.attrs["operator"],
+                )
+            )
+            continue
+
+        direct_matmul = direct_matmuls.get(op)
+        if direct_matmul is not None:
+            operations.append(
+                BufferKernel(
+                    opcode="matmul",
+                    output=buffer,
+                    inputs=(buffers[direct_matmul.lhs], buffers[direct_matmul.rhs]),
                 )
             )
             continue
@@ -760,6 +775,22 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 expected = infer_binary(allocated[op.inputs[0]], allocated[op.inputs[1]])
                 if expected != output_type:
                     raise ValueError(f"{op.opcode} kernel output buffer type does not match inference")
+            elif op.opcode == "matmul":
+                if (
+                    len(op.inputs) != 2
+                    or op.literal is not None
+                    or op.reduction_axis is not None
+                ):
+                    raise ValueError(
+                        "matmul kernel requires two inputs, no literal, and no reduction axis"
+                    )
+                expected = infer_direct_matmul_type(
+                    allocated[op.inputs[0]], allocated[op.inputs[1]]
+                )
+                if expected != output_type:
+                    raise ValueError(
+                        "matmul kernel output buffer type does not match inference"
+                    )
             elif op.opcode == "relu":
                 if len(op.inputs) != 1 or op.literal is not None:
                     raise ValueError("relu kernel requires one input and no literal")

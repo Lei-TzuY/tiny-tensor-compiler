@@ -6,6 +6,7 @@ All notable project milestones are recorded here.
 
 ### Added
 
+- Direct verified physical lowering for the canonical rank-2 matmul composition, replacing private reshape/multiply/sum intermediates with one deterministic contraction kernel while retaining compositional tensor IR as the reference/serialization surface.
 - Ordered multiple tensor returns in the Python frontend and typed tensor IR.
 - Multi-output reference and explicit loop-CPU execution while preserving the existing single-output `numpy.ndarray` result contract.
 - Return-aware virtual-buffer liveness and physical memory planning so simultaneously returned values remain distinct when required.

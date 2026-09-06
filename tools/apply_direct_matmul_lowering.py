@@ -375,8 +375,8 @@ reductions remain separate future work.''',
 
 replace_once(
     "CHANGELOG.md",
-    "### Added\n\n",
-    "### Added\n\n- Direct verified physical lowering for the canonical rank-2 matmul composition, replacing private reshape/multiply/sum intermediates with one deterministic contraction kernel while retaining compositional tensor IR as the reference/serialization surface.\n",
+    "## [Unreleased]\n\n### Added\n\n",
+    "## [Unreleased]\n\n### Added\n\n- Direct verified physical lowering for the canonical rank-2 matmul composition, replacing private reshape/multiply/sum intermediates with one deterministic contraction kernel while retaining compositional tensor IR as the reference/serialization surface.\n",
 )
 
 print("direct matmul lowering patch applied")

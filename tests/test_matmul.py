@@ -149,18 +149,18 @@ def test_symbolic_matmul_specializes_and_reuses_complete_bindings() -> None:
     assert len(executable.cached_bindings) == 2
 
 
-def test_matmul_expansion_remains_a_fusion_boundary_and_runs_openmp_native() -> None:
+def test_matmul_direct_lowering_remains_a_fusion_boundary_and_runs_openmp_native() -> None:
     builder = GraphBuilder()
     lhs = builder.input((3, 4), dtype="float32")
     rhs = builder.input((4, 2), dtype="float32")
     module = builder.finish((lhs @ rhs).relu())
     loops = _loops(module)
 
-    assert [kernel.opcode for kernel in loops.kernels] == ["reshape", "reshape", "mul", "sum", "relu"]
+    assert [kernel.opcode for kernel in loops.kernels] == ["matmul", "relu"]
     source = generate_c(loops, parallel=True)
     assert "#pragma omp parallel for schedule(static)" in source
     assert "for (i0 = 0; i0 < 3; ++i0)" in source
-    assert "for (int64_t r = 0; r < 4; ++r)" in source
+    assert "for (int64_t k = 0; k < 4; ++k)" in source
 
     lhs_value = np.arange(12, dtype=np.float32).reshape(3, 4) - 6
     rhs_value = np.arange(8, dtype=np.float32).reshape(4, 2) - 2

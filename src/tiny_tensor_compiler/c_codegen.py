@@ -128,6 +128,9 @@ def _emit_kernel(
             f"[{max(1, flat.size)}] = {{{values}}};"
         )
 
+    if op.opcode == "matmul":
+        return _emit_direct_matmul(op, types, layouts, lines)
+
     reduction = op.reduction
     if reduction is not None:
         if len(op.inputs) != 1:
@@ -319,6 +322,70 @@ def _emit_kernel(
     lines.append("    }")
     lines.append("")
     return lines
+
+
+def _emit_direct_matmul(
+    op: LoopKernel,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+    lines: list[str],
+) -> list[str]:
+    if len(op.inputs) != 2:
+        raise RuntimeError("verified matmul loop unexpectedly has invalid arity")
+    lhs, rhs = op.inputs
+    lhs_type = types[lhs]
+    rhs_type = types[rhs]
+    output_type = types[op.output]
+    if len(lhs_type.shape) != 2 or len(rhs_type.shape) != 2 or len(output_type.shape) != 2:
+        raise RuntimeError("verified matmul loop unexpectedly has non-rank-2 tensors")
+
+    m, k_extent = lhs_type.shape
+    n = rhs_type.shape[1]
+    c_type = _c_type(output_type.dtype)
+    zero = _zero_literal(output_type.dtype)
+    lhs_ref = _matmul_input_ref(lhs, layouts[lhs], "i0", "k")
+    rhs_ref = _matmul_input_ref(rhs, layouts[rhs], "k", "i1")
+    lines.extend(
+        [
+            f"        for (int64_t i0 = 0; i0 < {m}; ++i0) {{",
+            f"            for (int64_t i1 = 0; i1 < {n}; ++i1) {{",
+            f"                {c_type} matmul_value = {zero};",
+            f"                for (int64_t k = 0; k < {k_extent}; ++k) {{",
+            (
+                f"                    volatile {c_type} matmul_product = "
+                f"(({c_type}){lhs_ref} * ({c_type}){rhs_ref});"
+            ),
+            (
+                f"                    matmul_value = "
+                f"(({c_type})matmul_value + ({c_type})matmul_product);"
+            ),
+            "                }",
+            f"                p{op.output}[(i0 * {n}) + i1] = matmul_value;",
+            "            }",
+            "        }",
+            "    }",
+            "",
+        ]
+    )
+    return lines
+
+
+def _matmul_input_ref(
+    buffer: int,
+    layout: StorageLayout,
+    first_index: str,
+    second_index: str,
+) -> str:
+    terms: list[str] = []
+    for index, stride in zip((first_index, second_index), layout.strides, strict=True):
+        if stride == 1:
+            terms.append(index)
+        elif stride == -1:
+            terms.append(f"(-{index})")
+        else:
+            terms.append(f"({index} * {stride})")
+    offset = " + ".join(terms) if terms else "0"
+    return f"p{buffer}[{offset}]"
 
 
 def _emit_argmax_reduction(
