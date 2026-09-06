@@ -40,10 +40,10 @@ def differentiate_module(
     selected_output = _select_output(return_op, output_index)
     input_ops = _input_ops_by_index(module)
     requested = _normalize_wrt(wrt, input_ops)
-
-    _validate_static_floating_contract(module, selected_output, requested, input_ops)
     ancestors = _collect_ancestors(selected_output)
-    _validate_backward_slice(ancestors)
+
+    _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
+    _validate_backward_slice(ancestors, selected_output.type.dtype)
 
     function = Function(f"{module.function.name}_grad")
     value_map: dict[Value, Value] = {}
@@ -150,10 +150,10 @@ def _normalize_wrt(wrt: Sequence[int], inputs: dict[int, Operation]) -> tuple[in
 
 
 def _validate_static_floating_contract(
-    module: Module,
     output: Value,
     requested: tuple[int, ...],
     inputs: dict[int, Operation],
+    ancestors: frozenset[Value],
 ) -> None:
     for op in inputs.values():
         type_ = op.results[0].type
@@ -164,10 +164,8 @@ def _validate_static_floating_contract(
             raise AutodiffError("reverse-mode autodiff wrt inputs must use a floating dtype")
     if not output.type.is_static:  # scalar is static, kept explicit for contract clarity
         raise AutodiffError("reverse-mode autodiff currently requires static shapes")
-    for op in module.function.ops:
-        for result in op.results:
-            if result in _collect_ancestors(output) and not result.type.is_static:
-                raise AutodiffError("reverse-mode autodiff currently requires static shapes")
+    if any(not value.type.is_static for value in ancestors):
+        raise AutodiffError("reverse-mode autodiff currently requires static shapes")
 
 
 def _collect_ancestors(output: Value) -> frozenset[Value]:
@@ -184,7 +182,7 @@ def _collect_ancestors(output: Value) -> frozenset[Value]:
     return frozenset(values)
 
 
-def _validate_backward_slice(ancestors: frozenset[Value]) -> None:
+def _validate_backward_slice(ancestors: frozenset[Value], output_dtype: DType) -> None:
     producers = {value.producer for value in ancestors if value.producer is not None}
     for op in producers:
         if op.opcode not in _SUPPORTED_BACKWARD_OPS:
@@ -195,8 +193,14 @@ def _validate_backward_slice(ancestors: frozenset[Value]) -> None:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} multi-result operation on backward slice"
             )
-        if op.results[0].type.dtype not in _FLOAT_DTYPES:
+        result_dtype = op.results[0].type.dtype
+        if result_dtype not in _FLOAT_DTYPES:
             raise AutodiffError("reverse-mode backward slice must use floating tensor values")
+        if result_dtype != output_dtype:
+            raise AutodiffError(
+                "mixed-precision reverse-mode autodiff is not supported; "
+                "the backward slice must use one exact floating dtype"
+            )
 
 
 def _clone_op(function: Function, op: Operation, value_map: dict[Value, Value]) -> Operation:
