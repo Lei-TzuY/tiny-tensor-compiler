@@ -95,7 +95,7 @@ class Tensor:
         return self._builder.copy_into(self, target, source)
 
     def binary_into(self, target: Tensor, source: Tensor, *, operator: str) -> Tensor:
-        """Apply one exact-typed binary update through an alias region of this root."""
+        """Apply one exact-dtype broadcast-compatible update through an alias region."""
         return self._builder.binary_into(self, target, source, operator=operator)
 
     def add_into(self, target: Tensor, source: Tensor) -> Tensor:
@@ -412,8 +412,14 @@ class GraphBuilder:
             raise ValueError("binary_into root must use internal computed storage")
         if _storage_root(target.value) is not owner:
             raise ValueError("binary_into target must alias the supplied root storage")
-        if target.type != source.type:
-            raise ValueError("binary_into target and source types must exactly match")
+        if target.type.dtype != source.type.dtype:
+            raise ValueError("binary_into target and source dtypes must exactly match")
+        try:
+            result_type = infer_binary(target.type, source.type)
+        except TypeInferenceError as exc:
+            raise ValueError("binary_into source must broadcast to target shape") from exc
+        if result_type != target.type:
+            raise ValueError("binary_into source must broadcast exactly to target shape")
         if _storage_root(source.value) is owner:
             source = self.reshape(source, source.type.shape)
 
