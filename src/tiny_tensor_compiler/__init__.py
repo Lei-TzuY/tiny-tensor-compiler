@@ -41,6 +41,11 @@ from .lowering import (
     lower_to_cpu,
     plan_memory,
 )
+from .managed_native import (
+    ResourceManagedNativeExecutable,
+    compile_resource_managed_module,
+    manage_native_executable,
+)
 from .native_api import (
     NativeCompilationDeadlineExceeded,
     NativeCompilationError,
@@ -215,6 +220,7 @@ __all__ = [
     "ReleaseChannelRegistryExecutable",
     "ReleaseCheckpoint",
     "ReleaseStateStore",
+    "ResourceManagedNativeExecutable",
     "StorageLayout",
     "SymbolicDim",
     "SymbolicShapeError",
@@ -247,6 +253,7 @@ __all__ = [
     "compile_dynamic_module",
     "compile_module",
     "compile_native",
+    "compile_resource_managed_module",
     "constant_fold",
     "create_archive_attestation",
     "create_release_checkpoint",
@@ -278,6 +285,7 @@ __all__ = [
     "log_id_from_public_key",
     "lower_to_cpu",
     "lower_to_loops",
+    "manage_native_executable",
     "pack_dynamic_bundle_set_archive",
     "plan_memory",
     "publish_attested_dynamic_bundle_set_archive",
