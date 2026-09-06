@@ -6,6 +6,15 @@ import pytest
 
 from tiny_tensor_compiler import (
     GraphBuilder,
+    IndexMap,
+    LoopAlloc,
+    LoopBinaryInto,
+    LoopInput,
+    LoopKernel,
+    LoopProgram,
+    LoopReturn,
+    LoopView,
+    StorageLayout,
     VerificationError,
     borrow_inputs,
     compile_dynamic_module,
@@ -18,6 +27,7 @@ from tiny_tensor_compiler import (
     plan_memory,
     verify,
 )
+from tiny_tensor_compiler.ir import DType, TensorType
 from tiny_tensor_compiler.serialization import deserialize_module, serialize_module
 
 
@@ -92,6 +102,23 @@ def test_binary_into_same_root_shifted_source_uses_snapshot_before_write():
     assert "binary_into" in module.dump()
 
 
+def test_binary_into_same_root_snapshot_matches_native_execution():
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    base = builder.input((6,), dtype="int32")
+    root = base.relu()
+    target = root.slice(axis=0, start=1, stop=6, step=1)
+    source = root.slice(axis=0, start=0, stop=5, step=1)
+    module = builder.finish(root.add_into(target, source))
+
+    value = np.array([1, 2, 3, 4, 5, 6], dtype=np.int32)
+    expected = value.copy()
+    expected[1:6] = value[1:6] + value[0:5]
+
+    actual = compile_module(module, parallel=True)(inputs=[value])
+    np.testing.assert_array_equal(actual, expected)
+
+
 def test_binary_into_advances_generation_and_rejects_stale_aliases():
     builder = GraphBuilder()
     base = builder.input((6,), dtype="int32")
@@ -143,6 +170,41 @@ def test_binary_into_rejects_unsafe_root_target_source_types_and_operator():
     source = builder.input((2,), dtype="int32")
     with pytest.raises(ValueError, match="operator"):
         root.binary_into(target, source, operator="sub")
+
+
+def test_binary_into_loop_verifier_rejects_self_overlapping_target_layout():
+    full = TensorType((4,), DType.INT32)
+    partial = TensorType((2,), DType.INT32)
+    overlapping = StorageLayout(offset=0, strides=(0,))
+
+    with pytest.raises(ValueError, match="must not overlap itself"):
+        LoopProgram(
+            (
+                LoopAlloc(0, full),
+                LoopAlloc(1, full),
+                LoopAlloc(2, partial),
+                LoopInput(0, 0),
+                LoopInput(2, 1),
+                LoopKernel(
+                    opcode="relu",
+                    output=1,
+                    inputs=(0,),
+                    iteration_shape=(4,),
+                    input_maps=(IndexMap((0,)),),
+                ),
+                LoopView(3, 1, partial, overlapping),
+                LoopBinaryInto(
+                    output=4,
+                    root=1,
+                    target=3,
+                    source=2,
+                    operator="add",
+                    type=full,
+                    layout=StorageLayout.contiguous((4,)),
+                ),
+                LoopReturn(4),
+            )
+        )
 
 
 def test_binary_into_negative_stride_target_runs_cpu_native_and_parallel_with_borrowed_source():
