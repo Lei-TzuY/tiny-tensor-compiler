@@ -18,7 +18,7 @@ from .lowering import (
     CPUProgram,
     plan_memory,
 )
-from .reduction import REDUCTION_OPCODES, ReductionPlan
+from .reduction import REDUCTION_OPCODES, ReductionAxis, ReductionPlan
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,7 @@ class LoopKernel:
     input_maps: tuple[IndexMap, ...]
     literal: np.ndarray[Any, Any] | None = None
     fused_expression: fused_expr.FusedExpression | None = None
-    reduction_axis: int | None = None
+    reduction_axis: ReductionAxis = None
 
     @property
     def reduction(self) -> ReductionPlan | None:
@@ -535,6 +535,7 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                     types[op.inputs[0]],
                     reduction.operator,
                     reduction.axis,
+                    output_type.dtype,
                 )
                 if expected != output_type:
                     raise ValueError(
