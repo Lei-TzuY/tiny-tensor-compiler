@@ -9,6 +9,7 @@ from .inference import (
     TypeInferenceError,
     infer_argmax,
     infer_binary,
+    infer_concat,
     infer_prod,
     infer_relu,
     infer_reshape,
@@ -17,6 +18,7 @@ from .inference import (
     infer_sum,
     infer_transpose,
     normalize_argmax_axis,
+    normalize_concat_axis,
     normalize_prod_axes,
     normalize_sum_axes,
 )
@@ -169,6 +171,29 @@ class GraphBuilder:
             opcode,
             operands=[lhs_tensor.value, rhs_tensor.value],
             result_types=[result_type],
+        )
+        return Tensor(self, op.results[0])
+
+    def concatenate(self, tensors: Sequence[Tensor], *, axis: int = 0) -> Tensor:
+        """Concatenate two-or-more exact-typed tensors along one compile-time axis."""
+        self._ensure_open()
+        try:
+            operands = tuple(tensors)
+        except TypeError as exc:
+            raise TypeInferenceError("concatenate inputs must be a tensor sequence") from exc
+        for tensor in operands:
+            if not isinstance(tensor, Tensor):
+                raise TypeInferenceError("concatenate inputs must contain only Tensor values")
+            self._check_tensor_owner(tensor)
+        if not operands:
+            raise TypeInferenceError("concatenate requires at least two tensor inputs")
+        canonical_axis = normalize_concat_axis(operands[0].type, axis)
+        result_type = infer_concat(tuple(tensor.type for tensor in operands), canonical_axis)
+        op = self.function.add_op(
+            "concat",
+            operands=[tensor.value for tensor in operands],
+            result_types=[result_type],
+            attrs={"axis": canonical_axis},
         )
         return Tensor(self, op.results[0])
 
