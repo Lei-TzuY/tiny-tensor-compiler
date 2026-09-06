@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import tiny_tensor_compiler.compiler as compiler_module
 from tiny_tensor_compiler import (
     CompileBudget,
     CompileBudgetExceeded,
@@ -74,6 +75,24 @@ def test_kernel_budget_observes_post_fusion_structure():
         )
     assert exc_info.value.metric == "post_fusion_kernel_count"
     assert exc_info.value.actual == 1
+
+
+def test_compile_module_rejects_before_native_compiler(monkeypatch):
+    builder = GraphBuilder("pre-native-budget")
+    source = builder.input((8,), "int32")
+    module = builder.finish(source)
+
+    def forbidden_native_compile(*args, **kwargs):
+        raise AssertionError("native compilation must not run after budget rejection")
+
+    monkeypatch.setattr(compiler_module, "compile_native", forbidden_native_compile)
+
+    with pytest.raises(CompileBudgetExceeded) as exc_info:
+        compiler_module.compile_module(
+            module,
+            budget=CompileBudget(max_planned_storage_bytes=31),
+        )
+    assert exc_info.value.actual == 32
 
 
 def test_dynamic_budget_is_checked_per_concrete_binding_and_rejection_is_not_cached():
