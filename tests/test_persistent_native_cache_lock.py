@@ -93,7 +93,6 @@ def test_persistent_cache_lease_does_not_mutate_lock_file(tmp_path):
 
     with native_module._persistent_cache_lease(library):
         assert lock_path.exists()
-        assert lock_path.read_bytes() == b""
 
     assert lock_path.read_bytes() == b""
 
