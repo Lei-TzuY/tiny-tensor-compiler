@@ -167,6 +167,89 @@ def test_resource_managed_adaptive_evicts_loop_decisions_without_native_release(
     assert executable.released_native_artifact_count == 0
 
 
+def test_resource_managed_handles_release_shared_artifact_only_after_last_owner_evicts():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_relu_module()
+    left = compile_resource_managed_dynamic_module(
+        module,
+        max_cached_specializations=1,
+    )
+    right = compile_resource_managed_dynamic_module(
+        module,
+        max_cached_specializations=1,
+    )
+
+    left.specialize({batch: 2})
+    shared_directories = _artifact_directories()
+    assert len(shared_directories) == 1
+    right.specialize({batch: 2})
+    assert _artifact_directories() == shared_directories
+
+    left.specialize({batch: 3})
+    assert left.eviction_count == 1
+    assert left.released_native_artifact_count == 0
+    assert shared_directories <= _artifact_directories()
+    assert all(path.exists() for path in shared_directories)
+
+    right.specialize({batch: 4})
+    assert right.eviction_count == 1
+    assert right.released_native_artifact_count == 1
+    assert all(not path.exists() for path in shared_directories)
+
+
+def test_resource_managed_ordinary_and_adaptive_handles_share_native_ownership():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_relu_module()
+    ordinary = compile_resource_managed_dynamic_module(
+        module,
+        max_cached_specializations=1,
+    )
+    adaptive = compile_resource_managed_adaptive_dynamic_module(
+        module,
+        budget=CompileBudget(),
+        max_cached_specializations=1,
+    )
+
+    ordinary.specialize({batch: 2})
+    shared_directories = _artifact_directories()
+    adaptive_first = adaptive.specialize({batch: 2})
+    assert adaptive_first.backend == "native"
+    assert _artifact_directories() == shared_directories
+
+    ordinary.specialize({batch: 3})
+    assert ordinary.released_native_artifact_count == 0
+    assert shared_directories <= _artifact_directories()
+
+    adaptive.specialize({batch: 4})
+    assert adaptive.released_native_artifact_count == 1
+    assert all(not path.exists() for path in shared_directories)
+
+
+def test_resource_managed_ownership_tolerates_explicit_global_cache_clear():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_relu_module()
+    left = compile_resource_managed_dynamic_module(
+        module,
+        max_cached_specializations=1,
+    )
+    right = compile_resource_managed_dynamic_module(
+        module,
+        max_cached_specializations=1,
+    )
+
+    left.specialize({batch: 2})
+    right.specialize({batch: 2})
+    native_module.clear_native_cache()
+    assert not _artifact_directories()
+
+    left.specialize({batch: 3})
+    right.specialize({batch: 4})
+    assert left.eviction_count == 1
+    assert right.eviction_count == 1
+    assert left.released_native_artifact_count == 0
+    assert right.released_native_artifact_count == 0
+
+
 def test_resource_managed_retention_rejects_unsupported_or_ambiguous_policies():
     _, module = _dynamic_relu_module()
 
