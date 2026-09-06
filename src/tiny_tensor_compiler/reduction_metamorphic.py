@@ -9,11 +9,11 @@ from .differential import (
     _CANDIDATE_FAILURE_EXCEPTIONS,
     CandidateRunner,
     _CaseSpec,
-    _SplitMix64,
     _compare_results,
     _generate_spec,
     _native_runner,
     _require_seed,
+    _SplitMix64,
 )
 from .ir import Module
 from .metamorphic import _generated_expression, _shrink_spec
