@@ -417,11 +417,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
             alias_sources[op.output] = op.source
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
             last_uses[op.source] = max(last_uses.get(op.source, -1), index)
-        elif isinstance(op, BufferCopyInto):
-            alias_sources[op.output] = op.root
-            for buffer in (op.output, op.root, op.target, op.source):
-                last_uses[buffer] = max(last_uses.get(buffer, -1), index)
-        elif isinstance(op, BufferBinaryInto):
+        elif isinstance(op, (BufferCopyInto, BufferBinaryInto)):
             alias_sources[op.output] = op.root
             for buffer in (op.output, op.root, op.target, op.source):
                 last_uses[buffer] = max(last_uses.get(buffer, -1), index)
