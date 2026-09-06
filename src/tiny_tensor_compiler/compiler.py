@@ -5,6 +5,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .admission import CompileBudget, enforce_compile_budget
 from .fusion_planner import fuse_elementwise
 from .input_binding import borrow_inputs as bind_borrowed_inputs
 from .ir import Module, SymbolicDim
@@ -33,13 +34,17 @@ class DynamicExecutable:
         *,
         borrow_inputs: bool = False,
         parallel: bool = False,
+        budget: CompileBudget | None = None,
     ) -> None:
+        if budget is not None and not isinstance(budget, CompileBudget):
+            raise TypeError("budget must be a CompileBudget or None")
         self._module = clone_module(module)
         self._symbols = validate_dynamic_module(self._module)
         self._compiler = compiler
         self._cache_dir = cache_dir
         self._borrow_inputs = borrow_inputs
         self._parallel = parallel
+        self._budget = budget
         self._specializations: dict[tuple[int, ...], NativeExecutable] = {}
         self._lock = threading.RLock()
 
@@ -103,13 +108,23 @@ class DynamicExecutable:
             if executable is not None:
                 return executable
             concrete = specialize_module(self._module, normalized)
-            executable = compile_module(
-                concrete,
-                compiler=self._compiler,
-                cache_dir=self._cache_dir,
-                borrow_inputs=self._borrow_inputs,
-                parallel=self._parallel,
-            )
+            if self._budget is None:
+                executable = compile_module(
+                    concrete,
+                    compiler=self._compiler,
+                    cache_dir=self._cache_dir,
+                    borrow_inputs=self._borrow_inputs,
+                    parallel=self._parallel,
+                )
+            else:
+                executable = compile_module(
+                    concrete,
+                    compiler=self._compiler,
+                    cache_dir=self._cache_dir,
+                    borrow_inputs=self._borrow_inputs,
+                    parallel=self._parallel,
+                    budget=self._budget,
+                )
             self._specializations[key] = executable
             return executable
 
@@ -136,6 +151,7 @@ def compile_module(
     *,
     borrow_inputs: bool = False,
     parallel: bool = False,
+    budget: CompileBudget | None = None,
 ) -> NativeExecutable:
     """Lower verified concrete tensor IR through the native pipeline and compile eagerly."""
     if has_symbolic_shapes(module):
@@ -143,6 +159,8 @@ def compile_module(
             "compile_module requires concrete tensor shapes; use compile_dynamic_module "
             "for runtime symbolic specialization"
         )
+    if budget is not None:
+        enforce_compile_budget(module, budget)
     loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
     if borrow_inputs:
         loops = bind_borrowed_inputs(loops)
@@ -167,6 +185,7 @@ def compile_dynamic_module(
     *,
     borrow_inputs: bool = False,
     parallel: bool = False,
+    budget: CompileBudget | None = None,
 ) -> DynamicExecutable:
     """Prepare lazy native specializations for runtime symbolic dimensions."""
     return DynamicExecutable(
@@ -175,4 +194,5 @@ def compile_dynamic_module(
         cache_dir=cache_dir,
         borrow_inputs=borrow_inputs,
         parallel=parallel,
+        budget=budget,
     )
