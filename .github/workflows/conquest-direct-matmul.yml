@@ -50,6 +50,23 @@ jobs:
             exit "$status"
           fi
           rm construction-error.txt
+      - name: Normalize patch style
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src/tiny_tensor_compiler/c_codegen.py")
+          text = path.read_text(encoding="utf-8")
+          old1 = '''            f"                    volatile {c_type} matmul_product = "\n            f"(({c_type}){lhs_ref} * ({c_type}){rhs_ref});",'''
+          new1 = '''            (\n                f"                    volatile {c_type} matmul_product = "\n                f"(({c_type}){lhs_ref} * ({c_type}){rhs_ref});"\n            ),'''
+          old2 = '''            f"                    matmul_value = "\n            f"(({c_type})matmul_value + ({c_type})matmul_product);",'''
+          new2 = '''            (\n                f"                    matmul_value = "\n                f"(({c_type})matmul_value + ({c_type})matmul_product);"\n            ),'''
+          for old, new in ((old1, new1), (old2, new2)):
+              if text.count(old) != 1:
+                  raise RuntimeError("direct matmul C style normalization anchor mismatch")
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+          ruff check . --fix
       - name: Verify
         run: |
           set +e
