@@ -7,12 +7,12 @@ import pytest
 
 from tiny_tensor_compiler import GraphBuilder, SymbolicDim, compile_module
 from tiny_tensor_compiler import native as native_module
-from tiny_tensor_compiler.parallel_native import ParallelNativeExecutable
-from tiny_tensor_compiler.specialization_cache import (
-    compile_resource_managed_dynamic_module,
+from tiny_tensor_compiler.managed_native import (
     compile_resource_managed_module,
     manage_native_executable,
 )
+from tiny_tensor_compiler.parallel_native import ParallelNativeExecutable
+from tiny_tensor_compiler.specialization_cache import compile_resource_managed_dynamic_module
 
 
 def _relu_module(shape=(2, 4)):
