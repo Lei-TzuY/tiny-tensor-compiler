@@ -5,23 +5,32 @@ from dataclasses import dataclass
 from .analysis import CompilerReport, analyze_module
 from .ir import Module
 
+BindingDisplay = tuple[tuple[str, int], ...]
+
 
 @dataclass(frozen=True)
 class CompileBudget:
-    """Optional structural limits checked before native compilation.
+    """Optional structural and dynamic-specialization admission limits.
 
     The storage limit uses ``CompilerReport.planned_owning_storage_bytes`` from the
     ordinary concrete pre-native memory plan. It is not a process-RSS, heap-peak,
     stack-peak, or borrow-adjusted runtime-memory limit. The kernel limit uses the
     post-fusion Loop IR kernel count and is not a runtime-cost estimate.
+
+    ``max_dynamic_specializations`` limits the number of distinct successfully
+    cached runtime symbolic bindings retained by one ``DynamicExecutable`` or
+    ``AdaptiveDynamicExecutable``. It is enforced by those handles before a new
+    binding is concretized or compiled; concrete compilation ignores this field.
     """
 
     max_planned_storage_bytes: int | None = None
     max_post_fusion_kernels: int | None = None
+    max_dynamic_specializations: int | None = None
 
     def __post_init__(self) -> None:
         _validate_limit("max_planned_storage_bytes", self.max_planned_storage_bytes)
         _validate_limit("max_post_fusion_kernels", self.max_post_fusion_kernels)
+        _validate_limit("max_dynamic_specializations", self.max_dynamic_specializations)
 
 
 class CompileBudgetExceeded(RuntimeError):
@@ -41,6 +50,26 @@ class CompileBudgetExceeded(RuntimeError):
         self.report = report
         super().__init__(
             f"compile budget exceeded: {metric} actual {actual} exceeds limit {limit}"
+        )
+
+
+class DynamicSpecializationBudgetExceeded(RuntimeError):
+    """Raised before an unseen runtime binding would exceed one handle's cache cap."""
+
+    def __init__(
+        self,
+        *,
+        limit: int,
+        attempted_binding: BindingDisplay,
+        cached_bindings: tuple[BindingDisplay, ...],
+    ) -> None:
+        self.limit = limit
+        self.attempted_binding = attempted_binding
+        self.cached_bindings = cached_bindings
+        super().__init__(
+            "dynamic specialization budget exceeded: "
+            f"{len(cached_bindings)} cached bindings reached limit {limit}; "
+            f"attempted {attempted_binding}"
         )
 
 
