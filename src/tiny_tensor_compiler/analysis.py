@@ -13,6 +13,7 @@ from .loop_ir import (
     LoopBinaryInto,
     LoopCopyInto,
     LoopInplaceBinary,
+    LoopKernel,
     LoopProgram,
     fused_expression_for_kernel,
     lower_to_loops,
@@ -22,6 +23,7 @@ from .symbolic import has_symbolic_shapes
 
 _REPORT_FORMAT = "tiny-tensor-compiler-report"
 _REPORT_VERSION = 1
+_PRIMITIVE_FUSED_OPCODES = frozenset({"relu_add", "relu_mul"})
 
 
 @dataclass(frozen=True)
@@ -125,10 +127,15 @@ def analyze_module(module: Module) -> CompilerReport:
         pre_fusion_kernel_counts=_histogram(kernel.opcode for kernel in pre_kernels),
         post_fusion_kernel_count=len(post_kernels),
         post_fusion_kernel_counts=_histogram(kernel.opcode for kernel in post_kernels),
-        fused_kernel_count=sum(
-            fused_expression_for_kernel(kernel) is not None for kernel in post_kernels
-        ),
+        fused_kernel_count=sum(_is_fused_kernel(kernel) for kernel in post_kernels),
         kernels_eliminated_by_fusion=eliminated,
+    )
+
+
+def _is_fused_kernel(kernel: LoopKernel) -> bool:
+    return (
+        kernel.opcode in _PRIMITIVE_FUSED_OPCODES
+        or fused_expression_for_kernel(kernel) is not None
     )
 
 
