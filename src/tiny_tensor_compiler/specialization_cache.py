@@ -179,9 +179,12 @@ class ResourceManagedAdaptiveDynamicExecutable(AdaptiveDynamicExecutable):
             oldest_key = next(iter(self._specializations))
             executable = self._specializations.pop(oldest_key)
             self._eviction_count += 1
-            if executable.backend == "native" and executable._native is not None:
-                if _release_cached_serial_artifact(executable._native):
-                    self._released_native_artifact_count += 1
+            if (
+                executable.backend == "native"
+                and executable._native is not None
+                and _release_cached_serial_artifact(executable._native)
+            ):
+                self._released_native_artifact_count += 1
 
 
 def compile_resource_managed_dynamic_module(
