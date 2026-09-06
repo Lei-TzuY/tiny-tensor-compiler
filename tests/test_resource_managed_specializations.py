@@ -40,8 +40,8 @@ def test_resource_managed_dynamic_evicts_lru_and_releases_serial_artifact():
 
     second = executable.specialize({batch: 3})
     assert second is not first
-    assert executable.cached_bindings == ((('B', 3),),)
-    assert executable.retained_bindings_lru == ((('B', 3),),)
+    assert executable.cached_bindings == ((("B", 3),),)
+    assert executable.retained_bindings_lru == ((("B", 3),),)
     assert executable.eviction_count == 1
     assert executable.released_native_artifact_count == 1
     assert all(not path.exists() for path in first_directories)
@@ -127,6 +127,29 @@ def test_resource_managed_dynamic_reloads_evicted_persistent_artifact_without_co
     np.testing.assert_array_equal(first(inputs=[inputs]), np.maximum(inputs, 0))
 
 
+def test_resource_managed_adaptive_releases_native_specialization_artifact():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_relu_module()
+    executable = compile_resource_managed_adaptive_dynamic_module(
+        module,
+        budget=CompileBudget(),
+        max_cached_specializations=1,
+    )
+
+    first = executable.specialize({batch: 2})
+    first_directories = _artifact_directories()
+    second = executable.specialize({batch: 3})
+    assert first.backend == "native"
+    assert second.backend == "native"
+    assert executable.cached_bindings == ((("B", 3),),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == 1
+    assert all(not path.exists() for path in first_directories)
+
+    inputs = np.arange(8, dtype=np.float32).reshape(2, 4) - 3
+    np.testing.assert_array_equal(first(inputs=[inputs]), np.maximum(inputs, 0))
+
+
 def test_resource_managed_adaptive_evicts_loop_decisions_without_native_release():
     batch, module = _dynamic_relu_module()
     executable = compile_resource_managed_adaptive_dynamic_module(
@@ -139,7 +162,7 @@ def test_resource_managed_adaptive_evicts_loop_decisions_without_native_release(
     second = executable.specialize({batch: 3})
     assert first.backend == "loop"
     assert second.backend == "loop"
-    assert executable.cached_bindings == ((('B', 3),),)
+    assert executable.cached_bindings == ((("B", 3),),)
     assert executable.eviction_count == 1
     assert executable.released_native_artifact_count == 0
 
