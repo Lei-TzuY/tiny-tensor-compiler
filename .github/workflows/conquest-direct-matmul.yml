@@ -95,9 +95,8 @@ jobs:
             exit "$status"
           fi
           rm construction-error.txt
-      - name: Remove construction files and commit verified slice
+      - name: Commit verified working tree
         run: |
-          git rm tools/apply_direct_matmul_lowering.py .github/workflows/conquest-direct-matmul.yml
           git add -A
           git config user.name "LeiZ"
           git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
