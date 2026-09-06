@@ -21,6 +21,7 @@ import numpy as np
 from . import native_cache_lock
 from .c_abi_codegen import generate_c
 from .compiler_control import normalize_compiler_timeout
+from .compiler_process import run_compiler_with_timeout
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
@@ -416,12 +417,9 @@ def _compile_source(
                 check=False,
             )
         else:
-            completed = subprocess.run(
+            completed = run_compiler_with_timeout(
                 compile_command,
                 cwd=directory_path,
-                capture_output=True,
-                text=True,
-                check=False,
                 timeout=compiler_timeout,
             )
     except subprocess.TimeoutExpired as error:
