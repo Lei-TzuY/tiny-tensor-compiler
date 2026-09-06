@@ -232,18 +232,41 @@ def test_binary_into_negative_stride_target_runs_cpu_native_and_parallel_with_bo
     np.testing.assert_array_equal(actual, expected)
 
 
-def test_binary_into_generated_c_is_serial_target_layout_update():
+def test_binary_into_generated_c_parallelizes_verified_target_layout_update():
     loops = lower_to_loops(lower_to_cpu(_slice_binary_into_module("add")))
     effect = loops.binary_intos[0]
-    source = generate_c(loops, parallel=True)
+    serial_source = generate_c(loops, parallel=False)
+    parallel_source = generate_c(loops, parallel=True)
 
-    assert f"p{effect.root}[" in source
-    assert f"p{effect.source}[" in source
-    assert f"int32_t *p{effect.output} = p{effect.root};" in source
-    assert "* 2" in source
-    effect_start = source.index(f"int32_t *p{effect.output} = p{effect.root};")
-    effect_prefix = source[max(0, effect_start - 1200) : effect_start]
-    assert "#pragma omp parallel for" not in effect_prefix
+    assert f"p{effect.root}[" in parallel_source
+    assert f"p{effect.source}[" in parallel_source
+    assert f"int32_t *p{effect.output} = p{effect.root};" in parallel_source
+    assert "* 2" in parallel_source
+
+    marker = f"int32_t *p{effect.output} = p{effect.root};"
+    serial_start = serial_source.index(marker)
+    serial_prefix = serial_source[max(0, serial_start - 1200) : serial_start]
+    assert "#pragma omp parallel for" not in serial_prefix
+
+    parallel_start = parallel_source.index(marker)
+    parallel_prefix = parallel_source[max(0, parallel_start - 1200) : parallel_start]
+    assert "int64_t i0;" in parallel_prefix
+    assert "#pragma omp parallel for schedule(static)" in parallel_prefix
+    assert "for (i0 = 0;" in parallel_prefix
+
+
+def test_binary_into_parallel_codegen_keeps_scalar_target_serial():
+    builder = GraphBuilder()
+    base = builder.input((), dtype="int32")
+    source = builder.input((), dtype="int32")
+    root = base.relu()
+    target = root.view(())
+    module = builder.finish(root.add_into(target, source))
+    loops = lower_to_loops(lower_to_cpu(module))
+
+    generated = generate_c(loops, parallel=True)
+    assert "binary_into" not in generated
+    assert "#pragma omp parallel for" not in generated
 
 
 def test_binary_into_serialization_and_dynamic_specialization():

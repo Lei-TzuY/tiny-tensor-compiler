@@ -18,7 +18,7 @@ from .loop_ir import (
     LoopReturn,
     LoopView,
 )
-from .parallel_codegen import emit_parallel_kernel
+from .parallel_codegen import emit_parallel_binary_into, emit_parallel_kernel
 from .write_codegen import emit_binary_into, emit_copy_into, emit_inplace_binary
 
 
@@ -109,7 +109,8 @@ def generate_c(
             lines.extend(emit_copy_into(op, types, layouts))
             continue
         if isinstance(op, LoopBinaryInto):
-            lines.extend(emit_binary_into(op, types, layouts))
+            emitter = emit_parallel_binary_into if parallel else emit_binary_into
+            lines.extend(emitter(op, types, layouts))
             continue
         if isinstance(op, LoopInplaceBinary):
             lines.extend(emit_inplace_binary(op, types, layouts))
