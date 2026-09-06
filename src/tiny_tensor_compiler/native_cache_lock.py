@@ -14,12 +14,27 @@ class PersistentCacheLeaseError(RuntimeError):
     """Raised when a persistent-cache cross-process lease cannot be acquired."""
 
 
+class PersistentCacheLeaseTimeout(PersistentCacheLeaseError):
+    """Raised when an explicitly bounded persistent-cache lease wait expires."""
+
+    def __init__(self, timeout: float) -> None:
+        self.timeout = timeout
+        super().__init__(
+            f"timed out after {timeout:g}s waiting for persistent native cache lease"
+        )
+
+
 @contextmanager
-def persistent_cache_lease(library_path: Path) -> Iterator[None]:
+def persistent_cache_lease(
+    library_path: Path,
+    *,
+    timeout: float | None = None,
+) -> Iterator[None]:
     """Hold one cross-process lease for a persistent-cache digest.
 
     The lease is backed by an operating-system file lock, so it is released when
-    the file descriptor closes or the owning process exits unexpectedly.
+    the file descriptor closes or the owning process exits unexpectedly. An
+    explicit timeout uses non-blocking polling on every supported platform.
     """
     lock_path = _lock_path(library_path)
     try:
@@ -32,7 +47,7 @@ def persistent_cache_lease(library_path: Path) -> Iterator[None]:
 
     locked = False
     try:
-        _lock_stream(stream)
+        _lock_stream(stream, timeout=timeout)
         locked = True
         yield
     finally:
@@ -48,18 +63,35 @@ def _lock_path(library_path: Path) -> Path:
     return library_path.parent.parent / f".{digest}.lock"
 
 
-def _lock_stream(stream) -> None:
+def _lock_stream(stream, *, timeout: float | None = None) -> None:
     if os.name == "nt":
-        _lock_stream_windows(stream)
+        _lock_stream_windows(stream, timeout=timeout)
         return
     if os.name == "posix":
-        import fcntl
-
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        _lock_stream_posix(stream, timeout=timeout)
         return
     raise PersistentCacheLeaseError(
         f"persistent native cache leases are unsupported on platform: {os.name}"
     )
+
+
+def _lock_stream_posix(stream, *, timeout: float | None) -> None:
+    import fcntl
+
+    if timeout is None:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        return
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as error:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise PersistentCacheLeaseTimeout(timeout) from error
+            time.sleep(min(_PERSISTENT_CACHE_LEASE_POLL_SECONDS, remaining))
 
 
 def _unlock_stream(stream) -> None:
@@ -79,7 +111,7 @@ def _unlock_stream(stream) -> None:
     )
 
 
-def _lock_stream_windows(stream) -> None:
+def _lock_stream_windows(stream, *, timeout: float | None) -> None:
     import msvcrt
 
     # Windows byte-range locks may extend past EOF. Do not initialize the lock
@@ -87,14 +119,20 @@ def _lock_stream_windows(stream) -> None:
     # can otherwise race in write/flush before either process owns the lock.
     stream.seek(0)
 
-    deadline = time.monotonic() + _PERSISTENT_CACHE_LEASE_TIMEOUT_SECONDS
+    effective_timeout = (
+        _PERSISTENT_CACHE_LEASE_TIMEOUT_SECONDS if timeout is None else timeout
+    )
+    deadline = time.monotonic() + effective_timeout
     while True:
         try:
             msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
             return
         except OSError as error:
-            if time.monotonic() >= deadline:
-                raise PersistentCacheLeaseError(
-                    "timed out waiting for persistent native cache lease"
-                ) from error
-            time.sleep(_PERSISTENT_CACHE_LEASE_POLL_SECONDS)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                if timeout is None:
+                    raise PersistentCacheLeaseError(
+                        "timed out waiting for persistent native cache lease"
+                    ) from error
+                raise PersistentCacheLeaseTimeout(timeout) from error
+            time.sleep(min(_PERSISTENT_CACHE_LEASE_POLL_SECONDS, remaining))
