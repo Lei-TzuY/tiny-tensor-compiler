@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from . import fused_expr
-from .inference import infer_binary, infer_reduction, infer_relu, infer_reshape
+from .inference import infer_binary, infer_concat, infer_reduction, infer_relu, infer_reshape
 from .ir import DType, TensorType
 from .layout import StorageLayout, element_count
 from .lowering import (
@@ -98,6 +98,7 @@ class LoopKernel:
     literal: np.ndarray[Any, Any] | None = None
     fused_expression: fused_expr.FusedExpression | None = None
     reduction_axis: int | None = None
+    concat_axis: int | None = None
 
     @property
     def reduction(self) -> ReductionPlan | None:
@@ -310,6 +311,9 @@ class LoopProgram:
                 literal = _format_literal(op.literal)
                 literal_index = "" if op.literal.ndim == 0 else output_index
                 rhs = f"const {literal}{literal_index}"
+            elif op.opcode == "concat":
+                operands = ", ".join(f"p{buffer}" for buffer in op.inputs)
+                rhs = f"concat(axis={op.concat_axis}) {operands}"
             elif op.opcode == "reshape":
                 rhs = f"reshape p{op.inputs[0]}[linear]"
             elif op.reduction is not None:
@@ -427,7 +431,7 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
         input_types = tuple(virtual_types[buffer] for buffer in op.inputs)
         input_maps = (
             ()
-            if op.opcode == "reshape" or op.reduction is not None
+            if op.opcode in {"reshape", "concat"} or op.reduction is not None
             else tuple(
                 _broadcast_index_map(input_type.shape, output_type.shape)
                 for input_type in input_types
@@ -442,6 +446,7 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                 input_maps=input_maps,
                 literal=op.literal,
                 reduction_axis=op.reduction_axis,
+                concat_axis=op.concat_axis,
             )
         )
 
@@ -680,6 +685,8 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
 
             if op.opcode not in REDUCTION_OPCODES and op.reduction_axis is not None:
                 raise ValueError("only reduction loop kernels may carry a reduction axis")
+            if op.opcode != "concat" and op.concat_axis is not None:
+                raise ValueError("only concatenate loop kernels may carry a concatenate axis")
             output_type = types[op.output]
             if op.iteration_shape != output_type.shape:
                 raise ValueError("loop iteration shape must match output buffer shape")
@@ -711,6 +718,19 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 if expected != output_type:
                     raise ValueError("relu loop output buffer type does not match inference")
                 _verify_index_maps(op, types)
+            elif op.opcode == "concat":
+                if (
+                    len(op.inputs) < 2
+                    or op.input_maps
+                    or op.literal is not None
+                    or op.concat_axis is None
+                ):
+                    raise ValueError(
+                        "concat loop requires at least two inputs, one axis, no index maps, and no literal"
+                    )
+                expected = infer_concat(tuple(types[buffer] for buffer in op.inputs), op.concat_axis)
+                if expected != output_type:
+                    raise ValueError("concat loop output buffer type does not match inference")
             elif op.opcode in REDUCTION_OPCODES:
                 if len(op.inputs) != 1 or op.input_maps or op.literal is not None:
                     raise ValueError(
