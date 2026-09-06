@@ -311,8 +311,14 @@ def _verify_binary_into(op_index: int, op: Operation) -> None:
     owner = _storage_root(root)
     if result.type != root.type:
         _fail(op_index, op, "binary_into result type must match the current root handle type")
-    if target.type != source.type:
-        _fail(op_index, op, "binary_into target and source types must exactly match")
+    if target.type.dtype != source.type.dtype:
+        _fail(op_index, op, "binary_into target and source dtypes must exactly match")
+    try:
+        broadcast_type = infer_binary(target.type, source.type)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, f"binary_into source is not broadcast-compatible: {exc}")
+    if broadcast_type != target.type:
+        _fail(op_index, op, "binary_into source must broadcast exactly to the target type")
     if not _is_full_root_handle(root):
         _fail(op_index, op, "binary_into root must be an owning value or fresh full-root result")
     producer = owner.producer
