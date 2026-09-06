@@ -52,16 +52,18 @@ class Tensor:
         axis: int | Iterable[int] | None = None,
         *,
         keepdims: bool = False,
+        dtype: str | np.dtype[Any] | DType | None = None,
     ) -> Tensor:
-        return self._builder.sum(self, axis=axis, keepdims=keepdims)
+        return self._builder.sum(self, axis=axis, keepdims=keepdims, dtype=dtype)
 
     def prod(
         self,
         axis: int | Iterable[int] | None = None,
         *,
         keepdims: bool = False,
+        dtype: str | np.dtype[Any] | DType | None = None,
     ) -> Tensor:
-        return self._builder.prod(self, axis=axis, keepdims=keepdims)
+        return self._builder.prod(self, axis=axis, keepdims=keepdims, dtype=dtype)
 
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.reshape(self, shape)
@@ -156,13 +158,19 @@ class GraphBuilder:
         axis: int | Iterable[int] | None = None,
         *,
         keepdims: bool = False,
+        dtype: str | np.dtype[Any] | DType | None = None,
     ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
         _validate_keepdims(keepdims)
+        result_dtype = _normalize_requested_reduction_dtype(dtype)
         normalized_axis = normalize_sum_axes(tensor.type, axis)
-        result_type = infer_sum(tensor.type, normalized_axis)
-        attrs = {} if normalized_axis is None else {"axis": normalized_axis}
+        result_type = infer_sum(tensor.type, normalized_axis, result_dtype)
+        attrs: dict[str, Any] = {}
+        if normalized_axis is not None:
+            attrs["axis"] = normalized_axis
+        if result_type.dtype != tensor.type.dtype:
+            attrs["dtype"] = result_type.dtype.value
         op = self.function.add_op(
             "sum",
             operands=[tensor.value],
@@ -178,13 +186,19 @@ class GraphBuilder:
         axis: int | Iterable[int] | None = None,
         *,
         keepdims: bool = False,
+        dtype: str | np.dtype[Any] | DType | None = None,
     ) -> Tensor:
         self._ensure_open()
         self._check_tensor_owner(tensor)
         _validate_keepdims(keepdims)
+        result_dtype = _normalize_requested_reduction_dtype(dtype)
         normalized_axis = normalize_prod_axes(tensor.type, axis)
-        result_type = infer_prod(tensor.type, normalized_axis)
-        attrs = {} if normalized_axis is None else {"axis": normalized_axis}
+        result_type = infer_prod(tensor.type, normalized_axis, result_dtype)
+        attrs: dict[str, Any] = {}
+        if normalized_axis is not None:
+            attrs["axis"] = normalized_axis
+        if result_type.dtype != tensor.type.dtype:
+            attrs["dtype"] = result_type.dtype.value
         op = self.function.add_op(
             "prod",
             operands=[tensor.value],
@@ -323,12 +337,6 @@ class GraphBuilder:
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
         if _storage_root(source.value) is owner:
-            # Same-root writes have explicit snapshot semantics at the public builder
-            # boundary. Materialize the logical source in C order before mutating the
-            # owning root, so overlapping, interleaved, reversed, transposed, and
-            # unresolved-symbolic layouts all reduce to the existing different-root
-            # copy_into contract. The lower verifier/backend invariant therefore stays
-            # fail-closed rather than acquiring hidden memmove behavior.
             source = self.reshape(source, source.type.shape)
 
         op = self.function.add_op(
@@ -367,8 +375,6 @@ class GraphBuilder:
         if rhs_tensor is not None:
             self._check_tensor_owner(rhs_tensor)
 
-        # Python scalar literals are coerced to the peer tensor's dtype. This keeps
-        # tensor<float32> * 2 as float32 while tensor-vs-tensor promotion remains explicit.
         if lhs_tensor is None:
             peer_dtype = (
                 rhs_tensor.type.dtype if rhs_tensor is not None and np.isscalar(lhs) else None
@@ -391,6 +397,17 @@ class GraphBuilder:
 def _validate_keepdims(keepdims: bool) -> None:
     if not isinstance(keepdims, bool):
         raise TypeInferenceError("reduction keepdims must be a bool")
+
+
+def _normalize_requested_reduction_dtype(
+    dtype: str | np.dtype[Any] | DType | None,
+) -> DType | None:
+    if dtype is None or isinstance(dtype, DType):
+        return dtype
+    try:
+        return DType.from_numpy(np.dtype(dtype))
+    except (TypeError, ValueError) as exc:
+        raise TypeInferenceError(str(exc)) from exc
 
 
 def _is_full_root_handle(value: Value) -> bool:
