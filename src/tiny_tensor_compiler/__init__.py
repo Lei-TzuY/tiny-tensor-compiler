@@ -7,6 +7,7 @@ from .compiler import (
     compile_dynamic_module,
     compile_module,
 )
+from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
 from .frontend import GraphBuilder, Tensor
 from .fusion_planner import fuse_elementwise
 from .inference import TypeInferenceError
@@ -176,6 +177,8 @@ __all__ = [
     "CPUProgram",
     "CompileBudget",
     "CompileBudgetExceeded",
+    "CompilerTrace",
+    "CompilerTracePhase",
     "DynamicExecutable",
     "GraphBuilder",
     "IndexMap",
@@ -282,6 +285,7 @@ __all__ = [
     "publisher_id_from_public_key",
     "publisher_public_key_from_private_key",
     "specialize_module",
+    "trace_module",
     "transparency_leaf_hash",
     "transparency_node_hash",
     "verify",
