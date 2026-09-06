@@ -7,6 +7,7 @@ import numpy as np
 
 from .inference import (
     infer_binary,
+    infer_concat,
     infer_reduction,
     infer_relu,
     infer_reshape,
@@ -76,6 +77,7 @@ class BufferKernel:
     inputs: tuple[int, ...]
     literal: np.ndarray[Any, Any] | None = None
     reduction_axis: int | None = None
+    concat_axis: int | None = None
 
     @property
     def reduction(self) -> ReductionPlan | None:
@@ -287,11 +289,14 @@ class CPUProgram:
                     lines.append(f"b{op.output} = const {_format_literal(op.literal)}")
                 else:
                     operands = ", ".join(f"b{buffer}" for buffer in op.inputs)
-                    suffix = (
-                        ""
-                        if op.reduction is None or op.reduction.axis is None
-                        else f" axis={op.reduction.axis}"
-                    )
+                    if op.opcode == "concat":
+                        suffix = f" axis={op.concat_axis}"
+                    else:
+                        suffix = (
+                            ""
+                            if op.reduction is None or op.reduction.axis is None
+                            else f" axis={op.reduction.axis}"
+                        )
                     lines.append(f"b{op.output} = {op.opcode} {operands}{suffix}")
             else:
                 lines.append(f"return b{op.buffer}")
@@ -394,6 +399,7 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 inputs=tuple(buffers[operand] for operand in op.operands),
                 literal=literal,
                 reduction_axis=op.attrs.get("axis") if op.opcode in REDUCTION_OPCODES else None,
+                concat_axis=op.attrs.get("axis") if op.opcode == "concat" else None,
             )
         )
 
@@ -743,6 +749,8 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
 
             if op.opcode not in REDUCTION_OPCODES and op.reduction_axis is not None:
                 raise ValueError("only reduction kernels may carry a reduction axis")
+            if op.opcode != "concat" and op.concat_axis is not None:
+                raise ValueError("only concatenate kernels may carry a concatenate axis")
             output_type = allocated[op.output]
             if op.opcode == "const":
                 if op.inputs:
@@ -766,6 +774,17 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 expected = infer_relu(allocated[op.inputs[0]])
                 if expected != output_type:
                     raise ValueError("relu kernel output buffer type does not match inference")
+            elif op.opcode == "concat":
+                if len(op.inputs) < 2 or op.literal is not None or op.concat_axis is None:
+                    raise ValueError(
+                        "concat kernel requires at least two inputs, one axis, and no literal"
+                    )
+                expected = infer_concat(
+                    tuple(allocated[buffer] for buffer in op.inputs),
+                    op.concat_axis,
+                )
+                if expected != output_type:
+                    raise ValueError("concat kernel output buffer type does not match inference")
             elif op.opcode in REDUCTION_OPCODES:
                 if len(op.inputs) != 1 or op.literal is not None:
                     raise ValueError(f"{op.opcode} kernel requires one input and no literal")
