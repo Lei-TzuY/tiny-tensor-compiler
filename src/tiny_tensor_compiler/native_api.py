@@ -7,6 +7,7 @@ from typing import Any
 from .input_binding import BorrowedLoopProgram
 from .loop_ir import LoopProgram
 from .native import (
+    NativeCompilationDeadlineExceeded,
     NativeCompilationError,
     NativeCompilationTimeout,
     NativeExecutable,
@@ -27,24 +28,26 @@ def compile_native(
     *,
     parallel: bool = False,
     compiler_timeout: float | None = None,
+    compilation_timeout: float | None = None,
 ) -> NativeExecutable:
     """Compile verified Loop IR, optionally selecting barriered OpenMP kernel scheduling."""
+    policies = {}
+    if compiler_timeout is not None:
+        policies["compiler_timeout"] = compiler_timeout
+    if compilation_timeout is not None:
+        policies["compilation_timeout"] = compilation_timeout
     if parallel:
-        if compiler_timeout is None:
-            return compile_parallel_native(program, compiler=compiler, cache_dir=cache_dir)
         return compile_parallel_native(
             program,
             compiler=compiler,
             cache_dir=cache_dir,
-            compiler_timeout=compiler_timeout,
+            **policies,
         )
-    if compiler_timeout is None:
-        return _compile_native_serial(program, compiler=compiler, cache_dir=cache_dir)
     return _compile_native_serial(
         program,
         compiler=compiler,
         cache_dir=cache_dir,
-        compiler_timeout=compiler_timeout,
+        **policies,
     )
 
 
@@ -57,38 +60,34 @@ def execute_native(
     *,
     parallel: bool = False,
     compiler_timeout: float | None = None,
+    compilation_timeout: float | None = None,
 ):
     """Execute verified Loop IR through the serial or OpenMP native backend."""
+    policies = {}
+    if compiler_timeout is not None:
+        policies["compiler_timeout"] = compiler_timeout
+    if compilation_timeout is not None:
+        policies["compilation_timeout"] = compilation_timeout
     if not parallel:
-        if compiler_timeout is None:
-            return _execute_native_serial(
-                program,
-                compiler=compiler,
-                inputs=inputs,
-                cache_dir=cache_dir,
-                out=out,
-            )
         return _execute_native_serial(
             program,
             compiler=compiler,
             inputs=inputs,
             cache_dir=cache_dir,
             out=out,
-            compiler_timeout=compiler_timeout,
+            **policies,
         )
-    if compiler_timeout is None:
-        executable = compile_parallel_native(program, compiler=compiler, cache_dir=cache_dir)
-    else:
-        executable = compile_parallel_native(
-            program,
-            compiler=compiler,
-            cache_dir=cache_dir,
-            compiler_timeout=compiler_timeout,
-        )
+    executable = compile_parallel_native(
+        program,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        **policies,
+    )
     return executable(inputs=inputs, out=out)
 
 
 __all__ = [
+    "NativeCompilationDeadlineExceeded",
     "NativeCompilationError",
     "NativeCompilationTimeout",
     "NativeExecutable",
