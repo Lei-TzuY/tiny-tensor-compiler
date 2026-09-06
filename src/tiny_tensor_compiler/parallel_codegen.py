@@ -20,6 +20,11 @@ def emit_parallel_kernel(
     lines = _emit_kernel(op, types, kernel_number, layouts=layouts)
     output_type = types[op.output]
 
+    # Concatenate owns multiple independent segment loops. Keep the whole verified
+    # segment-copy kernel serial until scheduling can cover every segment explicitly.
+    if op.opcode == "concat":
+        return lines
+
     # The current SSE2 emitter owns a vector loop plus scalar tail. Keep that proven
     # implementation intact instead of stacking OpenMP directives onto its control flow.
     if _select_i32_sse2_plan(op, types, layouts=layouts) is not None:
