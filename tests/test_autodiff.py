@@ -102,6 +102,16 @@ def test_reverse_mode_rejects_unsupported_backward_ops_fail_closed(build):
         differentiate_module(module, wrt=(0,))
 
 
+def test_reverse_mode_rejects_mixed_precision_backward_slice_fail_closed():
+    builder = GraphBuilder()
+    x = builder.input((2,), DType.FLOAT32)
+    y = builder.input((2,), DType.FLOAT64)
+    module = builder.finish((x * y).sum())
+
+    with pytest.raises(AutodiffError, match="mixed-precision"):
+        differentiate_module(module, wrt=(0, 1))
+
+
 def test_reverse_mode_rejects_non_scalar_symbolic_and_integer_contracts():
     builder = GraphBuilder()
     x = builder.input((2,), DType.FLOAT32)
