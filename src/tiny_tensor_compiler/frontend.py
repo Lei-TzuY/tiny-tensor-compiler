@@ -94,6 +94,16 @@ class Tensor:
         """Copy ``source`` into one alias region of this fresh internal root generation."""
         return self._builder.copy_into(self, target, source)
 
+    def binary_into(self, target: Tensor, source: Tensor, *, operator: str) -> Tensor:
+        """Apply one exact-typed binary update through an alias region of this root."""
+        return self._builder.binary_into(self, target, source, operator=operator)
+
+    def add_into(self, target: Tensor, source: Tensor) -> Tensor:
+        return self.binary_into(target, source, operator="add")
+
+    def mul_into(self, target: Tensor, source: Tensor) -> Tensor:
+        return self.binary_into(target, source, operator="mul")
+
     def binary_inplace(self, source: Tensor, *, operator: str) -> Tensor:
         """Apply one exact-typed binary update to this fresh internal storage root."""
         return self._builder.binary_inplace(self, source, operator=operator)
@@ -380,6 +390,41 @@ class GraphBuilder:
         )
         return Tensor(self, op.results[0])
 
+    def binary_into(
+        self,
+        root: Tensor,
+        target: Tensor,
+        source: Tensor,
+        *,
+        operator: str,
+    ) -> Tensor:
+        self._ensure_open()
+        for tensor in (root, target, source):
+            self._check_tensor_owner(tensor)
+        if not isinstance(operator, str) or operator not in {"add", "mul"}:
+            raise ValueError("binary_into operator must be 'add' or 'mul'")
+
+        owner = _storage_root(root.value)
+        if not _is_full_root_handle(root.value):
+            raise ValueError("binary_into root must be an owning tensor or fresh full-root result")
+        producer = owner.producer
+        if producer is None or producer.opcode in {"input", "const"}:
+            raise ValueError("binary_into root must use internal computed storage")
+        if _storage_root(target.value) is not owner:
+            raise ValueError("binary_into target must alias the supplied root storage")
+        if target.type != source.type:
+            raise ValueError("binary_into target and source types must exactly match")
+        if _storage_root(source.value) is owner:
+            source = self.reshape(source, source.type.shape)
+
+        op = self.function.add_op(
+            "binary_into",
+            operands=[root.value, target.value, source.value],
+            result_types=[root.type],
+            attrs={"operator": operator},
+        )
+        return Tensor(self, op.results[0])
+
     def binary_inplace(self, root: Tensor, source: Tensor, *, operator: str) -> Tensor:
         self._ensure_open()
         for tensor in (root, source):
@@ -466,7 +511,7 @@ def _is_full_root_handle(value: Value) -> bool:
     producer = value.producer
     return (
         producer is not None
-        and producer.opcode in {"copy_into", "binary_inplace"}
+        and producer.opcode in {"copy_into", "binary_into", "binary_inplace"}
         and producer.results[0] is value
         and value.type == owner.type
     )
@@ -485,7 +530,7 @@ def _storage_root(value: Value) -> Value:
         if producer.opcode in _ALIAS_OPCODES:
             current = producer.operands[0]
             continue
-        if producer.opcode in {"copy_into", "binary_inplace"}:
+        if producer.opcode in {"copy_into", "binary_into", "binary_inplace"}:
             current = producer.operands[0]
             continue
         return current
