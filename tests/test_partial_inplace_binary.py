@@ -174,8 +174,8 @@ def test_binary_into_rejects_unsafe_root_target_source_types_and_operator():
 
 def test_binary_into_loop_verifier_rejects_self_overlapping_target_layout():
     full = TensorType((4,), DType.INT32)
-    partial = TensorType((2,), DType.INT32)
-    overlapping = StorageLayout(offset=0, strides=(0,))
+    partial = TensorType((2, 2), DType.INT32)
+    overlapping = StorageLayout(offset=0, strides=(1, 1))
 
     with pytest.raises(ValueError, match="must not overlap itself"):
         LoopProgram(
