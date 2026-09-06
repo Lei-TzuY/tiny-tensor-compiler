@@ -42,7 +42,7 @@ def test_trace_captures_real_pipeline_with_exact_digests():
     assert payload["format"] == "tiny-tensor-compiler-trace"
     assert payload["version"] == 1
     assert payload["phases"][0]["name"] == "tensor_ir"
-    assert payload["report"] == trace.report.to_dict()
+    assert payload["report"] == json.loads(trace.report.to_json())
 
 
 def test_trace_is_deterministic_for_independently_built_equivalent_modules():
