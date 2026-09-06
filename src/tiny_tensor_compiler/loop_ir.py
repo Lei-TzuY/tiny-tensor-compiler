@@ -77,6 +77,7 @@ class LoopBinaryInto:
     operator: str
     type: TensorType
     layout: StorageLayout
+    source_map: IndexMap | None = None
 
 
 @dataclass(frozen=True)
@@ -402,6 +403,10 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                     operator=op.operator,
                     type=virtual_types[op.output],
                     layout=alias.layout,
+                    source_map=_broadcast_index_map(
+                        virtual_types[op.source].shape,
+                        virtual_types[op.target].shape,
+                    ),
                 )
             )
             continue
@@ -612,9 +617,26 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 raise ValueError("binary_into source must use a different storage root")
             if op.operator not in {"add", "mul"}:
                 raise ValueError("binary_into operator must be add or mul")
-            if types[op.target] != types[op.source]:
-                raise ValueError("binary_into target and source types must exactly match")
-            if not _layout_is_non_overlapping(types[op.target].shape, layouts[op.target]):
+            target_type = types[op.target]
+            source_type = types[op.source]
+            if target_type.dtype != source_type.dtype:
+                raise ValueError("binary_into target and source dtypes must exactly match")
+            try:
+                expected_source_map = _broadcast_index_map(
+                    source_type.shape,
+                    target_type.shape,
+                )
+            except ValueError as exc:
+                raise ValueError("binary_into source must broadcast exactly to target type") from exc
+            if infer_binary(target_type, source_type) != target_type:
+                raise ValueError("binary_into source must broadcast exactly to target type")
+            if op.source_map is None:
+                identity_map = _broadcast_index_map(target_type.shape, target_type.shape)
+                if expected_source_map != identity_map:
+                    raise ValueError("broadcast binary_into requires an explicit source index map")
+            elif op.source_map != expected_source_map:
+                raise ValueError("binary_into source index map does not match broadcasting semantics")
+            if not _layout_is_non_overlapping(target_type.shape, layouts[op.target]):
                 raise ValueError("binary_into target layout must not overlap itself")
             if op.type != allocated[root]:
                 raise ValueError("binary_into fresh result type must match its owning root")
