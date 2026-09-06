@@ -166,5 +166,5 @@ def test_resource_managed_concrete_rejects_parallel_and_invalid_adoption():
         manage_native_executable(object())
 
     parallel = object.__new__(ParallelNativeExecutable)
-    with pytest.raises(ValueError, match="process-pinned"):
+    with pytest.raises(TypeError, match="process-pinned"):
         manage_native_executable(parallel)
