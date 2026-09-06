@@ -12,8 +12,8 @@ from .layout import StorageLayout, element_count
 from .lowering import (
     BufferAlloc,
     BufferCopyInto,
-    BufferInput,
     BufferInplaceBinary,
+    BufferInput,
     BufferReturn,
     BufferView,
     CPUProgram,

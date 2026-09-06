@@ -11,8 +11,8 @@ from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
     LoopAlloc,
     LoopCopyInto,
-    LoopInput,
     LoopInplaceBinary,
+    LoopInput,
     LoopKernel,
     LoopProgram,
     LoopReturn,

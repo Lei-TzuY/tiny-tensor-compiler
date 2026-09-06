@@ -7,8 +7,8 @@ from .ir import TensorType
 from .loop_ir import (
     LoopAlloc,
     LoopCopyInto,
-    LoopInput,
     LoopInplaceBinary,
+    LoopInput,
     LoopKernel,
     LoopProgram,
     LoopReturn,
