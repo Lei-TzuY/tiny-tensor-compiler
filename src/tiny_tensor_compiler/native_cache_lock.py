@@ -82,10 +82,9 @@ def _unlock_stream(stream) -> None:
 def _lock_stream_windows(stream) -> None:
     import msvcrt
 
-    stream.seek(0, os.SEEK_END)
-    if stream.tell() == 0:
-        stream.write(b"\0")
-        stream.flush()
+    # Windows byte-range locks may extend past EOF. Do not initialize the lock
+    # file before acquiring the byte-range lock: concurrent first-time lockers
+    # can otherwise race in write/flush before either process owns the lock.
     stream.seek(0)
 
     deadline = time.monotonic() + _PERSISTENT_CACHE_LEASE_TIMEOUT_SECONDS

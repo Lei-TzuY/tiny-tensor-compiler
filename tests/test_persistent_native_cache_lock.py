@@ -87,6 +87,16 @@ def test_persistent_cache_lease_is_exclusive_across_processes(tmp_path):
             waiter.join(timeout=5)
 
 
+def test_persistent_cache_lease_does_not_mutate_lock_file(tmp_path):
+    library = tmp_path / native_module._PERSISTENT_CACHE_SCHEMA / "digest" / native_module._library_name()
+    lock_path = library.parent.parent / ".digest.lock"
+
+    with native_module._persistent_cache_lease(library):
+        assert lock_path.exists()
+
+    assert lock_path.read_bytes() == b""
+
+
 def test_persistent_cache_leases_are_independent_per_digest(tmp_path):
     schema = tmp_path / native_module._PERSISTENT_CACHE_SCHEMA
     held_library = schema / "digest-a" / native_module._library_name()
