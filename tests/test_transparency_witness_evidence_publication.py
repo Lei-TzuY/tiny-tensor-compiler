@@ -9,26 +9,23 @@ from threading import Thread
 import pytest
 
 from tiny_tensor_compiler import (
+    NativeBundleTransparencyError,
+    NativeBundleTransparencyPublicationError,
     NativeBundleTransparencyRollbackError,
     TransparencyStateStore,
+    TransparencyWitnessEvidenceStore,
     TransparencyWitnessPolicy,
+    accept_transparency_witness_evidence_publication,
     create_release_checkpoint,
     create_transparency_checkpoint,
+    create_transparency_witness_evidence_publication,
+    fetch_transparency_witness_evidence_publication,
     publisher_public_key_from_private_key,
     verify_transparency_checkpoint,
+    verify_transparency_witness_evidence_publication,
 )
 from tiny_tensor_compiler.native_bundle_transparency_witness import (
     NativeBundleTransparencyWitnessError,
-)
-from tiny_tensor_compiler.native_bundle_transparency_witness_evidence import (
-    TransparencyWitnessEvidenceStore,
-)
-from tiny_tensor_compiler.native_bundle_transparency_witness_evidence_publication import (
-    NativeBundleTransparencyPublicationError,
-    accept_transparency_witness_evidence_publication,
-    create_transparency_witness_evidence_publication,
-    fetch_transparency_witness_evidence_publication,
-    verify_transparency_witness_evidence_publication,
 )
 from tiny_tensor_compiler.native_bundle_transparency_witness_observation import (
     create_transparency_witness_observation,
@@ -426,7 +423,7 @@ def test_accept_rechecks_store_required_proofs_before_mutation(tmp_path: Path) -
         policy=policy,
         consistency_proofs={old_digest: damaged},
     )
-    with pytest.raises(Exception, match="consistency proof"):
+    with pytest.raises(NativeBundleTransparencyError, match="consistency proof"):
         accept_transparency_witness_evidence_publication(
             bad,
             publisher_public_key=_public(95),
