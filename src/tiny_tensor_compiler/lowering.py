@@ -53,6 +53,15 @@ class BufferCopyInto:
 
 
 @dataclass(frozen=True)
+class BufferBinaryInto:
+    output: int
+    root: int
+    target: int
+    source: int
+    operator: str
+
+
+@dataclass(frozen=True)
 class BufferInplaceBinary:
     output: int
     root: int
@@ -81,7 +90,14 @@ class BufferReturn:
 
 
 BufferOperation = (
-    BufferAlloc | BufferInput | BufferView | BufferCopyInto | BufferInplaceBinary | BufferKernel | BufferReturn
+    BufferAlloc
+    | BufferInput
+    | BufferView
+    | BufferCopyInto
+    | BufferBinaryInto
+    | BufferInplaceBinary
+    | BufferKernel
+    | BufferReturn
 )
 
 
@@ -202,6 +218,10 @@ class CPUProgram:
         return tuple(op for op in self.operations if isinstance(op, BufferCopyInto))
 
     @property
+    def binary_intos(self) -> tuple[BufferBinaryInto, ...]:
+        return tuple(op for op in self.operations if isinstance(op, BufferBinaryInto))
+
+    @property
     def inplace_binaries(self) -> tuple[BufferInplaceBinary, ...]:
         return tuple(op for op in self.operations if isinstance(op, BufferInplaceBinary))
 
@@ -250,6 +270,11 @@ class CPUProgram:
             elif isinstance(op, BufferCopyInto):
                 lines.append(
                     f"b{op.output} = copy_into root=b{op.root} target=b{op.target} source=b{op.source}"
+                )
+            elif isinstance(op, BufferBinaryInto):
+                lines.append(
+                    f"b{op.output} = binary_into[{op.operator}] root=b{op.root} "
+                    f"target=b{op.target} source=b{op.source}"
                 )
             elif isinstance(op, BufferInplaceBinary):
                 lines.append(
@@ -336,6 +361,17 @@ def lower_to_cpu(module: Module) -> CPUProgram:
                 )
             )
             continue
+        if op.opcode == "binary_into":
+            operations.append(
+                BufferBinaryInto(
+                    output=buffer,
+                    root=buffers[op.operands[0]],
+                    target=buffers[op.operands[1]],
+                    source=buffers[op.operands[2]],
+                    operator=op.attrs["operator"],
+                )
+            )
+            continue
         if op.opcode == "binary_inplace":
             operations.append(
                 BufferInplaceBinary(
@@ -382,6 +418,10 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
             last_uses[op.source] = max(last_uses.get(op.source, -1), index)
         elif isinstance(op, BufferCopyInto):
+            alias_sources[op.output] = op.root
+            for buffer in (op.output, op.root, op.target, op.source):
+                last_uses[buffer] = max(last_uses.get(buffer, -1), index)
+        elif isinstance(op, BufferBinaryInto):
             alias_sources[op.output] = op.root
             for buffer in (op.output, op.root, op.target, op.source):
                 last_uses[buffer] = max(last_uses.get(buffer, -1), index)
@@ -465,7 +505,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
                 if inferred_shape != output_type.shape:
                     raise ValueError("buffer slice layout shape does not match inferred output")
             layouts[op.output] = layout
-        elif isinstance(op, (BufferCopyInto, BufferInplaceBinary)):
+        elif isinstance(op, (BufferCopyInto, BufferBinaryInto, BufferInplaceBinary)):
             layouts[op.output] = layouts[op.root]
 
     assignment_by_virtual = {assignment.virtual: assignment for assignment in assignments}
@@ -474,7 +514,7 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         if isinstance(op, BufferView):
             source = op.source
             output = op.output
-        elif isinstance(op, (BufferCopyInto, BufferInplaceBinary)):
+        elif isinstance(op, (BufferCopyInto, BufferBinaryInto, BufferInplaceBinary)):
             source = op.root
             output = op.output
         else:
@@ -619,6 +659,41 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 raise ValueError("copy_into result type must match its root handle type")
             if allocated[op.target] != allocated[op.source]:
                 raise ValueError("copy_into target and source types must exactly match")
+            alias_sources[op.output] = op.root
+            root_generations[owner] += 1
+            roots[op.output] = owner
+            value_generations[op.output] = root_generations[owner]
+            full_root_handles.add(op.output)
+            written.add(op.output)
+            continue
+
+        if isinstance(op, BufferBinaryInto):
+            for buffer in (op.output, op.root, op.target, op.source):
+                if buffer not in allocated:
+                    raise ValueError("binary_into requires allocated logical buffer values")
+            if op.output in written:
+                raise ValueError(f"buffer b{op.output} is written more than once")
+            for buffer in (op.root, op.target, op.source):
+                if buffer not in written:
+                    raise ValueError(f"binary_into reads b{buffer} before it is written")
+                require_fresh(buffer)
+            owner = roots[op.root]
+            if op.root not in full_root_handles:
+                raise ValueError("binary_into root must be a fresh full-root buffer handle")
+            if owner in input_roots:
+                raise ValueError("binary_into root must use internal computed storage")
+            if roots[op.target] != owner:
+                raise ValueError("binary_into target must alias its owning root storage")
+            if roots[op.source] == owner:
+                raise ValueError("binary_into source must use a different storage root")
+            if op.operator not in {"add", "mul"}:
+                raise ValueError("binary_into operator must be add or mul")
+            if allocated[op.root] != allocated[owner]:
+                raise ValueError("binary_into root handle type must match owning storage")
+            if allocated[op.output] != allocated[op.root]:
+                raise ValueError("binary_into result type must match its root handle type")
+            if allocated[op.target] != allocated[op.source]:
+                raise ValueError("binary_into target and source types must exactly match")
             alias_sources[op.output] = op.root
             root_generations[owner] += 1
             roots[op.output] = owner
