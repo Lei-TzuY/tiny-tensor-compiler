@@ -12,6 +12,7 @@ from ..loop_ir import (
     LoopAlloc,
     LoopCopyInto,
     LoopInput,
+    LoopInplaceBinary,
     LoopKernel,
     LoopProgram,
     LoopReturn,
@@ -82,6 +83,12 @@ def execute_loop(
 
         if isinstance(op, LoopCopyInto):
             np.copyto(buffers[op.target], buffers[op.source])
+            buffers[op.output] = buffers[op.root]
+            continue
+
+        if isinstance(op, LoopInplaceBinary):
+            binary = np.add if op.operator == "add" else np.multiply
+            binary(buffers[op.root], buffers[op.source], out=buffers[op.root])
             buffers[op.output] = buffers[op.root]
             continue
 

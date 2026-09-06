@@ -13,6 +13,7 @@ from .lowering import (
     BufferAlloc,
     BufferCopyInto,
     BufferInput,
+    BufferInplaceBinary,
     BufferReturn,
     BufferView,
     CPUProgram,
@@ -67,6 +68,15 @@ class LoopCopyInto:
 
 
 @dataclass(frozen=True)
+class LoopInplaceBinary:
+    output: int
+    root: int
+    source: int
+    operator: str
+    type: TensorType
+
+
+@dataclass(frozen=True)
 class LoopKernel:
     opcode: str
     output: int
@@ -89,7 +99,9 @@ class LoopReturn:
     buffer: int
 
 
-LoopOperation = LoopAlloc | LoopInput | LoopView | LoopCopyInto | LoopKernel | LoopReturn
+LoopOperation = (
+    LoopAlloc | LoopInput | LoopView | LoopCopyInto | LoopInplaceBinary | LoopKernel | LoopReturn
+)
 
 
 @dataclass(frozen=True)
@@ -122,7 +134,7 @@ class LoopProgram:
             {
                 op.output: op.type
                 for op in self.operations
-                if isinstance(op, (LoopView, LoopCopyInto))
+                if isinstance(op, (LoopView, LoopCopyInto, LoopInplaceBinary))
             }
         )
         return types
@@ -156,12 +168,24 @@ class LoopProgram:
                 op.layout.validate_bounds(op.type.shape, element_count(root_types[root].shape))
                 layouts[op.output] = op.layout
                 roots[op.output] = root
+            elif isinstance(op, LoopInplaceBinary):
+                if op.root not in roots:
+                    raise ValueError("binary_inplace root handle has no storage root")
+                root = roots[op.root]
+                if types[op.root] != root_types[root] or layouts[op.root] != layouts[root]:
+                    raise ValueError("binary_inplace root handle must expose the full owning root")
+                layouts[op.output] = layouts[root]
+                roots[op.output] = root
         return layouts
 
     @property
     def input_types(self) -> tuple[TensorType, ...]:
         types = self.value_types
         return tuple(types[op.output] for op in self.inputs)
+
+    @property
+    def inplace_binaries(self) -> tuple[LoopInplaceBinary, ...]:
+        return tuple(op for op in self.operations if isinstance(op, LoopInplaceBinary))
 
     @property
     def kernels(self) -> tuple[LoopKernel, ...]:
@@ -192,6 +216,10 @@ class LoopProgram:
                 if op.root not in roots:
                     raise KeyError(f"copy_into root handle p{op.root} has no storage root")
                 roots[op.output] = roots[op.root]
+            elif isinstance(op, LoopInplaceBinary):
+                if op.root not in roots:
+                    raise KeyError(f"binary_inplace root handle p{op.root} has no storage root")
+                roots[op.output] = roots[op.root]
         try:
             return roots[buffer]
         except KeyError as exc:
@@ -218,6 +246,11 @@ class LoopProgram:
                 lines.append(
                     f"p{op.output} = copy_into root=p{op.root} target=p{op.target} "
                     f"source=p{op.source} : {op.type}"
+                )
+                continue
+            if isinstance(op, LoopInplaceBinary):
+                lines.append(
+                    f"p{op.output} = binary_inplace[{op.operator}] root=p{op.root} source=p{op.source} : {op.type}"
                 )
                 continue
             if isinstance(op, LoopReturn):
@@ -305,6 +338,20 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                     source=virtual_handles[op.source],
                     type=virtual_types[op.output],
                     layout=alias.layout,
+                )
+            )
+            continue
+        if isinstance(op, BufferInplaceBinary):
+            handle = next_handle
+            next_handle += 1
+            virtual_handles[op.output] = handle
+            operations.append(
+                LoopInplaceBinary(
+                    output=handle,
+                    root=virtual_handles[op.root],
+                    source=virtual_handles[op.source],
+                    operator=op.operator,
+                    type=virtual_types[op.output],
                 )
             )
             continue
@@ -471,6 +518,40 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
             root_generations[root] += 1
             types[op.output] = op.type
             layouts[op.output] = op.layout
+            roots[op.output] = root
+            value_generations[op.output] = root_generations[root]
+            written.add(op.output)
+            continue
+
+        if isinstance(op, LoopInplaceBinary):
+            saw_execution = True
+            if op.output < 0:
+                raise ValueError(f"invalid negative binary_inplace result id p{op.output}")
+            if op.output in types:
+                raise ValueError(f"binary_inplace result p{op.output} collides with an existing loop value")
+            for buffer in (op.root, op.source):
+                if buffer not in types:
+                    raise ValueError(f"binary_inplace input p{buffer} is not defined")
+                if buffer not in written:
+                    raise ValueError(f"binary_inplace input p{buffer} is not written")
+                _verify_fresh_value(buffer, roots, root_generations, value_generations)
+            root = roots[op.root]
+            if root not in allocated:
+                raise ValueError("binary_inplace root handle has no owning storage")
+            if root in input_roots:
+                raise ValueError("binary_inplace cannot mutate borrowed or copied runtime input storage")
+            if types[op.root] != allocated[root] or layouts[op.root] != layouts[root]:
+                raise ValueError("binary_inplace root must be a fresh full-root handle")
+            if roots[op.source] == root:
+                raise ValueError("binary_inplace source must use a different storage root")
+            if op.operator not in {"add", "mul"}:
+                raise ValueError("binary_inplace operator must be add or mul")
+            if types[op.root] != types[op.source] or op.type != types[op.root]:
+                raise ValueError("binary_inplace root, source, and result types must exactly match")
+
+            root_generations[root] += 1
+            types[op.output] = op.type
+            layouts[op.output] = layouts[root]
             roots[op.output] = root
             value_generations[op.output] = root_generations[root]
             written.add(op.output)

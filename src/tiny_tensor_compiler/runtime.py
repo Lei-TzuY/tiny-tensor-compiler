@@ -112,6 +112,12 @@ def execute_reference(module: Module, inputs: Sequence[Any] = ()) -> ExecutionRe
             source = values[op.operands[2]]
             np.copyto(target, source)
             values[op.results[0]] = root
+        elif op.opcode == "binary_inplace":
+            root = values[op.operands[0]]
+            source = values[op.operands[1]]
+            binary = np.add if op.attrs["operator"] == "add" else np.multiply
+            binary(root, source, out=root)
+            values[op.results[0]] = root
         elif op.opcode == "return":
             outputs = tuple(np.array(values[operand], copy=True) for operand in op.operands)
             return outputs[0] if len(outputs) == 1 else outputs

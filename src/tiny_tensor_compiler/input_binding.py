@@ -8,6 +8,7 @@ from .loop_ir import (
     LoopAlloc,
     LoopCopyInto,
     LoopInput,
+    LoopInplaceBinary,
     LoopKernel,
     LoopProgram,
     LoopReturn,
@@ -103,6 +104,10 @@ class BorrowedLoopProgram:
     @property
     def copies(self):
         return self.program.copies
+
+    @property
+    def inplace_binaries(self):
+        return self.program.inplace_binaries
 
     @property
     def value_types(self):
@@ -213,6 +218,18 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
             )
             continue
 
+        if isinstance(op, LoopInplaceBinary):
+            transformed_operations.append(
+                LoopInplaceBinary(
+                    output=op.output + split_count,
+                    root=remap_handle(op.root),
+                    source=remap_handle(op.source),
+                    operator=op.operator,
+                    type=op.type,
+                )
+            )
+            continue
+
         if isinstance(op, LoopKernel):
             transformed_operations.append(
                 LoopKernel(
@@ -256,5 +273,7 @@ def _has_other_write(operations, position: int, buffer: int) -> bool:
         if isinstance(other, LoopKernel) and other.output == buffer:
             return True
         if isinstance(other, LoopCopyInto) and other.root == buffer:
+            return True
+        if isinstance(other, LoopInplaceBinary) and other.root == buffer:
             return True
     return False

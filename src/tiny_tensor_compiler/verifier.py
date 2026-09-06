@@ -81,6 +81,8 @@ def verify(module: Module) -> None:
             _verify_transpose(op_index, op)
         elif op.opcode == "copy_into":
             _verify_copy_into(op_index, op)
+        elif op.opcode == "binary_inplace":
+            _verify_binary_inplace(op_index, op)
         elif op.opcode == "return":
             returns += 1
             _verify_return(op_index, op)
@@ -294,6 +296,28 @@ def _verify_copy_into(op_index: int, op: Operation) -> None:
         _fail(op_index, op, "copy_into source must use a different storage root")
 
 
+def _verify_binary_inplace(op_index: int, op: Operation) -> None:
+    _expect_arity(op_index, op, operands=2, results=1)
+    if set(op.attrs) != {"operator"}:
+        _fail(op_index, op, "binary_inplace requires exactly one 'operator' attribute")
+    operator = op.attrs["operator"]
+    if not isinstance(operator, str) or operator not in {"add", "mul"}:
+        _fail(op_index, op, "binary_inplace operator must be 'add' or 'mul'")
+
+    root, source = op.operands
+    result = op.results[0]
+    owner = _storage_root(root)
+    if not _is_full_root_handle(root):
+        _fail(op_index, op, "binary_inplace root must be an owning value or fresh full-root result")
+    producer = owner.producer
+    if producer is None or producer.opcode in {"input", "const"}:
+        _fail(op_index, op, "binary_inplace root must use internal computed storage")
+    if _storage_root(source) is owner:
+        _fail(op_index, op, "binary_inplace source must use a different storage root")
+    if root.type != source.type or result.type != root.type:
+        _fail(op_index, op, "binary_inplace root, source, and result types must exactly match")
+
+
 def _verify_return(op_index: int, op: Operation) -> None:
     if op.results:
         _fail(op_index, op, "return must not produce results")
@@ -318,7 +342,7 @@ def _record_storage_generation(
         storage_roots[result] = root
         value_generations[result] = value_generations[source]
         return
-    if op.opcode == "copy_into":
+    if op.opcode in {"copy_into", "binary_inplace"}:
         root = storage_roots[op.operands[0]]
         root_generations[root] += 1
         storage_roots[result] = root
@@ -356,7 +380,7 @@ def _is_full_root_handle(value: Value) -> bool:
     producer = value.producer
     return (
         producer is not None
-        and producer.opcode == "copy_into"
+        and producer.opcode in {"copy_into", "binary_inplace"}
         and producer.results[0] is value
         and value.type == owner.type
     )
@@ -375,7 +399,7 @@ def _storage_root(value: Value) -> Value:
         if producer.opcode in _ALIAS_OPCODES:
             current = producer.operands[0]
             continue
-        if producer.opcode == "copy_into":
+        if producer.opcode in {"copy_into", "binary_inplace"}:
             current = producer.operands[0]
             continue
         return current
