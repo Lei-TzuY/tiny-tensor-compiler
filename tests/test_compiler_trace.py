@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+import tiny_tensor_compiler as ttc
 from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.compiler_trace import CompilerTracePhase, trace_module
 from tiny_tensor_compiler.frontend import GraphBuilder
@@ -101,3 +102,9 @@ def test_trace_phase_lookup_fails_closed():
     trace = trace_module(_module())
     with pytest.raises(KeyError, match="no unique phase"):
         trace.phase("missing")
+
+
+def test_trace_is_exported_from_package_root():
+    assert ttc.CompilerTracePhase is CompilerTracePhase
+    assert ttc.trace_module is trace_module
+    assert isinstance(ttc.trace_module(_module()), ttc.CompilerTrace)
