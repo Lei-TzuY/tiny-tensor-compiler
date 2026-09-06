@@ -8,6 +8,7 @@ import os
 import platform
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -406,32 +407,97 @@ def _compile_source(
     library_path = directory_path / _library_name()
     source_path.write_text(source, encoding="utf-8")
     compile_command = _build_compile_command(command, source_path.name, library_path.name)
-    try:
-        if compiler_timeout is None:
-            completed = subprocess.run(
-                compile_command,
-                cwd=directory_path,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        else:
-            completed = subprocess.run(
-                compile_command,
-                cwd=directory_path,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=compiler_timeout,
-            )
-    except subprocess.TimeoutExpired as error:
-        raise NativeCompilationTimeout(compile_command, float(error.timeout)) from error
+    if compiler_timeout is None:
+        completed = subprocess.run(
+            compile_command,
+            cwd=directory_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        completed = _run_compiler_with_timeout(
+            compile_command,
+            directory_path,
+            compiler_timeout,
+        )
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "no compiler output"
         raise NativeCompilationError(
             f"native C compilation failed with exit code {completed.returncode}: {details}"
         )
     return library_path
+
+
+def _run_compiler_with_timeout(
+    compile_command: list[str],
+    directory_path: Path,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    popen_kwargs: dict[str, Any] = {
+        "cwd": directory_path,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    elif os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    process = subprocess.Popen(compile_command, **popen_kwargs)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        _terminate_compiler_process_tree(process)
+        _reap_timed_out_compiler(process)
+        raise NativeCompilationTimeout(compile_command, float(error.timeout)) from error
+
+    return subprocess.CompletedProcess(
+        compile_command,
+        process.returncode,
+        stdout,
+        stderr,
+    )
+
+
+def _terminate_compiler_process_tree(process: subprocess.Popen[str]) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            if process.poll() is None:
+                process.kill()
+        return
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            if process.poll() is None:
+                process.kill()
+        return
+
+    if process.poll() is None:  # pragma: no cover - unsupported native platforms fail earlier
+        process.kill()
+
+
+def _reap_timed_out_compiler(process: subprocess.Popen[str]) -> None:
+    try:
+        process.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
 
 
 def _load_library(library_path: Path) -> ctypes.CDLL:
