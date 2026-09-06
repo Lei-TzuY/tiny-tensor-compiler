@@ -77,7 +77,7 @@ def compile_parallel_native(
     compiler: str | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     *,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> native_module.NativeExecutable:
     """Compile one verified Loop IR program with barriered OpenMP kernel scheduling."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
