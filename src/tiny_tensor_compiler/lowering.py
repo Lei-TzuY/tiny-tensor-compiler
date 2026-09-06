@@ -16,7 +16,7 @@ from .inference import (
 )
 from .ir import Module, TensorType, Value
 from .layout import StorageLayout, element_count
-from .reduction import REDUCTION_OPCODES, ReductionPlan
+from .reduction import REDUCTION_OPCODES, ReductionAxis, ReductionPlan
 from .verifier import verify
 
 
@@ -58,7 +58,7 @@ class BufferKernel:
     output: int
     inputs: tuple[int, ...]
     literal: np.ndarray[Any, Any] | None = None
-    reduction_axis: int | None = None
+    reduction_axis: ReductionAxis = None
 
     @property
     def reduction(self) -> ReductionPlan | None:
@@ -642,6 +642,7 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                     allocated[op.inputs[0]],
                     plan.operator,
                     plan.axis,
+                    output_type.dtype,
                 )
                 if expected != output_type:
                     raise ValueError(
