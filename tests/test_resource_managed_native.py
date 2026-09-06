@@ -5,12 +5,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tiny_tensor_compiler import GraphBuilder, SymbolicDim, compile_module
-from tiny_tensor_compiler import native as native_module
-from tiny_tensor_compiler.managed_native import (
+from tiny_tensor_compiler import (
+    GraphBuilder,
+    ResourceManagedNativeExecutable,
+    SymbolicDim,
+    compile_module,
     compile_resource_managed_module,
     manage_native_executable,
 )
+from tiny_tensor_compiler import native as native_module
 from tiny_tensor_compiler.parallel_native import ParallelNativeExecutable
 from tiny_tensor_compiler.specialization_cache import compile_resource_managed_dynamic_module
 
@@ -40,6 +43,7 @@ def _inputs(rows: int = 2) -> np.ndarray:
 def test_resource_managed_concrete_close_releases_final_serial_artifact():
     native_module.clear_native_cache()
     managed = compile_resource_managed_module(_relu_module())
+    assert isinstance(managed, ResourceManagedNativeExecutable)
     directories = _artifact_directories()
     assert len(directories) == 1
     assert all(path.exists() for path in directories)
