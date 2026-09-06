@@ -30,7 +30,7 @@ This fail-closed contract remains unchanged by adaptive compilation. Callers tha
 - within budget: eagerly compile the ordinary native executable;
 - budget exceeded: retain the ordinary verified post-lowering Loop program and execute it through the existing CPU Loop interpreter.
 
-The returned `AdaptiveExecutable` exposes `backend`, `report`, and `budget_exceeded`, so the decision is observable rather than hidden. `backend` is exactly `"native"` or `"loop"`. The loop path is selected only when `enforce_compile_budget()` raises `CompileBudgetExceeded`; verifier failures, symbolic-shape errors, native compiler/load failures, and runtime input validation errors are not swallowed or converted into fallback.
+The returned `AdaptiveExecutable` exposes `backend`, `report`, and `budget_exceeded`, so the decision is observable rather than hidden. `backend` is exactly `"native"` or `"loop"`. The loop path is selected only when `enforce_compile_budget()` raises `CompileBudgetExceeded`; verifier failures, symbolic-shape errors, native compiler/load failures, compiler timeouts, and runtime input validation errors are not swallowed or converted into fallback.
 
 `borrow_inputs=True` is applied through the same verified input-lifetime transform on either selected path. `parallel=True` affects only an admitted native specialization; the Loop CPU fallback does not pretend to provide OpenMP execution.
 
@@ -44,6 +44,23 @@ The first adaptive facade intentionally has no `out=` argument. Native prealloca
 
 A budget decision is made once per cached binding. Repeated use of the same binding reuses the same adaptive specialization rather than retrying native compilation or changing backend opportunistically.
 
+## External compiler subprocess timeout
+
+Native compilation APIs now accept the optional `compiler_timeout` policy. It is either `None` or a positive finite number of seconds. Boolean, zero, negative, NaN, and infinite values are rejected before compiler lookup.
+
+The policy bounds only one launched external C compiler subprocess. It is threaded consistently through serial and OpenMP native compilation plus concrete, dynamic, and adaptive high-level compilation. A timed-out compiler raises `NativeCompilationTimeout`, which remains a `NativeCompilationError` and exposes the exact command plus configured timeout for diagnostics.
+
+A timeout never becomes an adaptive Loop fallback. Adaptive fallback remains reserved exclusively for an explicit `CompileBudgetExceeded` decision made before native compilation begins.
+
+Timeout cleanup uses the existing artifact durability boundaries:
+
+- transient build directories are removed after timeout;
+- persistent-cache temporary build directories are removed and no library/manifest is published from a timed-out build;
+- timeout is not part of native artifact identity, so an existing process or persistent cache hit reuses the already-compiled artifact without launching a compiler merely because the caller supplies a different timeout;
+- reusable native/dynamic handles retain the timeout policy for any later compilation that is actually required after a cache miss.
+
+The timeout is intentionally **not** a total compilation deadline. Time spent waiting for a persistent-cache lease is outside this first policy because no compiler subprocess has started yet. It also does not limit native execution after compilation.
+
 ## Evidence boundary
 
 These metrics are structural compiler facts, not runtime resource measurements:
@@ -53,6 +70,8 @@ These metrics are structural compiler facts, not runtime resource measurements:
 
 Accordingly, `CompileBudget` is a deterministic compiler admission policy, not a security sandbox, denial-of-service guarantee, memory limiter, or benchmark. Adaptive Loop fallback also does not claim to reduce runtime memory or improve performance; it only avoids native compilation for the explicit over-budget policy case while preserving verified executable semantics.
 
+`compiler_timeout` is likewise a bounded wait for the directly launched compiler subprocess, not a process-tree sandbox, CPU quota, memory limit, trusted cancellation protocol, runtime timeout, cache-lock deadline, or general denial-of-service guarantee. No security/isolation claim is implied by subprocess timeout enforcement.
+
 ## Phase boundary
 
-The fail-closed admission phase and the first explicit adaptive native-or-Loop execution phase are now separate, composable policies. Adding more report counters, fallback modes, or retry heuristics without a distinct operational requirement would be low-value farming. A later runtime-policy milestone should introduce a qualitatively new enforceable resource or execution-control capability, such as bounded external compiler-process control with evidence, rather than disguising more structural heuristics as runtime guarantees.
+The fail-closed admission phase, adaptive native-or-Loop policy, and bounded external compiler-subprocess timeout are now separate, composable controls. Adding more report counters, fallback modes, timeout aliases, or retry heuristics without a distinct operational requirement would be low-value farming. The next runtime-control promotion should require genuinely new enforceable semantics—such as an explicit total compilation deadline/process-tree cancellation model with cross-platform evidence, or move to another architectural frontier—rather than disguising additional thresholds as a new subsystem.
