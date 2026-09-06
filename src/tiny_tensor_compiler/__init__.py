@@ -42,6 +42,7 @@ from .lowering import (
 )
 from .native_api import (
     NativeCompilationError,
+    NativeCompilationTimeout,
     NativeExecutable,
     clear_native_cache,
     compile_native,
@@ -203,6 +204,7 @@ __all__ = [
     "NativeBundleTransparencyWitnessError",
     "NativeBundleTrustError",
     "NativeCompilationError",
+    "NativeCompilationTimeout",
     "NativeExecutable",
     "PublisherTrustPolicy",
     "ReleaseChannelRegistryExecutable",
