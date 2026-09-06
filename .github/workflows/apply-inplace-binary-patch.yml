@@ -1,0 +1,35 @@
+name: apply-inplace-binary-patch
+
+on:
+  push:
+    branches:
+      - feat/inplace-binary-effects
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply exact production patch
+        run: python tools/apply_inplace_binary_patch.py
+      - name: Validate patch shape
+        run: |
+          git diff --check
+          git status --short
+      - name: Commit production tree without construction files
+        run: |
+          git config user.name "LeiZ"
+          git config user.email "52287354+Lei-TzuY@users.noreply.github.com"
+          git add src tests
+          git rm .github/workflows/apply-inplace-binary-patch.yml tools/apply_inplace_binary_patch.py
+          git commit -m "feat: add bounded in-place binary effects"
+          git push origin HEAD:feat/inplace-binary-effects
