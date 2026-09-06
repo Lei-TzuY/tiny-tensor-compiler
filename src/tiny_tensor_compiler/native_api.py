@@ -26,7 +26,7 @@ def compile_native(
     cache_dir: str | os.PathLike[str] | None = None,
     *,
     parallel: bool = False,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> NativeExecutable:
     """Compile verified Loop IR, optionally selecting barriered OpenMP kernel scheduling."""
     if parallel:
@@ -56,7 +56,7 @@ def execute_native(
     out: NativeOutput = None,
     *,
     parallel: bool = False,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ):
     """Execute verified Loop IR through the serial or OpenMP native backend."""
     if not parallel:
