@@ -1,5 +1,6 @@
 import math
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -40,6 +41,10 @@ def _sleeping_compiler(monkeypatch):
     return tuple(command)
 
 
+def _python_compiler_command() -> str:
+    return shlex.join([sys.executable])
+
+
 @pytest.mark.parametrize("bad", [True, "1", object()])
 def test_compiler_timeout_rejects_non_numeric_values_before_compiler_lookup(bad):
     with pytest.raises(TypeError):
@@ -72,7 +77,7 @@ def test_compiler_timeout_bounds_real_external_process_and_cleans_transient_buil
     with pytest.raises(NativeCompilationTimeout) as caught:
         compile_native(
             _loop_program(),
-            compiler=sys.executable,
+            compiler=_python_compiler_command(),
             compiler_timeout=0.05,
             parallel=parallel,
         )
@@ -92,7 +97,7 @@ def test_persistent_timeout_never_publishes_partial_artifact(tmp_path, monkeypat
     with pytest.raises(NativeCompilationTimeout):
         compile_native(
             _loop_program(),
-            compiler=sys.executable,
+            compiler=_python_compiler_command(),
             cache_dir=cache_dir,
             compiler_timeout=0.05,
         )
