@@ -7,6 +7,7 @@ from .c_codegen import (
     _emit_return_copy,
     _storage_size,
 )
+from .effect_schedule import plan_parallel_effect_groups
 from .input_binding import BorrowedLoopProgram
 from .loop_ir import (
     LoopAlloc,
@@ -18,7 +19,11 @@ from .loop_ir import (
     LoopReturn,
     LoopView,
 )
-from .parallel_codegen import emit_parallel_binary_into, emit_parallel_kernel
+from .parallel_codegen import (
+    emit_parallel_binary_into,
+    emit_parallel_effect_group,
+    emit_parallel_kernel,
+)
 from .write_codegen import emit_binary_into, emit_copy_into, emit_inplace_binary
 
 
@@ -89,9 +94,26 @@ def generate_c(
     if program.allocations:
         lines.append("")
 
+    grouped_by_start = {}
+    grouped_indices: set[int] = set()
+    if parallel:
+        schedule_program = program.program if isinstance(program, BorrowedLoopProgram) else program
+        for group in plan_parallel_effect_groups(schedule_program):
+            if len(group.effects) < 2:
+                continue
+            grouped_by_start[group.start] = group
+            grouped_indices.update(group.operation_indices)
+
     kernel_number = 0
     return_number = 0
-    for op in program.operations:
+    for operation_index, op in enumerate(program.operations):
+        group = grouped_by_start.get(operation_index)
+        if group is not None:
+            lines.extend(emit_parallel_effect_group(group, types, layouts))
+            continue
+        if operation_index in grouped_indices:
+            continue
+
         if isinstance(op, LoopAlloc):
             continue
         if isinstance(op, LoopInput):
