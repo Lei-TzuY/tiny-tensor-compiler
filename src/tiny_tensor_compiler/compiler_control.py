@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 
 
-def normalize_compiler_timeout(timeout: float | int | None) -> float | None:
+def normalize_compiler_timeout(timeout: float | None) -> float | None:
     """Validate an optional wall-clock bound for one external compiler process."""
     if timeout is None:
         return None
