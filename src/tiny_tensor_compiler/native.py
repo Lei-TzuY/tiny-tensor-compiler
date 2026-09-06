@@ -21,7 +21,12 @@ import numpy as np
 
 from . import native_cache_lock
 from .c_abi_codegen import generate_c
-from .compiler_control import normalize_compiler_timeout
+from .compiler_control import (
+    normalize_compile_deadline,
+    normalize_compiler_timeout,
+    remaining_compile_deadline,
+    start_compile_deadline,
+)
 from .input_validation import prepare_runtime_inputs
 from .ir import TensorType
 from .loop_ir import LoopProgram
@@ -43,6 +48,26 @@ class NativeCompilationTimeout(NativeCompilationError):
         super().__init__(
             f"native C compilation exceeded compiler timeout of {timeout:g}s: "
             f"{shlex.join(self.command)}"
+        )
+
+
+class NativeCompilationDeadlineExceeded(NativeCompilationError):
+    """Raised when one total native build budget expires before an artifact is ready."""
+
+    def __init__(
+        self,
+        stage: str,
+        deadline: float,
+        command: Sequence[str] = (),
+    ) -> None:
+        self.stage = stage
+        self.deadline = deadline
+        self.command = tuple(command)
+        detail = f" during {stage}"
+        if self.command:
+            detail += f": {shlex.join(self.command)}"
+        super().__init__(
+            f"native compilation exceeded total compile deadline of {deadline:g}s{detail}"
         )
 
 
@@ -70,12 +95,14 @@ class NativeExecutable:
         source: str,
         persistent_library: Path | None,
         compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
     ) -> None:
         self._program = program
         self._command = command
         self._source = source
         self._persistent_library = persistent_library
         self._compiler_timeout = compiler_timeout
+        self._compile_deadline = compile_deadline
 
     def execute(
         self,
@@ -92,6 +119,7 @@ class NativeExecutable:
                 command,
                 self._persistent_library,
                 compiler_timeout=self._compiler_timeout,
+                compile_deadline=self._compile_deadline,
             )
             return _execute_artifact(self._program, artifact, runtime_inputs, outputs)
 
@@ -116,9 +144,11 @@ def compile_native(
     cache_dir: str | os.PathLike[str] | None = None,
     *,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> NativeExecutable:
     """Eagerly compile/load a loop program and return a reusable executable."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
+    normalized_deadline = normalize_compile_deadline(compile_deadline)
     command = _compiler_command(compiler)
     source = generate_c(program)
     persistent_library = _persistent_library_path(cache_dir, source, command)
@@ -129,6 +159,7 @@ def compile_native(
             command,
             persistent_library,
             compiler_timeout=normalized_timeout,
+            compile_deadline=normalized_deadline,
         )
 
     return NativeExecutable(
@@ -137,6 +168,7 @@ def compile_native(
         source=source,
         persistent_library=persistent_library,
         compiler_timeout=normalized_timeout,
+        compile_deadline=normalized_deadline,
     )
 
 
@@ -148,9 +180,11 @@ def execute_native(
     out: NativeOutput = None,
     *,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> ExecutionResult:
     """Compile or reuse generated C and execute it on the native CPU."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
+    normalized_deadline = normalize_compile_deadline(compile_deadline)
     runtime_inputs = prepare_runtime_inputs(program.input_types, inputs)
     outputs = _prepare_native_outputs(program, out, runtime_inputs)
     command = _compiler_command(compiler)
@@ -163,6 +197,7 @@ def execute_native(
             command,
             persistent_library,
             compiler_timeout=normalized_timeout,
+            compile_deadline=normalized_deadline,
         )
         return _execute_artifact(program, artifact, runtime_inputs, outputs)
 
@@ -297,6 +332,7 @@ def _get_or_compile_artifact(
     persistent_library: Path | None,
     *,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> _NativeArtifact:
     persistent_identity = str(persistent_library) if persistent_library is not None else None
     key = (tuple(command), source, persistent_identity)
@@ -304,11 +340,14 @@ def _get_or_compile_artifact(
     if artifact is not None:
         return artifact
 
+    deadline_at = start_compile_deadline(compile_deadline)
     if persistent_library is None:
         artifact = _compile_artifact(
             source,
             command,
             compiler_timeout=compiler_timeout,
+            deadline_at=deadline_at,
+            compile_deadline=compile_deadline,
         )
     else:
         artifact = _get_or_compile_persistent_artifact(
@@ -316,6 +355,8 @@ def _get_or_compile_artifact(
             command,
             persistent_library,
             compiler_timeout=compiler_timeout,
+            deadline_at=deadline_at,
+            compile_deadline=compile_deadline,
         )
     _NATIVE_CACHE[key] = artifact
     return artifact
@@ -326,6 +367,8 @@ def _compile_artifact(
     command: list[str],
     *,
     compiler_timeout: float | None = None,
+    deadline_at: float | None = None,
+    compile_deadline: float | None = None,
 ) -> _NativeArtifact:
     directory_path = Path(tempfile.mkdtemp(prefix="tiny_tensor_compiler_"))
     try:
@@ -334,6 +377,8 @@ def _compile_artifact(
             command,
             directory_path,
             compiler_timeout=compiler_timeout,
+            deadline_at=deadline_at,
+            compile_deadline=compile_deadline,
         )
         library = _load_library(library_path)
     except Exception:
@@ -349,9 +394,21 @@ def _get_or_compile_persistent_artifact(
     library_path: Path,
     *,
     compiler_timeout: float | None = None,
+    deadline_at: float | None = None,
+    compile_deadline: float | None = None,
 ) -> _NativeArtifact:
     try:
-        with _persistent_cache_lease(library_path):
+        lease = (
+            _persistent_cache_lease(library_path)
+            if deadline_at is None
+            else _persistent_cache_lease(library_path, deadline_at=deadline_at)
+        )
+        with lease:
+            _require_compile_deadline(
+                deadline_at,
+                compile_deadline,
+                stage="persistent-cache lease",
+            )
             cached = _stage_existing_persistent_artifact(library_path)
             if cached is not None:
                 return cached
@@ -364,6 +421,8 @@ def _get_or_compile_persistent_artifact(
                     command,
                     build_directory,
                     compiler_timeout=compiler_timeout,
+                    deadline_at=deadline_at,
+                    compile_deadline=compile_deadline,
                 )
                 compiled_manifest = build_directory / _PERSISTENT_MANIFEST_NAME
                 _write_persistent_manifest(
@@ -390,6 +449,15 @@ def _get_or_compile_persistent_artifact(
                 return staged
             finally:
                 shutil.rmtree(build_directory, ignore_errors=True)
+    except native_cache_lock.PersistentCacheLeaseDeadlineExceeded as error:
+        if compile_deadline is None:  # pragma: no cover - constructor path requires a deadline
+            raise NativeCompilationError(
+                f"failed to acquire persistent native cache lease: {error}"
+            ) from error
+        raise NativeCompilationDeadlineExceeded(
+            "persistent-cache lease",
+            compile_deadline,
+        ) from error
     except native_cache_lock.PersistentCacheLeaseError as error:
         raise NativeCompilationError(
             f"failed to acquire persistent native cache lease: {error}"
@@ -402,12 +470,20 @@ def _compile_source(
     directory_path: Path,
     *,
     compiler_timeout: float | None = None,
+    deadline_at: float | None = None,
+    compile_deadline: float | None = None,
 ) -> Path:
     source_path = directory_path / "program.c"
     library_path = directory_path / _library_name()
     source_path.write_text(source, encoding="utf-8")
     compile_command = _build_compile_command(command, source_path.name, library_path.name)
-    if compiler_timeout is None:
+    effective_timeout, deadline_limited = _effective_compiler_timeout(
+        compile_command,
+        compiler_timeout=compiler_timeout,
+        deadline_at=deadline_at,
+        compile_deadline=compile_deadline,
+    )
+    if effective_timeout is None:
         completed = subprocess.run(
             compile_command,
             cwd=directory_path,
@@ -419,7 +495,9 @@ def _compile_source(
         completed = _run_compiler_with_timeout(
             compile_command,
             directory_path,
-            compiler_timeout,
+            effective_timeout,
+            deadline_limited=deadline_limited,
+            compile_deadline=compile_deadline,
         )
     if completed.returncode != 0:
         details = completed.stderr.strip() or completed.stdout.strip() or "no compiler output"
@@ -429,10 +507,50 @@ def _compile_source(
     return library_path
 
 
+def _effective_compiler_timeout(
+    compile_command: list[str],
+    *,
+    compiler_timeout: float | None,
+    deadline_at: float | None,
+    compile_deadline: float | None,
+) -> tuple[float | None, bool]:
+    remaining = remaining_compile_deadline(deadline_at)
+    if remaining is None:
+        return compiler_timeout, False
+    if remaining <= 0.0:
+        if compile_deadline is None:  # pragma: no cover - absolute deadline has an owner
+            raise RuntimeError("compile deadline duration missing for active deadline")
+        raise NativeCompilationDeadlineExceeded(
+            "compiler",
+            compile_deadline,
+            compile_command,
+        )
+    if compiler_timeout is None or remaining < compiler_timeout:
+        return remaining, True
+    return compiler_timeout, False
+
+
+def _require_compile_deadline(
+    deadline_at: float | None,
+    compile_deadline: float | None,
+    *,
+    stage: str,
+) -> None:
+    remaining = remaining_compile_deadline(deadline_at)
+    if remaining is None or remaining > 0.0:
+        return
+    if compile_deadline is None:  # pragma: no cover - absolute deadline has an owner
+        raise RuntimeError("compile deadline duration missing for active deadline")
+    raise NativeCompilationDeadlineExceeded(stage, compile_deadline)
+
+
 def _run_compiler_with_timeout(
     compile_command: list[str],
     directory_path: Path,
     timeout: float,
+    *,
+    deadline_limited: bool = False,
+    compile_deadline: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     popen_kwargs: dict[str, Any] = {
         "cwd": directory_path,
@@ -451,6 +569,14 @@ def _run_compiler_with_timeout(
     except subprocess.TimeoutExpired as error:
         _terminate_compiler_process_tree(process)
         _reap_timed_out_compiler(process)
+        if deadline_limited:
+            if compile_deadline is None:  # pragma: no cover - deadline-limited path owns it
+                raise RuntimeError("compile deadline duration missing for active deadline") from error
+            raise NativeCompilationDeadlineExceeded(
+                "compiler",
+                compile_deadline,
+                compile_command,
+            ) from error
         raise NativeCompilationTimeout(compile_command, float(error.timeout)) from error
 
     return subprocess.CompletedProcess(

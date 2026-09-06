@@ -13,7 +13,7 @@ from .admission import (
 )
 from .analysis import CompilerReport
 from .backends.cpu import execute_loop
-from .compiler_control import normalize_compiler_timeout
+from .compiler_control import normalize_compile_deadline, normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
 from .input_binding import BorrowedLoopProgram
 from .input_binding import borrow_inputs as bind_borrowed_inputs
@@ -100,6 +100,7 @@ class DynamicExecutable:
         parallel: bool = False,
         budget: CompileBudget | None = None,
         compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
     ) -> None:
         if budget is not None and not isinstance(budget, CompileBudget):
             raise TypeError("budget must be a CompileBudget or None")
@@ -111,6 +112,7 @@ class DynamicExecutable:
         self._parallel = parallel
         self._budget = budget
         self._compiler_timeout = normalize_compiler_timeout(compiler_timeout)
+        self._compile_deadline = normalize_compile_deadline(compile_deadline)
         self._specializations: dict[tuple[int, ...], NativeExecutable] = {}
         self._lock = threading.RLock()
 
@@ -163,43 +165,19 @@ class DynamicExecutable:
                 self._budget,
             )
             concrete = specialize_module(self._module, normalized)
-            if self._budget is None:
-                if self._compiler_timeout is None:
-                    executable = compile_module(
-                        concrete,
-                        compiler=self._compiler,
-                        cache_dir=self._cache_dir,
-                        borrow_inputs=self._borrow_inputs,
-                        parallel=self._parallel,
-                    )
-                else:
-                    executable = compile_module(
-                        concrete,
-                        compiler=self._compiler,
-                        cache_dir=self._cache_dir,
-                        borrow_inputs=self._borrow_inputs,
-                        parallel=self._parallel,
-                        compiler_timeout=self._compiler_timeout,
-                    )
-            elif self._compiler_timeout is None:
-                executable = compile_module(
-                    concrete,
-                    compiler=self._compiler,
-                    cache_dir=self._cache_dir,
-                    borrow_inputs=self._borrow_inputs,
-                    parallel=self._parallel,
-                    budget=self._budget,
-                )
-            else:
-                executable = compile_module(
-                    concrete,
-                    compiler=self._compiler,
-                    cache_dir=self._cache_dir,
-                    borrow_inputs=self._borrow_inputs,
-                    parallel=self._parallel,
-                    budget=self._budget,
-                    compiler_timeout=self._compiler_timeout,
-                )
+            kwargs: dict[str, Any] = {
+                "compiler": self._compiler,
+                "cache_dir": self._cache_dir,
+                "borrow_inputs": self._borrow_inputs,
+                "parallel": self._parallel,
+            }
+            if self._budget is not None:
+                kwargs["budget"] = self._budget
+            if self._compiler_timeout is not None:
+                kwargs["compiler_timeout"] = self._compiler_timeout
+            if self._compile_deadline is not None:
+                kwargs["compile_deadline"] = self._compile_deadline
+            executable = compile_module(concrete, **kwargs)
             self._specializations[key] = executable
             return executable
 
@@ -232,6 +210,7 @@ class AdaptiveDynamicExecutable:
         borrow_inputs: bool = False,
         parallel: bool = False,
         compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
     ) -> None:
         if not isinstance(budget, CompileBudget):
             raise TypeError("budget must be a CompileBudget")
@@ -243,6 +222,7 @@ class AdaptiveDynamicExecutable:
         self._borrow_inputs = borrow_inputs
         self._parallel = parallel
         self._compiler_timeout = normalize_compiler_timeout(compiler_timeout)
+        self._compile_deadline = normalize_compile_deadline(compile_deadline)
         self._specializations: dict[tuple[int, ...], AdaptiveExecutable] = {}
         self._lock = threading.RLock()
 
@@ -308,25 +288,18 @@ class AdaptiveDynamicExecutable:
                 self._budget,
             )
             concrete = specialize_module(self._module, normalized)
-            if self._compiler_timeout is None:
-                executable = compile_adaptive_module(
-                    concrete,
-                    budget=self._budget,
-                    compiler=self._compiler,
-                    cache_dir=self._cache_dir,
-                    borrow_inputs=self._borrow_inputs,
-                    parallel=self._parallel,
-                )
-            else:
-                executable = compile_adaptive_module(
-                    concrete,
-                    budget=self._budget,
-                    compiler=self._compiler,
-                    cache_dir=self._cache_dir,
-                    borrow_inputs=self._borrow_inputs,
-                    parallel=self._parallel,
-                    compiler_timeout=self._compiler_timeout,
-                )
+            kwargs: dict[str, Any] = {
+                "budget": self._budget,
+                "compiler": self._compiler,
+                "cache_dir": self._cache_dir,
+                "borrow_inputs": self._borrow_inputs,
+                "parallel": self._parallel,
+            }
+            if self._compiler_timeout is not None:
+                kwargs["compiler_timeout"] = self._compiler_timeout
+            if self._compile_deadline is not None:
+                kwargs["compile_deadline"] = self._compile_deadline
+            executable = compile_adaptive_module(concrete, **kwargs)
             self._specializations[key] = executable
             return executable
 
@@ -347,9 +320,11 @@ def compile_module(
     parallel: bool = False,
     budget: CompileBudget | None = None,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> NativeExecutable:
     """Lower verified concrete tensor IR through the native pipeline and compile eagerly."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
+    normalized_deadline = normalize_compile_deadline(compile_deadline)
     if has_symbolic_shapes(module):
         raise ValueError(
             "compile_module requires concrete tensor shapes; use compile_dynamic_module "
@@ -358,33 +333,17 @@ def compile_module(
     if budget is not None:
         enforce_compile_budget(module, budget)
     loops = _lower_concrete_module(module, borrow_inputs=borrow_inputs)
+    kwargs: dict[str, Any] = {
+        "compiler": compiler,
+        "cache_dir": cache_dir,
+    }
     if parallel:
-        if normalized_timeout is None:
-            return compile_native(
-                loops,
-                compiler=compiler,
-                cache_dir=cache_dir,
-                parallel=True,
-            )
-        return compile_native(
-            loops,
-            compiler=compiler,
-            cache_dir=cache_dir,
-            parallel=True,
-            compiler_timeout=normalized_timeout,
-        )
-    if normalized_timeout is None:
-        return compile_native(
-            loops,
-            compiler=compiler,
-            cache_dir=cache_dir,
-        )
-    return compile_native(
-        loops,
-        compiler=compiler,
-        cache_dir=cache_dir,
-        compiler_timeout=normalized_timeout,
-    )
+        kwargs["parallel"] = True
+    if normalized_timeout is not None:
+        kwargs["compiler_timeout"] = normalized_timeout
+    if normalized_deadline is not None:
+        kwargs["compile_deadline"] = normalized_deadline
+    return compile_native(loops, **kwargs)
 
 
 def compile_adaptive_module(
@@ -396,11 +355,13 @@ def compile_adaptive_module(
     borrow_inputs: bool = False,
     parallel: bool = False,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> AdaptiveExecutable:
     """Select native compilation or verified Loop CPU from one structural budget decision."""
     if not isinstance(budget, CompileBudget):
         raise TypeError("budget must be a CompileBudget")
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
+    normalized_deadline = normalize_compile_deadline(compile_deadline)
     if has_symbolic_shapes(module):
         raise ValueError(
             "compile_adaptive_module requires concrete tensor shapes; use "
@@ -418,23 +379,17 @@ def compile_adaptive_module(
             budget_exceeded=error,
         )
 
-    if normalized_timeout is None:
-        native = compile_module(
-            module,
-            compiler=compiler,
-            cache_dir=cache_dir,
-            borrow_inputs=borrow_inputs,
-            parallel=parallel,
-        )
-    else:
-        native = compile_module(
-            module,
-            compiler=compiler,
-            cache_dir=cache_dir,
-            borrow_inputs=borrow_inputs,
-            parallel=parallel,
-            compiler_timeout=normalized_timeout,
-        )
+    kwargs: dict[str, Any] = {
+        "compiler": compiler,
+        "cache_dir": cache_dir,
+        "borrow_inputs": borrow_inputs,
+        "parallel": parallel,
+    }
+    if normalized_timeout is not None:
+        kwargs["compiler_timeout"] = normalized_timeout
+    if normalized_deadline is not None:
+        kwargs["compile_deadline"] = normalized_deadline
+    native = compile_module(module, **kwargs)
     return AdaptiveExecutable(
         backend="native",
         report=report,
@@ -451,6 +406,7 @@ def compile_dynamic_module(
     parallel: bool = False,
     budget: CompileBudget | None = None,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> DynamicExecutable:
     """Prepare lazy native specializations for runtime symbolic dimensions."""
     return DynamicExecutable(
@@ -461,6 +417,7 @@ def compile_dynamic_module(
         parallel=parallel,
         budget=budget,
         compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
     )
 
 
@@ -473,6 +430,7 @@ def compile_adaptive_dynamic_module(
     borrow_inputs: bool = False,
     parallel: bool = False,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> AdaptiveDynamicExecutable:
     """Prepare per-binding adaptive native-or-loop specializations."""
     if not isinstance(budget, CompileBudget):
@@ -485,6 +443,7 @@ def compile_adaptive_dynamic_module(
         borrow_inputs=borrow_inputs,
         parallel=parallel,
         compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
     )
 
 

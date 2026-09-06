@@ -35,7 +35,7 @@ This fail-closed contract remains unchanged by adaptive compilation. Callers tha
 - within budget: eagerly compile the ordinary native executable;
 - concrete structural budget exceeded: retain the ordinary verified post-lowering Loop program and execute it through the existing CPU Loop interpreter.
 
-The returned `AdaptiveExecutable` exposes `backend`, `report`, and `budget_exceeded`, so the decision is observable rather than hidden. `backend` is exactly `"native"` or `"loop"`. The loop path is selected only when `enforce_compile_budget()` raises `CompileBudgetExceeded`; dynamic-specialization admission failures, verifier failures, symbolic-shape errors, native compiler/load failures, compiler timeouts, and runtime input validation errors are not swallowed or converted into fallback.
+The returned `AdaptiveExecutable` exposes `backend`, `report`, and `budget_exceeded`, so the decision is observable rather than hidden. `backend` is exactly `"native"` or `"loop"`. The loop path is selected only when `enforce_compile_budget()` raises `CompileBudgetExceeded`; dynamic-specialization admission failures, verifier failures, symbolic-shape errors, native compiler/load failures, compiler timeouts, total compile-deadline failures, and runtime input validation errors are not swallowed or converted into fallback.
 
 `borrow_inputs=True` is applied through the same verified input-lifetime transform on either selected path. `parallel=True` affects only an admitted native specialization; the Loop CPU fallback does not pretend to provide OpenMP execution.
 
@@ -55,24 +55,36 @@ A backend/budget decision is made once per cached binding. Repeated use of the s
 
 The first cardinality policy is deliberately fail-closed rather than LRU. Removing a Python dictionary entry would not prove that process-local native artifacts, loaded shared libraries, persistent cache files, or other backend resources had actually been released. Eviction therefore remains a separate future resource-lifecycle problem rather than being implied by this admission cap.
 
-## External compiler subprocess timeout
+## Native compilation time controls
 
-Native compilation APIs accept the optional `compiler_timeout` policy. It is either `None` or a positive finite number of seconds. Boolean, zero, negative, NaN, and infinite values are rejected before compiler lookup.
+Native compilation exposes two distinct, composable wall-clock policies.
 
-The policy bounds one launched external C compiler invocation and, when that explicit timeout is enabled, also terminates the ordinary descendant process tree created by that compiler. It is threaded consistently through serial and OpenMP native compilation plus concrete, dynamic, and adaptive high-level compilation. A timed-out compiler raises `NativeCompilationTimeout`, which remains a `NativeCompilationError` and exposes the exact command plus configured timeout for diagnostics.
+`compiler_timeout` bounds **one launched external C compiler process**. It is either `None` or a positive finite number of seconds. Boolean, zero, negative, NaN, and infinite values are rejected before compiler lookup. When enabled, POSIX launches the compiler in a new session and kills its process group on timeout; Windows launches a new process group and uses `taskkill /T /F` for the compiler PID before reaping the parent process. A timeout raises `NativeCompilationTimeout`, which remains a `NativeCompilationError` and exposes the exact command plus configured process timeout.
 
-With `compiler_timeout=None`, the historical `subprocess.run(...)` compilation path is preserved. With an explicit timeout, POSIX launches the compiler in a new session and kills its process group on timeout; Windows launches a new process group and uses `taskkill /T /F` for the compiler PID before reaping the parent process. Cross-platform regression coverage uses a fake compiler that spawns a delayed child writer and proves the descendant does not survive the timeout boundary.
+`compile_deadline` instead bounds **one native artifact acquisition attempt after a process-cache miss**. It is also either `None` or a positive finite number of seconds. The implementation converts the configured duration to one absolute monotonic deadline and carries that same deadline through persistent-cache lease acquisition and, when compilation is required, into the external compiler process. Time already spent waiting for the cross-process cache lease is therefore consumed from the compiler's remaining budget instead of starting a fresh timer.
 
-A timeout never becomes an adaptive Loop fallback. Adaptive fallback remains reserved exclusively for an explicit concrete `CompileBudgetExceeded` decision made before native compilation begins.
+The total deadline deliberately starts at the artifact-acquisition boundary, not at Python graph lowering, compiler-command lookup, or native execution. Process-local native-cache hits return the existing loaded artifact immediately and do not start a new deadline. A persistent on-disk cache hit still has to acquire the digest lease within the remaining total deadline, but once the verified artifact is staged no compiler is launched.
 
-Timeout cleanup uses the existing artifact durability boundaries:
+If both controls are configured, the launched compiler receives the tighter of `compiler_timeout` and the remaining `compile_deadline`. The exception type identifies which policy actually exhausted:
 
-- transient build directories are removed after timeout;
-- persistent-cache temporary build directories are removed and no library/manifest is published from a timed-out build;
-- timeout is not part of native artifact identity, so an existing process or persistent cache hit reuses the already-compiled artifact without launching a compiler merely because the caller supplies a different timeout;
-- reusable native/dynamic handles retain the timeout policy for any later compilation that is actually required after a cache miss.
+- `NativeCompilationTimeout`: the explicit per-process `compiler_timeout` was tighter;
+- `NativeCompilationDeadlineExceeded(stage="compiler", ...)`: the remaining total deadline was tighter;
+- `NativeCompilationDeadlineExceeded(stage="persistent-cache lease", ...)`: the total deadline expired before the lease could be acquired.
 
-The timeout is intentionally **not** a total compilation deadline. Time spent waiting for a persistent-cache lease is outside this policy because no compiler process tree has started yet. It also does not limit native execution after compilation. Process-tree cancellation covers ordinary descendants that remain in the launched compiler's POSIX process group or Windows process tree; it is not a sandbox guarantee for a deliberately detached process that escapes those operating-system relationships.
+The deadline error remains a `NativeCompilationError` and exposes the configured total duration, failing stage, and compiler command when a compiler process had been selected. A deadline exhausted at the cache-lease stage does not launch the compiler.
+
+Without `compile_deadline`, historical persistent-cache lease behavior is preserved. POSIX may block on the operating-system lease as before; Windows retains its independent 300-second lease-safety timeout. With an explicit total deadline, POSIX and Windows both poll non-blockingly so the caller's absolute deadline can expire first. The Windows 300-second safety bound still applies if it is tighter than a longer caller deadline.
+
+Both controls are threaded through serial and OpenMP native compilation plus concrete, dynamic, and adaptive high-level compilation. Reusable dynamic handles retain the configured policy for each future specialization that actually requires a new native artifact. An adaptive structural-budget fallback occurs before native artifact acquisition and therefore does not consume or convert a native compilation deadline into Loop fallback.
+
+Timeout/deadline cleanup keeps the existing artifact durability boundaries:
+
+- transient build directories are removed after a timed-out compiler;
+- persistent-cache temporary build directories are removed and no library/manifest is published from an incomplete build;
+- compiler timeout and total deadline are policy, not native artifact identity, so changing either does not create another cache key;
+- a verified process or persistent cache hit reuses the already-compiled artifact without launching a compiler merely because the caller supplies a tighter control.
+
+Neither policy limits native execution after compilation. Process-tree cancellation covers ordinary descendants that remain in the launched compiler's POSIX process group or Windows process tree; it is not a sandbox guarantee for a deliberately detached process that escapes those operating-system relationships.
 
 ## Evidence boundary
 
@@ -85,8 +97,8 @@ The concrete report metrics are structural compiler facts, not runtime resource 
 
 Accordingly, `CompileBudget` is a deterministic compiler admission policy, not a security sandbox, denial-of-service guarantee, memory limiter, or benchmark. Adaptive Loop fallback also does not claim to reduce runtime memory or improve performance; it only avoids native compilation for the explicit concrete over-budget policy case while preserving verified executable semantics.
 
-`compiler_timeout` is likewise a bounded wait plus best-effort operating-system process-tree cancellation for the launched compiler invocation, not a CPU quota, memory limit, trusted sandbox, runtime timeout, cache-lock deadline, or general denial-of-service guarantee. It does not guarantee termination of intentionally detached descendants that escape the managed POSIX process group or Windows process tree. No security/isolation claim is implied by timeout enforcement.
+`compiler_timeout` and `compile_deadline` are wall-clock control policies, not CPU quotas, memory limits, trusted sandboxes, runtime execution timeouts, or general denial-of-service guarantees. The total deadline covers persistent-cache lease waiting and a required compiler process after a process-cache miss; it does not bound Python lowering, filesystem operations before artifact lookup, native library execution, or deliberately detached compiler descendants that escape the managed process tree. No security/isolation or performance claim is implied by either policy.
 
 ## Phase boundary
 
-Concrete structural admission, adaptive native-or-Loop policy, per-handle dynamic-specialization cardinality, and bounded external compiler process-tree timeout are now separate, composable controls. Adding more counters, cache-size aliases, eviction heuristics, fallback modes, timeout aliases, or retry knobs without a distinct enforceable lifecycle requirement would be low-value farming. The next runtime-control promotion should require genuinely new semantics—such as resource-accounted specialization eviction with proven native-artifact release, a total compilation deadline that also bounds persistent-cache lease waiting and other pre/post-compiler phases, or another architectural frontier—rather than disguising another threshold as a subsystem.
+Concrete structural admission, adaptive native-or-Loop policy, per-handle dynamic-specialization cardinality, per-process compiler cancellation, and a shared lease-plus-compiler artifact-acquisition deadline are now separate, composable controls. Adding more timeout aliases, retry knobs, arbitrary stage timers, or threshold variants without a distinct enforceable lifecycle requirement would be low-value farming. The next runtime-control promotion should require genuinely new resource semantics—such as resource-accounted specialization eviction with proven native-artifact release—or the project should move to another architectural frontier rather than disguise another timer as a subsystem.

@@ -7,6 +7,7 @@ from typing import Any
 from .input_binding import BorrowedLoopProgram
 from .loop_ir import LoopProgram
 from .native import (
+    NativeCompilationDeadlineExceeded,
     NativeCompilationError,
     NativeCompilationTimeout,
     NativeExecutable,
@@ -27,24 +28,22 @@ def compile_native(
     *,
     parallel: bool = False,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ) -> NativeExecutable:
-    """Compile verified Loop IR, optionally selecting barriered OpenMP kernel scheduling."""
+    """Compile verified Loop IR with optional process and total wall-clock bounds."""
+    kwargs = _compile_control_kwargs(compiler_timeout, compile_deadline)
     if parallel:
-        if compiler_timeout is None:
-            return compile_parallel_native(program, compiler=compiler, cache_dir=cache_dir)
         return compile_parallel_native(
             program,
             compiler=compiler,
             cache_dir=cache_dir,
-            compiler_timeout=compiler_timeout,
+            **kwargs,
         )
-    if compiler_timeout is None:
-        return _compile_native_serial(program, compiler=compiler, cache_dir=cache_dir)
     return _compile_native_serial(
         program,
         compiler=compiler,
         cache_dir=cache_dir,
-        compiler_timeout=compiler_timeout,
+        **kwargs,
     )
 
 
@@ -57,38 +56,42 @@ def execute_native(
     *,
     parallel: bool = False,
     compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
 ):
     """Execute verified Loop IR through the serial or OpenMP native backend."""
+    kwargs = _compile_control_kwargs(compiler_timeout, compile_deadline)
     if not parallel:
-        if compiler_timeout is None:
-            return _execute_native_serial(
-                program,
-                compiler=compiler,
-                inputs=inputs,
-                cache_dir=cache_dir,
-                out=out,
-            )
         return _execute_native_serial(
             program,
             compiler=compiler,
             inputs=inputs,
             cache_dir=cache_dir,
             out=out,
-            compiler_timeout=compiler_timeout,
+            **kwargs,
         )
-    if compiler_timeout is None:
-        executable = compile_parallel_native(program, compiler=compiler, cache_dir=cache_dir)
-    else:
-        executable = compile_parallel_native(
-            program,
-            compiler=compiler,
-            cache_dir=cache_dir,
-            compiler_timeout=compiler_timeout,
-        )
+    executable = compile_parallel_native(
+        program,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        **kwargs,
+    )
     return executable(inputs=inputs, out=out)
 
 
+def _compile_control_kwargs(
+    compiler_timeout: float | None,
+    compile_deadline: float | None,
+) -> dict[str, float]:
+    kwargs: dict[str, float] = {}
+    if compiler_timeout is not None:
+        kwargs["compiler_timeout"] = compiler_timeout
+    if compile_deadline is not None:
+        kwargs["compile_deadline"] = compile_deadline
+    return kwargs
+
+
 __all__ = [
+    "NativeCompilationDeadlineExceeded",
     "NativeCompilationError",
     "NativeCompilationTimeout",
     "NativeExecutable",
