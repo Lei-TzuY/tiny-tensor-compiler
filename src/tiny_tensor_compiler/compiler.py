@@ -5,7 +5,12 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
+from .admission import (
+    CompileBudget,
+    CompileBudgetExceeded,
+    DynamicSpecializationBudgetExceeded,
+    enforce_compile_budget,
+)
 from .analysis import CompilerReport
 from .backends.cpu import execute_loop
 from .compiler_control import normalize_compiler_timeout
@@ -151,6 +156,12 @@ class DynamicExecutable:
             executable = self._specializations.get(key)
             if executable is not None:
                 return executable
+            _enforce_dynamic_specialization_budget(
+                self._symbols,
+                self._specializations,
+                key,
+                self._budget,
+            )
             concrete = specialize_module(self._module, normalized)
             if self._budget is None:
                 if self._compiler_timeout is None:
@@ -290,6 +301,12 @@ class AdaptiveDynamicExecutable:
             executable = self._specializations.get(key)
             if executable is not None:
                 return executable
+            _enforce_dynamic_specialization_budget(
+                self._symbols,
+                self._specializations,
+                key,
+                self._budget,
+            )
             concrete = specialize_module(self._module, normalized)
             if self._compiler_timeout is None:
                 executable = compile_adaptive_module(
@@ -514,4 +531,26 @@ def _display_binding(
     return tuple(
         (symbol.name, size)
         for symbol, size in zip(symbols, key, strict=True)
+    )
+
+
+def _enforce_dynamic_specialization_budget(
+    symbols: tuple[SymbolicDim, ...],
+    specializations: Mapping[tuple[int, ...], Any],
+    attempted_key: tuple[int, ...],
+    budget: CompileBudget | None,
+) -> None:
+    if budget is None or budget.max_dynamic_specializations is None:
+        return
+    limit = budget.max_dynamic_specializations
+    if len(specializations) < limit:
+        return
+    cached_bindings = tuple(
+        _display_binding(symbols, key)
+        for key in sorted(specializations)
+    )
+    raise DynamicSpecializationBudgetExceeded(
+        limit=limit,
+        attempted_binding=_display_binding(symbols, attempted_key),
+        cached_bindings=cached_bindings,
     )
