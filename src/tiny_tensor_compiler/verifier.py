@@ -177,11 +177,12 @@ def _verify_relu(op_index: int, op: Operation) -> None:
 
 def _verify_reduction(op_index: int, op: Operation) -> None:
     _expect_arity(op_index, op, operands=1, results=1)
-    if set(op.attrs) not in (set(), {"axis"}):
+    allowed = {"axis", "dtype"}
+    if not set(op.attrs) <= allowed:
         _fail(
             op_index,
             op,
-            f"{op.opcode} accepts only an optional canonical 'axis' attribute",
+            f"{op.opcode} accepts only optional canonical 'axis' and 'dtype' attributes",
         )
     operator = ReductionOperator.from_opcode(op.opcode)
     axis = op.attrs.get("axis")
@@ -195,8 +196,27 @@ def _verify_reduction(op_index: int, op: Operation) -> None:
             op,
             f"{op.opcode} axis attribute must use canonical normalized ordering",
         )
+
+    dtype_attr = op.attrs.get("dtype")
+    if dtype_attr is None:
+        requested_dtype = None
+    else:
+        if not isinstance(dtype_attr, str):
+            _fail(op_index, op, f"{op.opcode} dtype attribute must be a canonical dtype string")
+        try:
+            requested_dtype = DType(dtype_attr)
+        except ValueError:
+            _fail(op_index, op, f"{op.opcode} dtype attribute is unsupported: {dtype_attr!r}")
+        if requested_dtype == op.operands[0].type.dtype:
+            _fail(op_index, op, f"{op.opcode} same-dtype requests must omit the dtype attribute")
+
     try:
-        expected_type = infer_reduction(op.operands[0].type, operator, canonical_axis)
+        expected_type = infer_reduction(
+            op.operands[0].type,
+            operator,
+            canonical_axis,
+            requested_dtype,
+        )
     except TypeInferenceError as exc:
         _fail(op_index, op, str(exc))
     if op.results[0].type != expected_type:
