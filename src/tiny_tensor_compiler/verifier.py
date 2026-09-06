@@ -7,12 +7,14 @@ import numpy as np
 from .inference import (
     TypeInferenceError,
     infer_binary,
+    infer_concat,
     infer_reduction,
     infer_relu,
     infer_reshape,
     infer_reverse,
     infer_slice,
     infer_transpose,
+    normalize_concat_axis,
     normalize_reduction_axes,
 )
 from .ir import DType, Module, Operation, TensorType, Value
@@ -69,6 +71,8 @@ def verify(module: Module) -> None:
             _verify_binary(op_index, op)
         elif op.opcode == "relu":
             _verify_relu(op_index, op)
+        elif op.opcode == "concat":
+            _verify_concat(op_index, op)
         elif op.opcode in REDUCTION_OPCODES:
             _verify_reduction(op_index, op)
         elif op.opcode in {"reshape", "view"}:
@@ -176,6 +180,30 @@ def _verify_relu(op_index: int, op: Operation) -> None:
             op_index,
             op,
             f"result type {op.results[0].type} does not match operand type {expected_type}",
+        )
+
+
+def _verify_concat(op_index: int, op: Operation) -> None:
+    if len(op.operands) < 2 or len(op.results) != 1:
+        _fail(op_index, op, "concatenate requires at least two operands and one result")
+    if set(op.attrs) != {"axis"}:
+        _fail(op_index, op, "concatenate requires exactly one canonical 'axis' attribute")
+    axis = op.attrs["axis"]
+    try:
+        canonical_axis = normalize_concat_axis(op.operands[0].type, axis)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if canonical_axis != axis:
+        _fail(op_index, op, "concatenate axis attribute must use canonical normalized ordering")
+    try:
+        expected_type = infer_concat(tuple(value.type for value in op.operands), canonical_axis)
+    except TypeInferenceError as exc:
+        _fail(op_index, op, str(exc))
+    if op.results[0].type != expected_type:
+        _fail(
+            op_index,
+            op,
+            f"concat result type {op.results[0].type} does not match inferred type {expected_type}",
         )
 
 
