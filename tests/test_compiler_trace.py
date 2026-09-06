@@ -3,9 +3,10 @@ import json
 
 import pytest
 
-from tiny_tensor_compiler import GraphBuilder, SymbolicDim
 from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.compiler_trace import CompilerTracePhase, trace_module
+from tiny_tensor_compiler.frontend import GraphBuilder
+from tiny_tensor_compiler.ir import SymbolicDim
 
 
 _EXPECTED_PHASES = (
