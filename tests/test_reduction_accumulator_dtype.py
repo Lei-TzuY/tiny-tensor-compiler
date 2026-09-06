@@ -6,12 +6,16 @@ import pytest
 
 from tiny_tensor_compiler import (
     GraphBuilder,
+    SymbolicDim,
+    common_subexpression_eliminate,
+    compile_dynamic_module,
     compile_module,
     execute_loop,
     execute_reference,
     generate_c,
     lower_to_cpu,
     lower_to_loops,
+    verify,
 )
 from tiny_tensor_compiler.inference import TypeInferenceError
 from tiny_tensor_compiler.ir import DType
@@ -168,3 +172,37 @@ def test_reduction_dtype_round_trips_through_canonical_serialization() -> None:
     assert _reduction_op(restored, "sum").attrs == {"axis": 0, "dtype": "f64"}
     assert _reduction_op(restored, "sum").results[0].type.dtype is DType.FLOAT64
     assert serialize_module(restored) == document
+
+
+def test_cse_merges_equal_widened_reductions_but_keeps_different_result_dtypes() -> None:
+    builder = GraphBuilder()
+    value = builder.input((2, 3), dtype="int32")
+    widened_lhs = value.sum(axis=1, dtype="int64")
+    widened_rhs = value.sum(axis=1, dtype=DType.INT64)
+    narrow = value.sum(axis=1)
+    module = builder.finish((widened_lhs, widened_rhs, narrow))
+
+    assert common_subexpression_eliminate(module) == 1
+    verify(module)
+    reductions = [op for op in module.function.ops if op.opcode == "sum"]
+    assert len(reductions) == 2
+    assert {op.results[0].type.dtype for op in reductions} == {DType.INT32, DType.INT64}
+    return_op = module.function.ops[-1]
+    assert return_op.operands[0] is return_op.operands[1]
+    assert return_op.operands[2].type.dtype is DType.INT32
+
+
+def test_dynamic_specialization_preserves_widened_reduction_dtype() -> None:
+    _default_compiler_or_skip()
+    batch = SymbolicDim("B")
+    builder = GraphBuilder()
+    value = builder.input((batch, 4), dtype="int32")
+    module = builder.finish(value.sum(axis=1, dtype="int64"))
+    executable = compile_dynamic_module(module, borrow_inputs=True, parallel=True)
+
+    runtime = np.arange(12, dtype=np.int32).reshape(3, 4)
+    actual = executable(inputs=[runtime])
+    expected = runtime.sum(axis=1, dtype=np.int64)
+    assert actual.dtype == np.dtype("int64")
+    np.testing.assert_array_equal(actual, expected)
+    assert executable.cached_batch_sizes == (3,)
