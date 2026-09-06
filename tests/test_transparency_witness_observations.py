@@ -14,6 +14,7 @@ from tiny_tensor_compiler import (
     publisher_public_key_from_private_key,
     verify_transparency_checkpoint,
 )
+from tiny_tensor_compiler.native_bundle_attestation import publisher_id_from_public_key
 from tiny_tensor_compiler.native_bundle_transparency_witness import (
     NativeBundleTransparencyWitnessError,
 )
@@ -119,8 +120,9 @@ def test_observation_requires_current_persisted_state_and_round_trips(tmp_path: 
         policy=policy,
     )
 
+    witness1_id = publisher_id_from_public_key(_public(1))
     assert verified.policy_id == policy.policy_id
-    assert verified.witness_id == policy.witness_ids[0]
+    assert verified.witness_id == witness1_id
     assert verified.checkpoint == checkpoint
     assert verified.encoded_checkpoint == encoded_checkpoint
     assert verified.checkpoint_digest == f"sha256:{hashlib.sha256(encoded_checkpoint).hexdigest()}"
@@ -245,6 +247,7 @@ def test_observation_rejects_tamper_wrong_policy_and_revoked_witness(tmp_path: P
     log_private = _key(94)
     log_public = _public(94)
     encoded_checkpoint = _checkpoint(log_private, [_release(1)])
+    witness1_id = publisher_id_from_public_key(_public(1))
     policy = TransparencyWitnessPolicy((_public(1), _public(2)), threshold=1)
     store = _record(tmp_path, "w1.json", log_public, encoded_checkpoint)
     encoded = bytearray(
@@ -284,7 +287,7 @@ def test_observation_rejects_tamper_wrong_policy_and_revoked_witness(tmp_path: P
     revoked = TransparencyWitnessPolicy(
         (_public(1), _public(2)),
         threshold=1,
-        revoked_witnesses=frozenset({policy.witness_ids[0]}),
+        revoked_witnesses=frozenset({witness1_id}),
     )
     with pytest.raises(NativeBundleTransparencyWitnessError, match="revoked"):
         create_transparency_witness_observation(
