@@ -120,6 +120,10 @@ from .native_bundle_transparency_witness import (
     create_transparency_witness_quorum,
     verify_transparency_witness_quorum,
 )
+from .native_bundle_transparency_witness_evidence import (
+    TransparencyWitnessEvidenceSnapshot,
+    TransparencyWitnessEvidenceStore,
+)
 from .native_bundle_trust import (
     AttestedNativeBundleRegistryExecutable,
     fetch_attested_dynamic_bundle_set_archive,
@@ -200,6 +204,8 @@ __all__ = [
     "ThresholdReleaseStateStore",
     "TransparencyCheckpoint",
     "TransparencyStateStore",
+    "TransparencyWitnessEvidenceSnapshot",
+    "TransparencyWitnessEvidenceStore",
     "TransparencyWitnessPolicy",
     "TransparencyWitnessQuorum",
     "TypeInferenceError",
