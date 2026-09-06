@@ -139,7 +139,7 @@ def test_dynamic_argmax_specializes_nonempty_domains_and_rejects_zero_axis() -> 
         expected = np.argmax(runtime, axis=1, keepdims=True)
         np.testing.assert_array_equal(actual, expected)
 
-    assert executable.cached_bindings == (((width, 1),), ((width, 2),), ((width, 5),))
+    assert executable.cached_bindings == ((('W', 1),), (('W', 2),), (('W', 5),))
     with pytest.raises(ValueError, match="argmax reduction domain must not be empty"):
         executable(inputs=[np.empty((2, 0), dtype=np.int32)])
 
