@@ -42,11 +42,34 @@ class ReductionOperator(str, Enum):
     ) -> np.generic:
         np_dtype = dtype.to_numpy() if isinstance(dtype, DType) else np.dtype(dtype)
         operation = np.add if self is ReductionOperator.SUM else np.multiply
-        return np_dtype.type(operation(lhs, rhs))
+        return np_dtype.type(operation(np_dtype.type(lhs), np_dtype.type(rhs)))
 
 
 REDUCTION_OPCODES = frozenset(operator.value for operator in ReductionOperator)
 ReductionAxis = int | tuple[int, ...] | None
+
+
+def normalize_reduction_dtype(input_dtype: DType, requested: DType | None) -> DType:
+    """Return one verified same-kind reduction accumulator/result dtype.
+
+    The historical same-dtype behavior remains the default.  This first widening
+    phase intentionally permits only i32->i64 and f32->f64; narrowing and
+    integer/float kind changes require a separate cast/conversion contract.
+    """
+    if not isinstance(input_dtype, DType):
+        raise TypeError("reduction input dtype must be a DType")
+    if requested is None or requested == input_dtype:
+        return input_dtype
+    if not isinstance(requested, DType):
+        raise TypeError("reduction result dtype must be a DType or None")
+    if (input_dtype, requested) in {
+        (DType.INT32, DType.INT64),
+        (DType.FLOAT32, DType.FLOAT64),
+    }:
+        return requested
+    raise ValueError(
+        f"unsupported reduction dtype conversion: {input_dtype.value} -> {requested.value}"
+    )
 
 
 @dataclass(frozen=True)
