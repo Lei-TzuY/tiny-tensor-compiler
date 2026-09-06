@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import weakref
 from collections.abc import Mapping
 
 from . import native as native_module
@@ -16,6 +17,11 @@ from .ir import Module, SymbolicDim
 from .native_api import NativeExecutable
 
 BindingDisplay = tuple[tuple[str, int], ...]
+ArtifactIdentity = tuple[tuple[str, ...], str, str | None]
+_MANAGED_ARTIFACT_OWNERS: dict[
+    ArtifactIdentity,
+    dict[weakref.ReferenceType, int],
+] = {}
 
 
 class ResourceManagedDynamicExecutable(DynamicExecutable):
@@ -89,6 +95,7 @@ class ResourceManagedDynamicExecutable(DynamicExecutable):
             executable = super().specialize(bindings)
             self._specializations.pop(key)
             self._specializations[key] = executable
+            _retain_managed_serial_artifact(self, executable)
             self._evict_to_limit()
             return executable
 
@@ -97,7 +104,7 @@ class ResourceManagedDynamicExecutable(DynamicExecutable):
             oldest_key = next(iter(self._specializations))
             executable = self._specializations.pop(oldest_key)
             self._eviction_count += 1
-            if _release_cached_serial_artifact(executable):
+            if _release_managed_serial_artifact(self, executable):
                 self._released_native_artifact_count += 1
 
 
@@ -171,6 +178,8 @@ class ResourceManagedAdaptiveDynamicExecutable(AdaptiveDynamicExecutable):
             executable = super().specialize(bindings)
             self._specializations.pop(key)
             self._specializations[key] = executable
+            if executable.backend == "native" and executable._native is not None:
+                _retain_managed_serial_artifact(self, executable._native)
             self._evict_to_limit()
             return executable
 
@@ -182,7 +191,7 @@ class ResourceManagedAdaptiveDynamicExecutable(AdaptiveDynamicExecutable):
             if (
                 executable.backend == "native"
                 and executable._native is not None
-                and _release_cached_serial_artifact(executable._native)
+                and _release_managed_serial_artifact(self, executable._native)
             ):
                 self._released_native_artifact_count += 1
 
@@ -239,11 +248,49 @@ def compile_resource_managed_adaptive_dynamic_module(
     )
 
 
-def _release_cached_serial_artifact(executable: NativeExecutable) -> bool:
+def _artifact_identity(executable: NativeExecutable) -> ArtifactIdentity:
     persistent = executable._persistent_library
     persistent_identity = str(persistent) if persistent is not None else None
-    key = (tuple(executable._command), executable._source, persistent_identity)
+    return (tuple(executable._command), executable._source, persistent_identity)
+
+
+def _owner_ref(owner: object, key: ArtifactIdentity) -> weakref.ReferenceType:
+    def discard_dead_owner(reference: weakref.ReferenceType) -> None:
+        with native_module._NATIVE_CACHE_LOCK:
+            owners = _MANAGED_ARTIFACT_OWNERS.get(key)
+            if owners is None:
+                return
+            owners.pop(reference, None)
+            if not owners:
+                _MANAGED_ARTIFACT_OWNERS.pop(key, None)
+
+    return weakref.ref(owner, discard_dead_owner)
+
+
+def _retain_managed_serial_artifact(owner: object, executable: NativeExecutable) -> None:
+    key = _artifact_identity(executable)
     with native_module._NATIVE_CACHE_LOCK:
+        owners = _MANAGED_ARTIFACT_OWNERS.setdefault(key, {})
+        reference = _owner_ref(owner, key)
+        owners[reference] = owners.get(reference, 0) + 1
+
+
+def _release_managed_serial_artifact(owner: object, executable: NativeExecutable) -> bool:
+    key = _artifact_identity(executable)
+    with native_module._NATIVE_CACHE_LOCK:
+        owners = _MANAGED_ARTIFACT_OWNERS.get(key)
+        if owners is not None:
+            reference = weakref.ref(owner)
+            retained_count = owners.get(reference, 0)
+            if retained_count > 1:
+                owners[reference] = retained_count - 1
+                return False
+            if retained_count == 1:
+                owners.pop(reference)
+            if owners:
+                return False
+            _MANAGED_ARTIFACT_OWNERS.pop(key, None)
+
         artifact = native_module._NATIVE_CACHE.pop(key, None)
         if artifact is None:
             return False
