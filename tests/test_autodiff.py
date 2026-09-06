@@ -69,7 +69,7 @@ def test_reverse_mode_sum_axis_and_reshape_are_executable_natively():
 def test_reverse_mode_returns_exact_zero_for_unused_requested_input():
     builder = GraphBuilder()
     x = builder.input((2,), DType.FLOAT32)
-    unused = builder.input((3,), DType.FLOAT32)
+    builder.input((3,), DType.FLOAT32)
     loss = (x * x).sum()
     module = builder.finish(loss)
 
