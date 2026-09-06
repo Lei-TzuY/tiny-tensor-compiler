@@ -29,6 +29,7 @@ _OPERATIONS = (
 
 _CANONICAL_DTYPES = {
     DType.INT32: np.dtype("<i4"),
+    DType.INT64: np.dtype("<i8"),
     DType.FLOAT32: np.dtype("<f4"),
 }
 
