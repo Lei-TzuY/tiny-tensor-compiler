@@ -3,7 +3,8 @@ from __future__ import annotations
 from .c_codegen import _element_count, _emit_kernel, _select_i32_sse2_plan
 from .ir import TensorType
 from .layout import StorageLayout
-from .loop_ir import LoopKernel
+from .loop_ir import LoopBinaryInto, LoopKernel
+from .write_codegen import emit_binary_into
 
 _OPENMP_PARALLEL_FOR = "#pragma omp parallel for schedule(static)"
 
@@ -50,6 +51,29 @@ def emit_parallel_kernel(
             return lines
 
     raise RuntimeError("verified non-scalar kernel unexpectedly has no schedulable C loop")
+
+
+def emit_parallel_binary_into(
+    op: LoopBinaryInto,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+) -> list[str]:
+    """Schedule one verifier-safe partial binary effect over disjoint target indices."""
+    lines = emit_binary_into(op, types, layouts)
+    target_type = types[op.target]
+    if not target_type.shape or _element_count(target_type) == 0:
+        return lines
+
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("for (int64_t i0 ="):
+            continue
+        indent = _indent_of(line)
+        _externalize_openmp_induction_variable(lines, index, "i0")
+        lines.insert(index, f"{indent}{_OPENMP_PARALLEL_FOR}")
+        lines.insert(index, f"{indent}int64_t i0;")
+        return lines
+
+    raise RuntimeError("verified binary_into unexpectedly has no schedulable target loop")
 
 
 def _externalize_openmp_induction_variable(
