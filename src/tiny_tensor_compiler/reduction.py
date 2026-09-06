@@ -10,10 +10,11 @@ from .ir import DType
 
 
 class ReductionOperator(str, Enum):
-    """Supported deterministic reduction combiners."""
+    """Supported deterministic reduction semantics."""
 
     SUM = "sum"
     PRODUCT = "prod"
+    ARGMAX = "argmax"
 
     @classmethod
     def from_opcode(cls, opcode: str) -> ReductionOperator:
@@ -23,14 +24,24 @@ class ReductionOperator(str, Enum):
             raise ValueError(f"unsupported reduction opcode: {opcode!r}") from exc
 
     @property
+    def is_index_reduction(self) -> bool:
+        return self is ReductionOperator.ARGMAX
+
+    @property
     def c_operator(self) -> str:
+        if self is ReductionOperator.ARGMAX:
+            raise ValueError("argmax is a selection reduction without a C binary combiner")
         return "+" if self is ReductionOperator.SUM else "*"
 
     @property
     def identity_number(self) -> int:
+        if self is ReductionOperator.ARGMAX:
+            raise ValueError("argmax has no identity value")
         return 0 if self is ReductionOperator.SUM else 1
 
     def identity(self, dtype: DType | np.dtype[Any]) -> np.generic:
+        if self is ReductionOperator.ARGMAX:
+            raise ValueError("argmax has no identity value")
         np_dtype = dtype.to_numpy() if isinstance(dtype, DType) else np.dtype(dtype)
         return np_dtype.type(self.identity_number)
 
@@ -40,9 +51,25 @@ class ReductionOperator(str, Enum):
         lhs: Any,
         rhs: Any,
     ) -> np.generic:
+        if self is ReductionOperator.ARGMAX:
+            raise ValueError("argmax is not a monoid combiner")
         np_dtype = dtype.to_numpy() if isinstance(dtype, DType) else np.dtype(dtype)
         operation = np.add if self is ReductionOperator.SUM else np.multiply
         return np_dtype.type(operation(lhs, rhs))
+
+    def candidate_wins(self, best: Any, candidate: Any) -> bool:
+        """Return whether argmax should replace ``best`` with ``candidate``.
+
+        Strict comparison preserves the first index on equal values. For floating
+        inputs the first NaN wins, matching NumPy argmax's deterministic scan order.
+        """
+        if self is not ReductionOperator.ARGMAX:
+            raise ValueError(f"{self.value} is not an index-producing reduction")
+        if bool(np.isnan(best)):
+            return False
+        if bool(np.isnan(candidate)):
+            return True
+        return bool(candidate > best)
 
 
 REDUCTION_OPCODES = frozenset(operator.value for operator in ReductionOperator)
@@ -51,7 +78,7 @@ ReductionAxis = int | tuple[int, ...] | None
 
 @dataclass(frozen=True)
 class ReductionPlan:
-    """One deterministic reduction operator over all elements or canonical logical axes."""
+    """One deterministic reduction over all elements or canonical logical axes."""
 
     operator: ReductionOperator
     axis: ReductionAxis = None
@@ -65,6 +92,8 @@ class ReductionPlan:
             if self.axis < 0:
                 raise ValueError("reduction plan axis must be non-negative")
             return
+        if self.operator is ReductionOperator.ARGMAX:
+            raise ValueError("argmax reduction plan accepts only one integer axis or None")
         if not isinstance(self.axis, tuple) or not self.axis:
             raise ValueError(
                 "reduction plan axis must be a non-negative integer, non-empty canonical tuple, or None"
