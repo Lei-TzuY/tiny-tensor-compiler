@@ -20,6 +20,7 @@ from ..loop_ir import (
     lower_to_loops,
 )
 from ..lowering import CPUProgram
+from ..reduction import ReductionOperator, ReductionPlan
 
 ExecutionResult = np.ndarray | tuple[np.ndarray, ...]
 LoopExecutionProgram = LoopProgram | BorrowedLoopProgram
@@ -95,6 +96,9 @@ def execute_loop(
         reduction = op.reduction
         if reduction is not None:
             source = buffers[op.inputs[0]]
+            if reduction.operator is ReductionOperator.ARGMAX:
+                _execute_argmax_reduction(reduction, source, output, op.iteration_shape)
+                continue
             if reduction.axes is None:
                 accumulator = reduction.operator.identity(output.dtype)
                 for input_index in np.ndindex(source.shape):
@@ -169,3 +173,46 @@ def execute_loop(
         raise RuntimeError("verified loop IR unexpectedly has no return")
     outputs = tuple(np.array(buffers[buffer], copy=True) for buffer in return_buffers)
     return outputs[0] if len(outputs) == 1 else outputs
+
+
+def _execute_argmax_reduction(
+    plan: ReductionPlan,
+    source: np.ndarray,
+    output: np.ndarray,
+    iteration_shape: tuple[int, ...],
+) -> None:
+    if plan.axes is None:
+        iterator = iter(enumerate(np.ndindex(source.shape)))
+        _, first_coordinate = next(iterator)
+        best = source[first_coordinate]
+        best_index = 0
+        for logical_index, coordinate in iterator:
+            candidate = source[coordinate]
+            if plan.operator.candidate_wins(best, candidate):
+                best = candidate
+                best_index = logical_index
+        output[()] = best_index
+        return
+
+    reduction_shape = plan.reduction_shape(source.shape)
+    for output_index in np.ndindex(iteration_shape):
+        reduction_iterator = iter(np.ndindex(reduction_shape))
+        first_reduction_index = next(reduction_iterator)
+        best_input_index = plan.input_index(
+            source.ndim,
+            output_index,
+            first_reduction_index,
+        )
+        best = source[best_input_index]
+        best_index = first_reduction_index[0]
+        for reduction_index in reduction_iterator:
+            input_index = plan.input_index(
+                source.ndim,
+                output_index,
+                reduction_index,
+            )
+            candidate = source[input_index]
+            if plan.operator.candidate_wins(best, candidate):
+                best = candidate
+                best_index = reduction_index[0]
+        output[output_index] = best_index

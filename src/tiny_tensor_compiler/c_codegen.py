@@ -20,6 +20,7 @@ from .loop_ir import (
     LoopView,
     fused_expression_for_kernel,
 )
+from .reduction import ReductionOperator, ReductionPlan
 from .simd_codegen import I32SSE2Plan, build_i32_sse2_plan, emit_i32_sse2_plan
 
 
@@ -133,6 +134,16 @@ def _emit_kernel(
             raise RuntimeError("verified reduction loop unexpectedly has invalid arity")
         source = op.inputs[0]
         source_type = types[source]
+        if reduction.operator is ReductionOperator.ARGMAX:
+            return _emit_argmax_reduction(
+                op,
+                reduction,
+                source,
+                source_type,
+                output_type,
+                layouts[source],
+                lines,
+            )
         c_type = _c_type(output_type.dtype)
         value_name = f"{reduction.opcode}_value"
         identity = _reduction_identity_literal(reduction.operator.identity_number, output_type.dtype)
@@ -308,6 +319,80 @@ def _emit_kernel(
     lines.append("    }")
     lines.append("")
     return lines
+
+
+def _emit_argmax_reduction(
+    op: LoopKernel,
+    reduction: ReductionPlan,
+    source: int,
+    source_type: TensorType,
+    output_type: TensorType,
+    source_layout: StorageLayout,
+    lines: list[str],
+) -> list[str]:
+    if output_type.dtype is not DType.INT64:
+        raise RuntimeError("verified argmax output must use int64 indices")
+    source_c_type = _c_type(source_type.dtype)
+    axes = reduction.axes
+    if axes is None:
+        first_ref = _linear_input_ref(source, source_type, source_layout, "0")
+        source_ref = _linear_input_ref(source, source_type, source_layout, "n")
+        lines.extend(
+            [
+                f"        {source_c_type} argmax_best = ({source_c_type}){first_ref};",
+                "        int64_t argmax_index = 0;",
+                f"        for (int64_t n = 1; n < {_element_count(source_type)}; ++n) {{",
+                f"            {source_c_type} argmax_candidate = ({source_c_type}){source_ref};",
+                f"            if ({_argmax_update_condition(source_type.dtype)}) {{",
+                "                argmax_best = argmax_candidate;",
+                "                argmax_index = n;",
+                "            }",
+                "        }",
+                f"        p{op.output}[0] = argmax_index;",
+                "    }",
+                "",
+            ]
+        )
+        return lines
+
+    if len(axes) != 1:
+        raise RuntimeError("verified argmax unexpectedly has a multi-axis domain")
+    axis = axes[0]
+    indent = "        "
+    for output_axis, bound in enumerate(output_type.shape):
+        lines.append(
+            f"{indent}for (int64_t i{output_axis} = 0; "
+            f"i{output_axis} < {bound}; ++i{output_axis}) {{"
+        )
+        indent += "    "
+    output_offset = _flat_offset(tuple(range(len(output_type.shape))), output_type.shape)
+    source_ref = _axis_reduction_input_ref(source, source_type, source_layout, axis)
+    lines.extend(
+        [
+            f"{indent}int64_t r = 0;",
+            f"{indent}{source_c_type} argmax_best = ({source_c_type}){source_ref};",
+            f"{indent}int64_t argmax_index = 0;",
+            f"{indent}for (r = 1; r < {source_type.shape[axis]}; ++r) {{",
+            f"{indent}    {source_c_type} argmax_candidate = ({source_c_type}){source_ref};",
+            f"{indent}    if ({_argmax_update_condition(source_type.dtype)}) {{",
+            f"{indent}        argmax_best = argmax_candidate;",
+            f"{indent}        argmax_index = r;",
+            f"{indent}    }}",
+            f"{indent}}}",
+            f"{indent}p{op.output}[{output_offset}] = argmax_index;",
+        ]
+    )
+    for _ in output_type.shape:
+        indent = indent[:-4]
+        lines.append(f"{indent}}}")
+    lines.extend(["    }", ""])
+    return lines
+
+
+def _argmax_update_condition(dtype: DType) -> str:
+    if dtype in {DType.FLOAT32, DType.FLOAT64}:
+        return "!isnan(argmax_best) && (isnan(argmax_candidate) || argmax_candidate > argmax_best)"
+    return "argmax_candidate > argmax_best"
 
 
 def _emit_fused_expression(
