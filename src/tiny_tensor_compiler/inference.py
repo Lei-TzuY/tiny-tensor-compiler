@@ -54,6 +54,8 @@ def normalize_reduction_axes(
         return None
     if isinstance(axis, int) and not isinstance(axis, bool):
         return normalize_reduction_axis(input_type, axis, operator)
+    if operator is ReductionOperator.ARGMAX:
+        raise TypeInferenceError("argmax axis must be an integer or None")
     if isinstance(axis, (str, bytes)):
         raise TypeInferenceError(f"{operator.value} axis must be an integer or axis collection")
     try:
@@ -78,17 +80,27 @@ def infer_reduction(
     operator: ReductionOperator,
     axis: int | Iterable[int] | None = None,
 ) -> TensorType:
-    """Infer deterministic same-dtype reduction over a canonical logical axis domain."""
+    """Infer one deterministic logical reduction domain."""
     if input_type.dtype not in {DType.INT32, DType.INT64, DType.FLOAT32, DType.FLOAT64}:
         raise TypeInferenceError(
             f"{operator.value} requires a numeric tensor, got {input_type.dtype.value}"
         )
     normalized = normalize_reduction_axes(input_type, axis, operator)
     if normalized is None:
-        return TensorType((), input_type.dtype)
-    axes = (normalized,) if isinstance(normalized, int) else normalized
-    reduced = set(axes)
-    shape = tuple(dim for position, dim in enumerate(input_type.shape) if position not in reduced)
+        shape: tuple[ShapeDim, ...] = ()
+        reduced_axes = tuple(range(len(input_type.shape)))
+    else:
+        axes = (normalized,) if isinstance(normalized, int) else normalized
+        reduced = set(axes)
+        reduced_axes = axes
+        shape = tuple(
+            dim for position, dim in enumerate(input_type.shape) if position not in reduced
+        )
+
+    if operator is ReductionOperator.ARGMAX:
+        if any(input_type.shape[position] == 0 for position in reduced_axes):
+            raise TypeInferenceError("argmax reduction domain must not be empty")
+        return TensorType(shape, DType.INT64)
     return TensorType(shape, input_type.dtype)
 
 
@@ -114,6 +126,13 @@ def normalize_prod_axes(
     return normalize_reduction_axes(input_type, axis, ReductionOperator.PRODUCT)
 
 
+def normalize_argmax_axis(input_type: TensorType, axis: int | None) -> int | None:
+    normalized = normalize_reduction_axes(input_type, axis, ReductionOperator.ARGMAX)
+    if isinstance(normalized, tuple):
+        raise TypeInferenceError("argmax accepts only one reduction axis")
+    return normalized
+
+
 def infer_sum(
     input_type: TensorType, axis: int | Iterable[int] | None = None
 ) -> TensorType:
@@ -126,6 +145,11 @@ def infer_prod(
 ) -> TensorType:
     """Infer a deterministic full/single/multi-axis same-dtype product."""
     return infer_reduction(input_type, ReductionOperator.PRODUCT, axis)
+
+
+def infer_argmax(input_type: TensorType, axis: int | None = None) -> TensorType:
+    """Infer deterministic first-index argmax with an int64 result."""
+    return infer_reduction(input_type, ReductionOperator.ARGMAX, axis)
 
 
 def infer_reshape(input_type: TensorType, shape: Iterable[ShapeDim]) -> TensorType:
@@ -161,7 +185,12 @@ def infer_slice(
     step: int,
 ) -> TensorType:
     """Infer one bounded positive-stride slice along a concrete source axis."""
-    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(input_type.shape):
+    if (
+        not isinstance(axis, int)
+        or isinstance(axis, bool)
+        or axis < 0
+        or axis >= len(input_type.shape)
+    ):
         raise TypeInferenceError("slice axis is out of range")
     for name, value in (("start", start), ("stop", stop), ("step", step)):
         if not isinstance(value, int) or isinstance(value, bool):
@@ -184,7 +213,12 @@ def infer_slice(
 
 def infer_reverse(input_type: TensorType, axis: int) -> TensorType:
     """Infer one read-only axis reversal without changing logical tensor type."""
-    if not isinstance(axis, int) or isinstance(axis, bool) or axis < 0 or axis >= len(input_type.shape):
+    if (
+        not isinstance(axis, int)
+        or isinstance(axis, bool)
+        or axis < 0
+        or axis >= len(input_type.shape)
+    ):
         raise TypeInferenceError("reverse axis is out of range")
     return input_type
 
@@ -223,8 +257,7 @@ def _dim_polynomial(dim: ShapeDim) -> Polynomial:
         return polynomial
     if isinstance(dim, LinearDim):
         polynomial = {
-            ((symbol, 1),): coefficient
-            for symbol, coefficient in dim.terms
+            ((symbol, 1),): coefficient for symbol, coefficient in dim.terms
         }
         if dim.offset:
             polynomial[()] = dim.offset
@@ -244,7 +277,9 @@ def _multiply_polynomials(lhs: Polynomial, rhs: Polynomial) -> Polynomial:
             monomial = tuple(sorted(powers.items(), key=lambda item: item[0].name))
             coefficient = lhs_coefficient * rhs_coefficient
             product[monomial] = product.get(monomial, 0) + coefficient
-    return {monomial: coefficient for monomial, coefficient in product.items() if coefficient}
+    return {
+        monomial: coefficient for monomial, coefficient in product.items() if coefficient
+    }
 
 
 def _broadcast_shapes(
