@@ -3,8 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tiny_tensor_compiler import DType, GraphBuilder, compile_module, execute_reference
+from tiny_tensor_compiler import GraphBuilder, compile_module, execute_reference
 from tiny_tensor_compiler.autodiff import AutodiffError, differentiate_module
+from tiny_tensor_compiler.ir import DType
 
 
 def _scalar_loss_module():
