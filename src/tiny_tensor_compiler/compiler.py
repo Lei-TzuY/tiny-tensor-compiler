@@ -94,7 +94,7 @@ class DynamicExecutable:
         borrow_inputs: bool = False,
         parallel: bool = False,
         budget: CompileBudget | None = None,
-        compiler_timeout: float | int | None = None,
+        compiler_timeout: float | None = None,
     ) -> None:
         if budget is not None and not isinstance(budget, CompileBudget):
             raise TypeError("budget must be a CompileBudget or None")
@@ -220,7 +220,7 @@ class AdaptiveDynamicExecutable:
         *,
         borrow_inputs: bool = False,
         parallel: bool = False,
-        compiler_timeout: float | int | None = None,
+        compiler_timeout: float | None = None,
     ) -> None:
         if not isinstance(budget, CompileBudget):
             raise TypeError("budget must be a CompileBudget")
@@ -329,7 +329,7 @@ def compile_module(
     borrow_inputs: bool = False,
     parallel: bool = False,
     budget: CompileBudget | None = None,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> NativeExecutable:
     """Lower verified concrete tensor IR through the native pipeline and compile eagerly."""
     normalized_timeout = normalize_compiler_timeout(compiler_timeout)
@@ -378,7 +378,7 @@ def compile_adaptive_module(
     cache_dir: str | os.PathLike[str] | None = None,
     borrow_inputs: bool = False,
     parallel: bool = False,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> AdaptiveExecutable:
     """Select native compilation or verified Loop CPU from one structural budget decision."""
     if not isinstance(budget, CompileBudget):
@@ -433,7 +433,7 @@ def compile_dynamic_module(
     borrow_inputs: bool = False,
     parallel: bool = False,
     budget: CompileBudget | None = None,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> DynamicExecutable:
     """Prepare lazy native specializations for runtime symbolic dimensions."""
     return DynamicExecutable(
@@ -455,7 +455,7 @@ def compile_adaptive_dynamic_module(
     cache_dir: str | os.PathLike[str] | None = None,
     borrow_inputs: bool = False,
     parallel: bool = False,
-    compiler_timeout: float | int | None = None,
+    compiler_timeout: float | None = None,
 ) -> AdaptiveDynamicExecutable:
     """Prepare per-binding adaptive native-or-loop specializations."""
     if not isinstance(budget, CompileBudget):
