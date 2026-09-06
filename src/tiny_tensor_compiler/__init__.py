@@ -124,6 +124,14 @@ from .native_bundle_transparency_witness_evidence import (
     TransparencyWitnessEvidenceSnapshot,
     TransparencyWitnessEvidenceStore,
 )
+from .native_bundle_transparency_witness_evidence_publication import (
+    NativeBundleTransparencyPublicationError,
+    TransparencyWitnessEvidencePublication,
+    accept_transparency_witness_evidence_publication,
+    create_transparency_witness_evidence_publication,
+    fetch_transparency_witness_evidence_publication,
+    verify_transparency_witness_evidence_publication,
+)
 from .native_bundle_trust import (
     AttestedNativeBundleRegistryExecutable,
     fetch_attested_dynamic_bundle_set_archive,
@@ -183,6 +191,7 @@ __all__ = [
     "NativeBundleThresholdError",
     "NativeBundleThresholdRollbackError",
     "NativeBundleTransparencyError",
+    "NativeBundleTransparencyPublicationError",
     "NativeBundleTransparencyRollbackError",
     "NativeBundleTransparencyWitnessError",
     "NativeBundleTrustError",
@@ -204,6 +213,7 @@ __all__ = [
     "ThresholdReleaseStateStore",
     "TransparencyCheckpoint",
     "TransparencyStateStore",
+    "TransparencyWitnessEvidencePublication",
     "TransparencyWitnessEvidenceSnapshot",
     "TransparencyWitnessEvidenceStore",
     "TransparencyWitnessPolicy",
@@ -211,6 +221,7 @@ __all__ = [
     "TypeInferenceError",
     "VerificationError",
     "accept_release_transparency",
+    "accept_transparency_witness_evidence_publication",
     "accept_witnessed_release_transparency",
     "algebraic_simplify",
     "bind_dynamic_batch",
@@ -228,6 +239,7 @@ __all__ = [
     "create_threshold_policy_transition",
     "create_threshold_release_checkpoint",
     "create_transparency_checkpoint",
+    "create_transparency_witness_evidence_publication",
     "create_transparency_witness_quorum",
     "dead_code_eliminate",
     "digest_dynamic_bundle_set_archive",
@@ -239,6 +251,7 @@ __all__ = [
     "fetch_dynamic_bundle_set_archive",
     "fetch_release_channel_archive",
     "fetch_threshold_release_channel_archive",
+    "fetch_transparency_witness_evidence_publication",
     "fuse_elementwise",
     "generate_c",
     "has_symbolic_shapes",
@@ -269,5 +282,6 @@ __all__ = [
     "verify_transparency_checkpoint",
     "verify_transparency_consistency",
     "verify_transparency_inclusion",
+    "verify_transparency_witness_evidence_publication",
     "verify_transparency_witness_quorum",
 ]
