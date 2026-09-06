@@ -124,7 +124,7 @@ def _input_ops_by_index(module: Module) -> dict[int, Operation]:
             continue
         index = op.attrs.get("index")
         if not isinstance(index, int) or isinstance(index, bool):  # verifier should reject first
-            raise RuntimeError("verified input unexpectedly has a non-integer index")
+            raise TypeError("verified input unexpectedly has a non-integer index")
         inputs[index] = op
     return inputs
 
