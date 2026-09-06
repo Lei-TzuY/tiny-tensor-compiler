@@ -53,7 +53,22 @@ The cap counts complete bindings, not individual symbolic dimensions. Multi-symb
 
 A backend/budget decision is made once per cached binding. Repeated use of the same binding reuses the same specialization rather than retrying native compilation, changing backend opportunistically, or consuming another cardinality slot.
 
-The first cardinality policy is deliberately fail-closed rather than LRU. Removing a Python dictionary entry would not prove that process-local native artifacts, loaded shared libraries, persistent cache files, or other backend resources had actually been released. Eviction therefore remains a separate future resource-lifecycle problem rather than being implied by this admission cap.
+## Resource-managed specialization retention
+
+Admission and retention are separate policies. The ordinary `max_dynamic_specializations` cap remains fail-closed and does not imply reclamation. Callers that require bounded retained specialization state can instead opt into:
+
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_module(...)`;
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_module(...)`.
+
+These facades add `max_cached_specializations`, a non-negative per-handle retention limit with deterministic least-recently-used ordering. A cache hit refreshes the binding to most-recently-used position. `max_cached_specializations=0` is valid: the newly created executable is returned to the caller but immediately removed from the managed handle's specialization map.
+
+For an evicted ordinary serial native specialization, the policy derives the exact process-local native-artifact cache identity, removes it under the native-cache lock, unloads the shared library, and deletes its process-owned staging directory. An external reference to the evicted `NativeExecutable` remains usable and reacquires the same artifact identity on its next execution. With a persistent cache, the durable artifact is preserved and can be reloaded without another compiler invocation.
+
+Adaptive managed specialization preserves backend truthfulness: evicting `backend="native"` releases its loaded serial native artifact, while evicting `backend="loop"` releases only the retained specialization decision and does not increment native-release accounting. The handles expose `retained_bindings_lru`, `eviction_count`, and `released_native_artifact_count` so those decisions are observable.
+
+Managed eviction currently rejects `parallel=True` because Windows OpenMP generated DLLs are intentionally process-pinned; removing a Python cache entry cannot safely prove those worker-referenced libraries were unloaded. The managed policy is also deliberately not composable with `CompileBudget.max_dynamic_specializations` in this first phase, because silently combining a lifetime admission cap with an evicting retention cap would make it ambiguous whether an evicted binding still consumes lifetime admission capacity.
+
+This is targeted lifecycle release, not a global memory bound. `max_cached_specializations` does not bound process RSS, generated-code bytes, persistent-cache size, artifacts held by other dynamic handles, compiler subprocesses, or future reacquisition by external executable references. See `docs/specialization-eviction.md` for the complete lifecycle and evidence boundary.
 
 ## Native compilation time controls
 
@@ -95,10 +110,14 @@ The concrete report metrics are structural compiler facts, not runtime resource 
 
 `max_dynamic_specializations` is likewise a per-handle admission count, not a measurement or hard bound on process memory, generated code bytes, number of shared libraries, persistent-cache size, global native-cache entries, compiler subprocesses, or total specializations created by other handles. It prevents one configured dynamic handle from admitting unbounded new binding identities; it does not claim that rejecting the next binding reclaims resources already created for earlier bindings.
 
+`max_cached_specializations` is a separate per-handle retention count backed by targeted serial artifact release. It proves that an evicted currently loaded serial process artifact is removed from the process cache, unloaded, and its staging directory deleted. It still does not establish a process-wide RSS/code-byte bound, persistent-cache bound, or permanent reclamation: external executable references and other handles may reacquire the same identity later.
+
 Accordingly, `CompileBudget` is a deterministic compiler admission policy, not a security sandbox, denial-of-service guarantee, memory limiter, or benchmark. Adaptive Loop fallback also does not claim to reduce runtime memory or improve performance; it only avoids native compilation for the explicit concrete over-budget policy case while preserving verified executable semantics.
 
 `compiler_timeout` and `compile_deadline` are wall-clock control policies, not CPU quotas, memory limits, trusted sandboxes, runtime execution timeouts, or general denial-of-service guarantees. The total deadline covers persistent-cache lease waiting and a required compiler process after a process-cache miss; it does not bound Python lowering, filesystem operations before artifact lookup, native library execution, or deliberately detached compiler descendants that escape the managed process tree. No security/isolation or performance claim is implied by either policy.
 
 ## Phase boundary
 
-Concrete structural admission, adaptive native-or-Loop policy, per-handle dynamic-specialization cardinality, per-process compiler cancellation, and a shared lease-plus-compiler artifact-acquisition deadline are now separate, composable controls. Adding more timeout aliases, retry knobs, arbitrary stage timers, or threshold variants without a distinct enforceable lifecycle requirement would be low-value farming. The next runtime-control promotion should require genuinely new resource semantics—such as resource-accounted specialization eviction with proven native-artifact release—or the project should move to another architectural frontier rather than disguise another timer as a subsystem.
+Concrete structural admission, adaptive native-or-Loop policy, lifetime dynamic-specialization admission, resource-accounted serial specialization eviction, per-process compiler cancellation, and a shared lease-plus-compiler artifact-acquisition deadline are now distinct runtime controls with explicit evidence boundaries.
+
+This closes the first per-handle specialization-eviction phase. More retention counts, replacement-policy aliases, timer variants, or retry knobs would be low-value policy farming. A future runtime-control promotion should require genuinely stronger lifecycle semantics, such as safe reclaim of process-pinned parallel artifacts or cross-handle/process-wide ownership accounting; otherwise the project should move to another architectural frontier.
