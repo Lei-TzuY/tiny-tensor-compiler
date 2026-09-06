@@ -1,7 +1,6 @@
 import math
 import os
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -55,7 +54,6 @@ def test_compiler_timeout_requires_positive_finite_seconds(bad):
 
 @pytest.mark.parametrize("parallel", [False, True])
 def test_compiler_timeout_bounds_real_external_process_and_cleans_transient_build(
-    tmp_path,
     monkeypatch,
     parallel,
 ):
@@ -74,7 +72,7 @@ def test_compiler_timeout_bounds_real_external_process_and_cleans_transient_buil
     with pytest.raises(NativeCompilationTimeout) as caught:
         compile_native(
             _loop_program(),
-            compiler="ignored-by-test",
+            compiler=sys.executable,
             compiler_timeout=0.05,
             parallel=parallel,
         )
@@ -94,7 +92,7 @@ def test_persistent_timeout_never_publishes_partial_artifact(tmp_path, monkeypat
     with pytest.raises(NativeCompilationTimeout):
         compile_native(
             _loop_program(),
-            compiler="ignored-by-test",
+            compiler=sys.executable,
             cache_dir=cache_dir,
             compiler_timeout=0.05,
         )
