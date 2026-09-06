@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from .ir import DType, TensorType
 from .layout import StorageLayout
-from .loop_ir import LoopCopyInto
+from .loop_ir import LoopCopyInto, LoopInplaceBinary
 
 
 def emit_copy_into(
@@ -44,6 +44,49 @@ def emit_copy_into(
     root_offset = op.layout.offset
     pointer = f"p{op.root}" if root_offset == 0 else f"p{op.root} + {root_offset}"
     lines.append(f"    {c_type} *p{op.output} = {pointer};")
+    lines.append("")
+    return lines
+
+
+def emit_inplace_binary(
+    op: LoopInplaceBinary,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+) -> list[str]:
+    """Emit one serial exact-typed full-root binary update and expose its fresh handle."""
+    root_type = types[op.root]
+    source_type = types[op.source]
+    if root_type != source_type or op.type != root_type:
+        raise RuntimeError("verified binary_inplace unexpectedly has mismatched types")
+    if op.operator not in {"add", "mul"}:
+        raise RuntimeError("verified binary_inplace unexpectedly has an unsupported operator")
+
+    root_layout = layouts[op.root]
+    source_layout = layouts[op.source]
+    operator = "+" if op.operator == "add" else "*"
+    c_type = _c_type(root_type.dtype)
+    lines = ["    {"]
+    if not root_type.shape:
+        destination = _root_ref(op.root, root_layout.offset, ())
+        lines.append(f"        {destination} = {destination} {operator} p{op.source}[0];")
+    else:
+        indent = "        "
+        axes = tuple(range(len(root_type.shape)))
+        for axis, bound in enumerate(root_type.shape):
+            lines.append(
+                f"{indent}for (int64_t i{axis} = 0; i{axis} < {bound}; ++i{axis}) {{"
+            )
+            indent += "    "
+        destination = _root_ref(op.root, root_layout.offset, root_layout.strides)
+        source_offset = _stride_offset(axes, source_layout.strides)
+        lines.append(
+            f"{indent}{destination} = {destination} {operator} p{op.source}[{source_offset}];"
+        )
+        for _ in root_type.shape:
+            indent = indent[:-4]
+            lines.append(f"{indent}}}")
+    lines.append("    }")
+    lines.append(f"    {c_type} *p{op.output} = p{op.root};")
     lines.append("")
     return lines
 

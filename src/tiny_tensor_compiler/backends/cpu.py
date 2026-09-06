@@ -11,6 +11,7 @@ from ..input_validation import prepare_runtime_inputs
 from ..loop_ir import (
     LoopAlloc,
     LoopCopyInto,
+    LoopInplaceBinary,
     LoopInput,
     LoopKernel,
     LoopProgram,
@@ -82,6 +83,12 @@ def execute_loop(
 
         if isinstance(op, LoopCopyInto):
             np.copyto(buffers[op.target], buffers[op.source])
+            buffers[op.output] = buffers[op.root]
+            continue
+
+        if isinstance(op, LoopInplaceBinary):
+            binary = np.add if op.operator == "add" else np.multiply
+            binary(buffers[op.root], buffers[op.source], out=buffers[op.root])
             buffers[op.output] = buffers[op.root]
             continue
 

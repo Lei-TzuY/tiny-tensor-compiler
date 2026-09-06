@@ -8,9 +8,17 @@ from .c_codegen import (
     _storage_size,
 )
 from .input_binding import BorrowedLoopProgram
-from .loop_ir import LoopAlloc, LoopCopyInto, LoopInput, LoopProgram, LoopReturn, LoopView
+from .loop_ir import (
+    LoopAlloc,
+    LoopCopyInto,
+    LoopInplaceBinary,
+    LoopInput,
+    LoopProgram,
+    LoopReturn,
+    LoopView,
+)
 from .parallel_codegen import emit_parallel_kernel
-from .write_codegen import emit_copy_into
+from .write_codegen import emit_copy_into, emit_inplace_binary
 
 
 def generate_c(
@@ -98,6 +106,9 @@ def generate_c(
             continue
         if isinstance(op, LoopCopyInto):
             lines.extend(emit_copy_into(op, types, layouts))
+            continue
+        if isinstance(op, LoopInplaceBinary):
+            lines.extend(emit_inplace_binary(op, types, layouts))
             continue
         if isinstance(op, LoopReturn):
             lines.extend(
