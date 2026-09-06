@@ -7,6 +7,7 @@ import numpy as np
 
 from .inference import (
     TypeInferenceError,
+    infer_argmax,
     infer_binary,
     infer_prod,
     infer_relu,
@@ -15,6 +16,7 @@ from .inference import (
     infer_slice,
     infer_sum,
     infer_transpose,
+    normalize_argmax_axis,
     normalize_prod_axes,
     normalize_sum_axes,
 )
@@ -62,6 +64,9 @@ class Tensor:
         keepdims: bool = False,
     ) -> Tensor:
         return self._builder.prod(self, axis=axis, keepdims=keepdims)
+
+    def argmax(self, axis: int | None = None, *, keepdims: bool = False) -> Tensor:
+        return self._builder.argmax(self, axis=axis, keepdims=keepdims)
 
     def reshape(self, shape: Iterable[ShapeDim]) -> Tensor:
         return self._builder.reshape(self, shape)
@@ -170,7 +175,11 @@ class GraphBuilder:
             attrs=attrs,
         )
         result = Tensor(self, op.results[0])
-        return self._retain_reduced_dimensions(tensor, result, normalized_axis) if keepdims else result
+        return (
+            self._retain_reduced_dimensions(tensor, result, normalized_axis)
+            if keepdims
+            else result
+        )
 
     def prod(
         self,
@@ -192,7 +201,37 @@ class GraphBuilder:
             attrs=attrs,
         )
         result = Tensor(self, op.results[0])
-        return self._retain_reduced_dimensions(tensor, result, normalized_axis) if keepdims else result
+        return (
+            self._retain_reduced_dimensions(tensor, result, normalized_axis)
+            if keepdims
+            else result
+        )
+
+    def argmax(
+        self,
+        tensor: Tensor,
+        axis: int | None = None,
+        *,
+        keepdims: bool = False,
+    ) -> Tensor:
+        self._ensure_open()
+        self._check_tensor_owner(tensor)
+        _validate_keepdims(keepdims)
+        normalized_axis = normalize_argmax_axis(tensor.type, axis)
+        result_type = infer_argmax(tensor.type, normalized_axis)
+        attrs = {} if normalized_axis is None else {"axis": normalized_axis}
+        op = self.function.add_op(
+            "argmax",
+            operands=[tensor.value],
+            result_types=[result_type],
+            attrs=attrs,
+        )
+        result = Tensor(self, op.results[0])
+        return (
+            self._retain_reduced_dimensions(tensor, result, normalized_axis)
+            if keepdims
+            else result
+        )
 
     def _retain_reduced_dimensions(
         self,
@@ -211,8 +250,7 @@ class GraphBuilder:
             else set(normalized_axis)
         )
         retained_shape = tuple(
-            1 if axis in axes else dim
-            for axis, dim in enumerate(source.type.shape)
+            1 if axis in axes else dim for axis, dim in enumerate(source.type.shape)
         )
         return self.view(reduced, retained_shape)
 
@@ -323,12 +361,6 @@ class GraphBuilder:
         if target.type != source.type:
             raise ValueError("copy_into target and source types must exactly match")
         if _storage_root(source.value) is owner:
-            # Same-root writes have explicit snapshot semantics at the public builder
-            # boundary. Materialize the logical source in C order before mutating the
-            # owning root, so overlapping, interleaved, reversed, transposed, and
-            # unresolved-symbolic layouts all reduce to the existing different-root
-            # copy_into contract. The lower verifier/backend invariant therefore stays
-            # fail-closed rather than acquiring hidden memmove behavior.
             source = self.reshape(source, source.type.shape)
 
         op = self.function.add_op(
@@ -367,8 +399,6 @@ class GraphBuilder:
         if rhs_tensor is not None:
             self._check_tensor_owner(rhs_tensor)
 
-        # Python scalar literals are coerced to the peer tensor's dtype. This keeps
-        # tensor<float32> * 2 as float32 while tensor-vs-tensor promotion remains explicit.
         if lhs_tensor is None:
             peer_dtype = (
                 rhs_tensor.type.dtype if rhs_tensor is not None and np.isscalar(lhs) else None
