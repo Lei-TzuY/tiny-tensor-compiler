@@ -3,13 +3,16 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
-from .admission import CompileBudget, enforce_compile_budget
+from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
+from .analysis import CompilerReport
+from .backends.cpu import execute_loop
 from .fusion_planner import fuse_elementwise
+from .input_binding import BorrowedLoopProgram
 from .input_binding import borrow_inputs as bind_borrowed_inputs
 from .ir import Module, SymbolicDim
-from .loop_ir import lower_to_loops
+from .loop_ir import LoopProgram, lower_to_loops
 from .lowering import lower_to_cpu
 from .native_api import NativeExecutable, compile_native
 from .symbolic import (
@@ -21,6 +24,61 @@ from .symbolic import (
     specialize_module,
     validate_dynamic_module,
 )
+
+AdaptiveBackend = Literal["native", "loop"]
+LoopExecutionProgram = LoopProgram | BorrowedLoopProgram
+
+
+class AdaptiveExecutable:
+    """Execute one concrete module through native code or verified Loop CPU fallback."""
+
+    def __init__(
+        self,
+        *,
+        backend: AdaptiveBackend,
+        report: CompilerReport,
+        native: NativeExecutable | None = None,
+        loops: LoopExecutionProgram | None = None,
+        budget_exceeded: CompileBudgetExceeded | None = None,
+    ) -> None:
+        if backend == "native":
+            if native is None or loops is not None or budget_exceeded is not None:
+                raise ValueError("native adaptive executable requires only a native backend")
+        elif backend == "loop":
+            if loops is None or native is not None or budget_exceeded is None:
+                raise ValueError("loop adaptive executable requires a budget fallback program")
+        else:  # pragma: no cover - internal construction is statically bounded
+            raise ValueError(f"unsupported adaptive backend: {backend}")
+        self._backend = backend
+        self._report = report
+        self._native = native
+        self._loops = loops
+        self._budget_exceeded = budget_exceeded
+
+    @property
+    def backend(self) -> AdaptiveBackend:
+        return self._backend
+
+    @property
+    def report(self) -> CompilerReport:
+        return self._report
+
+    @property
+    def budget_exceeded(self) -> CompileBudgetExceeded | None:
+        return self._budget_exceeded
+
+    def execute(self, inputs: Sequence[Any] = ()):
+        """Execute without changing the selected backend or retrying native compilation."""
+        if self._backend == "native":
+            if self._native is None:  # pragma: no cover - constructor invariant
+                raise RuntimeError("native adaptive executable is missing its backend")
+            return self._native(inputs=inputs)
+        if self._loops is None:  # pragma: no cover - constructor invariant
+            raise RuntimeError("loop adaptive executable is missing its program")
+        return execute_loop(self._loops, inputs=inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()):
+        return self.execute(inputs=inputs)
 
 
 class DynamicExecutable:
@@ -64,10 +122,7 @@ class DynamicExecutable:
     def cached_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
         with self._lock:
             return tuple(
-                tuple(
-                    (symbol.name, size)
-                    for symbol, size in zip(self._symbols, key, strict=True)
-                )
+                _display_binding(self._symbols, key)
                 for key in sorted(self._specializations)
             )
 
@@ -84,25 +139,11 @@ class DynamicExecutable:
         self,
         bindings: int | Mapping[SymbolicDim | str, int],
     ) -> NativeExecutable:
-        if isinstance(bindings, bool):
-            raise TypeError("symbolic specialization requires an integer size, not bool")
-        if isinstance(bindings, int):
-            if len(self._symbols) != 1:
-                raise SymbolicShapeError(
-                    "integer specialization requires a single symbolic dimension"
-                )
-            explicit: Mapping[SymbolicDim | str, int] = {
-                self._symbols[0]: bindings
-            }
-        elif isinstance(bindings, Mapping):
-            explicit = bindings
-        else:
-            raise TypeError(
-                "specialization requires an integer for one symbol or a binding mapping"
-            )
-
-        normalized = normalize_symbolic_bindings(self._module, explicit)
-        key = tuple(normalized[symbol] for symbol in self._symbols)
+        normalized, key = _normalize_specialization_bindings(
+            self._module,
+            self._symbols,
+            bindings,
+        )
         with self._lock:
             executable = self._specializations.get(key)
             if executable is not None:
@@ -144,6 +185,106 @@ class DynamicExecutable:
         return self.execute(inputs=inputs, out=out)
 
 
+class AdaptiveDynamicExecutable:
+    """Cache per-binding native-or-loop decisions under one explicit compile budget."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+    ) -> None:
+        if not isinstance(budget, CompileBudget):
+            raise TypeError("budget must be a CompileBudget")
+        self._module = clone_module(module)
+        self._symbols = validate_dynamic_module(self._module)
+        self._budget = budget
+        self._compiler = compiler
+        self._cache_dir = cache_dir
+        self._borrow_inputs = borrow_inputs
+        self._parallel = parallel
+        self._specializations: dict[tuple[int, ...], AdaptiveExecutable] = {}
+        self._lock = threading.RLock()
+
+    @property
+    def symbolic_dims(self) -> tuple[SymbolicDim, ...]:
+        return self._symbols
+
+    @property
+    def symbolic_dim(self) -> SymbolicDim:
+        if len(self._symbols) != 1:
+            raise SymbolicShapeError(
+                "symbolic_dim is available only for a single symbolic dimension"
+            )
+        return self._symbols[0]
+
+    @property
+    def cached_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        with self._lock:
+            return tuple(
+                _display_binding(self._symbols, key)
+                for key in sorted(self._specializations)
+            )
+
+    @property
+    def cached_binding_backends(
+        self,
+    ) -> tuple[tuple[tuple[tuple[str, int], ...], AdaptiveBackend], ...]:
+        with self._lock:
+            return tuple(
+                (
+                    _display_binding(self._symbols, key),
+                    self._specializations[key].backend,
+                )
+                for key in sorted(self._specializations)
+            )
+
+    @property
+    def cached_batch_sizes(self) -> tuple[int, ...]:
+        if len(self._symbols) != 1:
+            raise SymbolicShapeError(
+                "cached_batch_sizes is available only for a single symbolic dimension"
+            )
+        with self._lock:
+            return tuple(sorted(key[0] for key in self._specializations))
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> AdaptiveExecutable:
+        normalized, key = _normalize_specialization_bindings(
+            self._module,
+            self._symbols,
+            bindings,
+        )
+        with self._lock:
+            executable = self._specializations.get(key)
+            if executable is not None:
+                return executable
+            concrete = specialize_module(self._module, normalized)
+            executable = compile_adaptive_module(
+                concrete,
+                budget=self._budget,
+                compiler=self._compiler,
+                cache_dir=self._cache_dir,
+                borrow_inputs=self._borrow_inputs,
+                parallel=self._parallel,
+            )
+            self._specializations[key] = executable
+            return executable
+
+    def execute(self, inputs: Sequence[Any] = ()):
+        bindings = bind_dynamic_shapes(self._module, inputs)
+        return self.specialize(bindings)(inputs=inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()):
+        return self.execute(inputs=inputs)
+
+
 def compile_module(
     module: Module,
     compiler: str | None = None,
@@ -161,9 +302,7 @@ def compile_module(
         )
     if budget is not None:
         enforce_compile_budget(module, budget)
-    loops = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
-    if borrow_inputs:
-        loops = bind_borrowed_inputs(loops)
+    loops = _lower_concrete_module(module, borrow_inputs=borrow_inputs)
     if parallel:
         return compile_native(
             loops,
@@ -175,6 +314,49 @@ def compile_module(
         loops,
         compiler=compiler,
         cache_dir=cache_dir,
+    )
+
+
+def compile_adaptive_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+) -> AdaptiveExecutable:
+    """Select native compilation or verified Loop CPU from one structural budget decision."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    if has_symbolic_shapes(module):
+        raise ValueError(
+            "compile_adaptive_module requires concrete tensor shapes; use "
+            "compile_adaptive_dynamic_module for runtime symbolic specialization"
+        )
+
+    try:
+        report = enforce_compile_budget(module, budget)
+    except CompileBudgetExceeded as error:
+        loops = _lower_concrete_module(module, borrow_inputs=borrow_inputs)
+        return AdaptiveExecutable(
+            backend="loop",
+            report=error.report,
+            loops=loops,
+            budget_exceeded=error,
+        )
+
+    native = compile_module(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+    )
+    return AdaptiveExecutable(
+        backend="native",
+        report=report,
+        native=native,
     )
 
 
@@ -195,4 +377,72 @@ def compile_dynamic_module(
         borrow_inputs=borrow_inputs,
         parallel=parallel,
         budget=budget,
+    )
+
+
+def compile_adaptive_dynamic_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+) -> AdaptiveDynamicExecutable:
+    """Prepare per-binding adaptive native-or-loop specializations."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    return AdaptiveDynamicExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+    )
+
+
+def _lower_concrete_module(
+    module: Module,
+    *,
+    borrow_inputs: bool,
+) -> LoopExecutionProgram:
+    loops: LoopExecutionProgram = fuse_elementwise(lower_to_loops(lower_to_cpu(module)))
+    if borrow_inputs:
+        loops = bind_borrowed_inputs(loops)
+    return loops
+
+
+def _normalize_specialization_bindings(
+    module: Module,
+    symbols: tuple[SymbolicDim, ...],
+    bindings: int | Mapping[SymbolicDim | str, int],
+):
+    if isinstance(bindings, bool):
+        raise TypeError("symbolic specialization requires an integer size, not bool")
+    if isinstance(bindings, int):
+        if len(symbols) != 1:
+            raise SymbolicShapeError(
+                "integer specialization requires a single symbolic dimension"
+            )
+        explicit: Mapping[SymbolicDim | str, int] = {symbols[0]: bindings}
+    elif isinstance(bindings, Mapping):
+        explicit = bindings
+    else:
+        raise TypeError(
+            "specialization requires an integer for one symbol or a binding mapping"
+        )
+
+    normalized = normalize_symbolic_bindings(module, explicit)
+    key = tuple(normalized[symbol] for symbol in symbols)
+    return normalized, key
+
+
+def _display_binding(
+    symbols: tuple[SymbolicDim, ...],
+    key: tuple[int, ...],
+) -> tuple[tuple[str, int], ...]:
+    return tuple(
+        (symbol.name, size)
+        for symbol, size in zip(symbols, key, strict=True)
     )
