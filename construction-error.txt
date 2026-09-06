@@ -1,69 +1,17 @@
-ISC004 Unparenthesized implicit string concatenation in collection
-   --> src/tiny_tensor_compiler/c_codegen.py:354:13
-    |
-352 |               f"                {c_type} matmul_value = {zero};",
-353 |               f"                for (int64_t k = 0; k < {k_extent}; ++k) {{",
-354 | /             f"                    volatile {c_type} matmul_product = "
-355 | |             f"(({c_type}){lhs_ref} * ({c_type}){rhs_ref});",
-    | |___________________________________________________________^
-356 |               f"                    matmul_value = "
-357 |               f"(({c_type})matmul_value + ({c_type})matmul_product);",
-    |
-help: Did you forget a comma?
-help: Wrap implicitly concatenated strings in parentheses
+All checks passed!
 
-ISC004 Unparenthesized implicit string concatenation in collection
-   --> src/tiny_tensor_compiler/c_codegen.py:356:13
-    |
-354 |               f"                    volatile {c_type} matmul_product = "
-355 |               f"(({c_type}){lhs_ref} * ({c_type}){rhs_ref});",
-356 | /             f"                    matmul_value = "
-357 | |             f"(({c_type})matmul_value + ({c_type})matmul_product);",
-    | |___________________________________________________________________^
-358 |               "                }",
-359 |               f"                p{op.output}[(i0 * {n}) + i1] = matmul_value;",
-    |
-help: Did you forget a comma?
-help: Wrap implicitly concatenated strings in parentheses
-
-I001 [*] Import block is un-sorted or un-formatted
-  --> src/tiny_tensor_compiler/loop_ir.py:1:1
-   |
- 1 | / from __future__ import annotations
- 2 | |
- 3 | | from dataclasses import dataclass
- 4 | | from typing import Any
- 5 | |
- 6 | | import numpy as np
- 7 | |
- 8 | | from . import fused_expr
- 9 | | from .inference import infer_binary, infer_reduction, infer_relu, infer_reshape
-10 | | from .ir import DType, TensorType
-11 | | from .layout import StorageLayout, element_count
-12 | | from .matmul_lowering import infer_direct_matmul_type
-13 | | from .lowering import (
-14 | |     BufferAlloc,
-15 | |     BufferBinaryInto,
-16 | |     BufferCopyInto,
-17 | |     BufferInplaceBinary,
-18 | |     BufferInput,
-19 | |     BufferReturn,
-20 | |     BufferView,
-21 | |     CPUProgram,
-22 | |     plan_memory,
-23 | | )
-24 | | from .reduction import REDUCTION_OPCODES, ReductionPlan
-   | |_______________________________________________________^
-help: Organize imports
-   |
-11 | from .layout import StorageLayout, element_count
-   - from .matmul_lowering import infer_direct_matmul_type
-12 | from .lowering import (
---------------------------------------------------------------------------------
-22 | )
-23 + from .matmul_lowering import infer_direct_matmul_type
-24 | from .reduction import REDUCTION_OPCODES, ReductionPlan
-   |
-
-Found 3 errors.
-[*] 1 fixable with the `--fix` option (2 hidden fixes can be enabled with the `--unsafe-fixes` option).
+==================================== ERRORS ====================================
+____________ ERROR collecting tests/test_direct_matmul_lowering.py _____________
+ImportError while importing test module '/home/runner/work/tiny-tensor-compiler/tiny-tensor-compiler/tests/test_direct_matmul_lowering.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/opt/hostedtoolcache/Python/3.11.16/x64/lib/python3.11/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_direct_matmul_lowering.py:5: in <module>
+    from tiny_tensor_compiler import (
+E   ImportError: cannot import name 'analyze_module' from 'tiny_tensor_compiler' (/home/runner/work/tiny-tensor-compiler/tiny-tensor-compiler/src/tiny_tensor_compiler/__init__.py)
+=========================== short test summary info ============================
+ERROR tests/test_direct_matmul_lowering.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 1.57s
