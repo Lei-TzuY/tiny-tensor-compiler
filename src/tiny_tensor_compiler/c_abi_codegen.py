@@ -7,6 +7,7 @@ from .avx2_codegen import (
 )
 from .c_codegen import (
     _c_type,
+    _element_count,
     _emit_input,
     _emit_kernel,
     _emit_return_copy,
@@ -160,16 +161,17 @@ def generate_c(
         plan = avx2_plans.get(kernel_number)
         if plan is not None:
             lines.append("    {")
+            count = _element_count(types[op.output])
             lines.extend(
                 emit_i32_avx2_dispatch(
                     plan,
                     helper_name=f"tiny_tensor_avx2_kernel_{kernel_number}",
                     output=op.output,
-                    count=_storage_size(types[op.output]),
+                    count=count,
                     sse2_lines=emit_i32_sse2_plan(
                         plan,
                         output=op.output,
-                        count=_storage_size(types[op.output]),
+                        count=count,
                     ),
                 )
             )
