@@ -105,7 +105,7 @@ def test_evaluation_budget_returns_best_valid_candidate_deterministically():
     assert result.evaluations == 2
     assert result.exhausted is True
     assert result.changed is True
-    assert load_repro_case(result.document).inputs[0].tolist() == [1, 2, 3, 4, 0, 0, 0, 0]
+    assert load_repro_case(result.document).inputs[0].tolist() == [0, 0, 0, 0, 5, 6, 7, 8]
 
 
 def test_original_case_must_satisfy_predicate_and_predicate_must_return_bool():
