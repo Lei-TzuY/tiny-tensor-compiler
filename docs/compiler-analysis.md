@@ -71,6 +71,37 @@ Mutation effects are counted as effects and are not treated as pure kernels. Rep
 
 After normal runtime shape solving and specialization produce a concrete `Module`, that concrete module can be analyzed normally.
 
+## Strict report comparison and structural regression gates
+
+`tiny_tensor_compiler.analysis_diff` turns the deterministic v1 report into a baseline-relative CI artifact without rerunning lowering or inventing a second compiler model.
+
+`parse_compiler_report()` is deliberately fail-closed. It rejects duplicate or unknown fields, non-canonical/duplicate histogram names, malformed scalar counts, non-dense storage slots, unsupported storage dtypes, storage byte counts that disagree with shape and dtype, planned-byte totals that disagree with the slots, and inconsistent pre/post-fusion totals. A report that cannot prove those internal invariants is not eligible for comparison.
+
+`compare_compiler_reports(before, after)` returns a canonical `CompilerReportDelta` containing deterministic scalar, operation-histogram, effect-histogram, pre/post-fusion-kernel, and changed-storage-slot deltas. Unchanged histogram/slot entries are omitted, while scalar metrics retain an explicit signed delta.
+
+The first regression policy is intentionally narrow and evidence-backed:
+
+- `max_planned_storage_bytes_increase`: allowed increase in compiler-owned planned storage bytes;
+- `max_post_fusion_kernel_increase`: allowed increase in the post-fusion Loop-kernel count.
+
+Both limits default to zero and must be non-negative plain integers. A decrease is always accepted by these increase-only checks. This is distinct from `CompileBudget`: compile admission applies absolute limits to one concrete module, while the report regression gate compares a candidate against an explicit baseline.
+
+The no-shell CLI is available through:
+
+```text
+python -m tiny_tensor_compiler.analysis_diff baseline.json candidate.json
+```
+
+Optional `--max-storage-increase N` and `--max-kernel-increase N` flags relax only the corresponding baseline-relative limit. Exit codes are stable:
+
+- `0`: both reports are valid and the candidate is within policy;
+- `1`: both reports are valid but at least one structural limit regressed;
+- `2`: a report, file, encoding, or policy value is invalid.
+
+The CLI prints a canonical delta JSON after a valid comparison so CI artifacts can retain the exact structural evidence behind a pass or failure.
+
+These gates are **not** performance regression tests. More planned bytes or more post-fusion kernels may or may not change wall-clock behavior, and fewer may or may not make execution faster. Runtime speed, RSS, compiler time, cache behavior, hardware counters, and parallel scalability require their own controlled evidence.
+
 ## Evidence scope
 
 The regression suite covers:
@@ -79,6 +110,10 @@ The regression suite covers:
 - a zero-copy logical view whose storage is charged only to its owning root;
 - a graph combining a strided view, partial binary mutation, transpose view, reduction, and multiple outputs;
 - canonical JSON stability across repeated analysis;
-- fail-closed rejection of unspecialized symbolic modules.
+- fail-closed rejection of unspecialized symbolic modules;
+- strict v1 report round-trip plus rejection of duplicate, unknown, malformed, and internally inconsistent report fields;
+- deterministic scalar/histogram/storage-slot deltas from real `CompilerReport` values;
+- baseline-relative storage/kernel regression policy behavior;
+- CLI pass/regression/invalid exit-code behavior.
 
-The analysis layer is intentionally observational. Performance benchmarks, runtime memory profiling, hardware counters, compiler timing, and borrow-specific storage accounting remain separate concerns and must use their own evidence rather than being inferred from this report.
+The analysis layer remains observational. Performance benchmarks, runtime memory profiling, hardware counters, compiler timing, and borrow-specific storage accounting remain separate concerns and must use their own evidence rather than being inferred from this report.
