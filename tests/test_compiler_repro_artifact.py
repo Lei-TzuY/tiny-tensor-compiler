@@ -20,7 +20,7 @@ from tiny_tensor_compiler.serialization import deserialize_module, serialize_mod
 def _module(*, scale: float = 1.0):
     builder = GraphBuilder()
     value = builder.input((8,), dtype="float32")
-    bias = builder.constant([scale] * 8, dtype="float32")
+    bias = builder.tensor([scale] * 8, dtype="float32")
     return builder.finish((value + bias).relu())
 
 
