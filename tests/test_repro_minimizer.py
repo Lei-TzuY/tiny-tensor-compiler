@@ -31,7 +31,7 @@ def test_minimizer_deterministically_reduces_nonzero_runtime_support():
 
     def still_interesting(candidate):
         case = load_repro_case(candidate)
-        return np.count_nonzero(case.inputs[0]) >= 2
+        return bool(np.count_nonzero(case.inputs[0]) >= 2)
 
     first = minimize_repro_case(document, still_interesting)
     second = minimize_repro_case(document, still_interesting)
@@ -53,7 +53,9 @@ def test_minimizer_preserves_shapes_dtypes_and_module_digest():
 
     result = minimize_repro_case(
         document,
-        lambda candidate: np.count_nonzero(load_repro_case(candidate).inputs[0]) >= 1,
+        lambda candidate: bool(
+            np.count_nonzero(load_repro_case(candidate).inputs[0]) >= 1
+        ),
     )
     minimized = load_repro_case(result.document)
 
@@ -81,10 +83,13 @@ def test_minimizer_processes_multiple_inputs_in_stable_declaration_order():
 
     result = minimize_repro_case(
         document,
-        lambda candidate: sum(
-            np.count_nonzero(value) for value in load_repro_case(candidate).inputs
-        )
-        >= 1,
+        lambda candidate: bool(
+            sum(
+                np.count_nonzero(value)
+                for value in load_repro_case(candidate).inputs
+            )
+            >= 1
+        ),
     )
     minimized = load_repro_case(result.document)
 
@@ -98,7 +103,9 @@ def test_evaluation_budget_returns_best_valid_candidate_deterministically():
 
     result = minimize_repro_case(
         document,
-        lambda candidate: np.count_nonzero(load_repro_case(candidate).inputs[0]) >= 1,
+        lambda candidate: bool(
+            np.count_nonzero(load_repro_case(candidate).inputs[0]) >= 1
+        ),
         max_evaluations=2,
     )
 
