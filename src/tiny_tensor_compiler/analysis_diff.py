@@ -450,7 +450,7 @@ def _decode_storage_slots(raw: Any) -> tuple[StorageSlotReport, ...]:
             for axis, dim in enumerate(raw_shape)
         )
         dtype = slot_record["dtype"]
-        if dtype not in _DTYPE_BYTES:
+        if not isinstance(dtype, str) or dtype not in _DTYPE_BYTES:
             raise CompilerReportValidationError(f"storage slot #{slot} has unsupported dtype")
         byte_count = _plain_nonnegative_int(
             slot_record["byte_count"], f"storage slot #{slot} byte_count"
