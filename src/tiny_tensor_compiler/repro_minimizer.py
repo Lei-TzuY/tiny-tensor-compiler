@@ -5,7 +5,7 @@ import copy
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +50,21 @@ class ReproMinimizationResult:
     module_json: str
     original_return_count: int
     minimized_return_count: int
+    attempts: int
+    accepted_reductions: int
+
+    @property
+    def module(self) -> Module:
+        return deserialize_module(self.module_json)
+
+
+@dataclass(frozen=True)
+class OperationMinimizationResult:
+    """Canonical one-minimal exact-type operation-substitution reduction."""
+
+    module_json: str
+    original_operation_count: int
+    minimized_operation_count: int
     attempts: int
     accepted_reductions: int
 
@@ -122,13 +137,79 @@ def minimize_return_roots(
     )
 
 
+def minimize_operations(
+    module: Module,
+    predicate: Callable[[Module], bool],
+) -> OperationMinimizationResult:
+    """Greedily substitute pure operations with exact-typed operands under a predicate.
+
+    Only a single-result pure operation whose result type exactly equals one of its
+    operand types is a candidate.  Candidates are considered deterministically from the
+    end of the function toward the beginning and from the rightmost operand toward the
+    leftmost.  Every accepted candidate is rebuilt as fresh SSA, preserves every declared
+    input and its dense index, and is reverified before the trusted predicate observes it.
+
+    The result is one-minimal with respect to one additional exact-type operand
+    substitution under this deterministic order.  It is not a superoptimizer and does
+    not claim a globally minimum operation count or semantic equivalence without the
+    caller-supplied reproduction predicate.
+    """
+    if not isinstance(module, Module):
+        raise TypeError("minimize_operations requires a Module")
+    if not callable(predicate):
+        raise TypeError("predicate must be callable")
+
+    canonical = serialize_module(module)
+    validated = deserialize_module(canonical)
+    _validate_reducible_module(validated)
+    original_operation_count = _pure_operation_count(validated)
+
+    if not _predicate_holds(canonical, predicate):
+        raise InitialReproductionMissing("initial module does not satisfy reproduction predicate")
+
+    current_json = canonical
+    attempts = 0
+    accepted_reductions = 0
+
+    while True:
+        current = deserialize_module(current_json)
+        reduced = False
+        for op_index, operand_index in _operation_substitutions(current):
+            candidate = _substitute_operation_with_operand(current, op_index, operand_index)
+            candidate_json = serialize_module(candidate)
+            attempts += 1
+            if not _predicate_holds(candidate_json, predicate):
+                continue
+            current_json = candidate_json
+            accepted_reductions += 1
+            reduced = True
+            break
+
+        if not reduced:
+            break
+
+    minimized = deserialize_module(current_json)
+    return OperationMinimizationResult(
+        module_json=current_json,
+        original_operation_count=original_operation_count,
+        minimized_operation_count=_pure_operation_count(minimized),
+        attempts=attempts,
+        accepted_reductions=accepted_reductions,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Minimize serialized tensor IR with an explicit cross-process predicate command."""
     parser = argparse.ArgumentParser(
-        description="Deterministically minimize multi-output compiler repro modules by return root."
+        description="Deterministically minimize compiler repro modules with a trusted predicate."
     )
     parser.add_argument("module", help="path to canonical serialized tensor IR")
     parser.add_argument("output", help="path to write minimized canonical tensor IR")
+    parser.add_argument(
+        "--reduce-operations",
+        action="store_true",
+        help="after return-root reduction, minimize exact-type pure operations by substitution",
+    )
     parser.add_argument(
         "--predicate",
         nargs=argparse.REMAINDER,
@@ -142,12 +223,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.predicate:
         parser.error("--predicate requires a command")
 
+    operation_result: OperationMinimizationResult | None = None
     try:
         module_document = Path(args.module).read_text(encoding="utf-8")
         module = deserialize_module(module_document)
         predicate = _external_predicate(tuple(args.predicate))
         result = minimize_return_roots(module, predicate)
-        Path(args.output).write_text(result.module_json, encoding="utf-8")
+        output_json = result.module_json
+        if args.reduce_operations:
+            operation_result = minimize_operations(result.module, predicate)
+            output_json = operation_result.module_json
+        Path(args.output).write_text(output_json, encoding="utf-8")
     except InitialReproductionMissing as exc:
         print(f"not reproduced: {exc}", file=sys.stderr)
         return 1
@@ -161,10 +247,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"repro minimization failed: {exc}", file=sys.stderr)
         return 2
 
-    print(
+    summary = (
         f"returns: {result.original_return_count} -> {result.minimized_return_count}; "
         f"attempts: {result.attempts}; accepted reductions: {result.accepted_reductions}"
     )
+    if operation_result is not None:
+        summary += (
+            f"; operations: {operation_result.original_operation_count} -> "
+            f"{operation_result.minimized_operation_count}; operation attempts: "
+            f"{operation_result.attempts}; operation reductions: "
+            f"{operation_result.accepted_reductions}"
+        )
+    print(summary)
     return 0
 
 
@@ -175,11 +269,11 @@ def _validate_reducible_module(module: Module) -> None:
             continue
         if op.opcode in _EFFECT_OPCODES:
             raise ReproMinimizationError(
-                f"effectful opcode {op.opcode!r} is outside return-root minimization"
+                f"effectful opcode {op.opcode!r} is outside repro minimization"
             )
         if op.opcode not in _PURE_OPCODES:
             raise ReproMinimizationError(
-                f"unsupported opcode {op.opcode!r} is outside return-root minimization"
+                f"unsupported opcode {op.opcode!r} is outside repro minimization"
             )
         if any(not result.type.is_static for result in op.results):
             raise ReproMinimizationError("repro minimization requires concrete tensor shapes")
@@ -252,6 +346,77 @@ def _slice_to_return_roots(module: Module, selected_indices: Sequence[int]) -> M
     result = Module(rebuilt)
     verify(result)
     return result
+
+
+def _operation_substitutions(module: Module) -> Iterator[tuple[int, int]]:
+    ops = module.function.ops
+    for op_index in reversed(range(len(ops))):
+        op = ops[op_index]
+        if op.opcode in {"input", "return", "const"} or len(op.results) != 1:
+            continue
+        result_type = op.results[0].type
+        for operand_index in reversed(range(len(op.operands))):
+            if op.operands[operand_index].type == result_type:
+                yield op_index, operand_index
+
+
+def _substitute_operation_with_operand(
+    module: Module,
+    op_index: int,
+    operand_index: int,
+) -> Module:
+    ops = module.function.ops
+    if op_index < 0 or op_index >= len(ops):
+        raise ReproMinimizationError("operation reduction index is out of range")
+    target = ops[op_index]
+    if target.opcode in {"input", "return", "const"} or len(target.results) != 1:
+        raise ReproMinimizationError("operation is not eligible for operand substitution")
+    if operand_index < 0 or operand_index >= len(target.operands):
+        raise ReproMinimizationError("operation operand reduction index is out of range")
+    replacement = target.operands[operand_index]
+    if replacement.type != target.results[0].type:
+        raise ReproMinimizationError("operation substitution requires an exact result/operand type")
+
+    rebuilt = Function(module.function.name)
+    values: dict[Value, Value] = {}
+    for index, op in enumerate(ops):
+        if op.opcode == "return":
+            try:
+                returns = [values[operand] for operand in op.operands]
+            except KeyError as exc:
+                raise RuntimeError("internal error: repro operation substitution lost a return") from exc
+            rebuilt.add_op("return", operands=returns)
+            continue
+
+        if index == op_index:
+            try:
+                values[op.results[0]] = values[replacement]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal error: repro operation replacement does not dominate target"
+                ) from exc
+            continue
+
+        try:
+            operands = [values[operand] for operand in op.operands]
+        except KeyError as exc:
+            raise RuntimeError("internal error: repro operation substitution lost an operand") from exc
+        cloned = rebuilt.add_op(
+            op.opcode,
+            operands=operands,
+            result_types=[result.type for result in op.results],
+            attrs=copy.deepcopy(op.attrs),
+        )
+        for source, destination in zip(op.results, cloned.results, strict=True):
+            values[source] = destination
+
+    result = Module(rebuilt)
+    verify(result)
+    return result
+
+
+def _pure_operation_count(module: Module) -> int:
+    return sum(op.opcode in _PURE_OPCODES for op in module.function.ops)
 
 
 def _dependency_closure(values: Sequence[Value]) -> frozenset[Operation]:
