@@ -57,6 +57,24 @@ Backend execution policy is intentionally outside the artifact:
 
 Keeping these settings outside the artifact lets the same case reproduce behavior across compilers, platforms, cache states, or serial/parallel execution without changing the captured high-level program and data.
 
+## Deterministic runtime-value minimization
+
+`minimize_repro_case(document, predicate, ...)` reduces the amount of non-zero runtime input data while preserving a caller-defined reproduction predicate. It deliberately reuses the version-1 repro format instead of introducing a second artifact or codec.
+
+The first minimization phase is bounded and deterministic:
+
+- module IR, module digest, input count, input shapes, input dtypes, and declaration order never change;
+- candidates are visited in input declaration order and C-order chunk order;
+- each accepted candidate zeros one deterministic input chunk and is rebuilt through `capture_repro_case()`, so its stored reference outputs always match the candidate inputs;
+- chunk size starts from half of the input element count and is repeatedly halved down to individual elements;
+- blocks that are already zero do not spend the evaluation budget;
+- `max_evaluations=` is an optional positive deterministic budget; exhaustion returns the best predicate-preserving candidate found so far and marks the result as exhausted;
+- the predicate must return an exact Python `bool`, avoiding truth-value coercion from array-like objects.
+
+The result reports the canonical minimized document, predicate evaluation count, original/minimized non-zero support, whether the budget was exhausted, and whether any support was removed. The algorithm promises deterministic bounded reduction, **not** a globally minimal repro.
+
+`minimize_native_mismatch()` is the native-differential adapter. It treats only `ReproMismatchError` from ordinary native replay as a reproducing backend divergence; compiler lookup failures, build failures, malformed artifacts, and other execution errors are not swallowed or misclassified as successful reproduction. Compiler, cache-directory, and parallel-execution selections remain replay-time policy just as they are for `replay_repro_case()`.
+
 ## Fail-closed validation
 
 Version 1 rejects rather than approximates:
@@ -75,6 +93,6 @@ Array storage is canonical fixed-width little-endian data, including rank-zero a
 
 ## Deliberate boundary
 
-This phase provides deterministic capture, content addressing, and reference/native differential replay. It does not provide a randomized program generator, fuzz scheduler, failing-case minimizer, corpus database, sandbox, or distributed execution service.
+This phase provides deterministic capture, content addressing, reference/native differential replay, and bounded deterministic shrinking of runtime non-zero support. The minimizer does not change shapes, dtypes, module IR, graph topology, symbolic constraints, or compiler configuration, and it does not claim global minimality.
 
-A later testing phase can build randomized differential generation and deterministic shrinking on top of this stable case format without expanding the version-1 artifact into backend or release metadata.
+A later testing phase may add verifier-backed IR/shape reduction, randomized differential generation, corpus management, sandboxing, or distributed execution. Those are separate architectural capabilities rather than reasons to expand the version-1 artifact schema or to turn the first value reducer into an unbounded delta-debugging framework.
