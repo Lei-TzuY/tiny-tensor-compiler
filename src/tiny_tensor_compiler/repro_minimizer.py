@@ -73,17 +73,35 @@ class OperationMinimizationResult:
         return deserialize_module(self.module_json)
 
 
+@dataclass(frozen=True)
+class EffectMinimizationResult:
+    """Canonical one-minimal storage-generation rollback reduction."""
+
+    module_json: str
+    original_effect_count: int
+    minimized_effect_count: int
+    attempts: int
+    accepted_reductions: int
+
+    @property
+    def module(self) -> Module:
+        return deserialize_module(self.module_json)
+
+
 def minimize_return_roots(
     module: Module,
     predicate: Callable[[Module], bool],
+    *,
+    allow_effects: bool = False,
 ) -> ReproMinimizationResult:
     """Greedily remove returned roots while a caller-supplied repro predicate remains true.
 
     Each candidate is rebuilt from the backward SSA dependency closure of the selected
     return values while retaining all declared inputs.  This reassigns canonical SSA ids
-    instead of mutating the original module in place.  The current phase deliberately
-    accepts only concrete modules over the known pure operation surface; mutation/effect
-    operations and unknown opcodes fail closed.
+    instead of mutating the original module in place.  By default mutation/effect
+    operations fail closed.  ``allow_effects=True`` permits the known generation-producing
+    mutation operations so the verified SSA dependency closure can retain exactly the
+    effect generations required by the selected returns.
 
     The result is deterministic and one-minimal with respect to single return-root
     removal in right-to-left order.  It is not a claim of globally minimum IR size.
@@ -92,10 +110,12 @@ def minimize_return_roots(
         raise TypeError("minimize_return_roots requires a Module")
     if not callable(predicate):
         raise TypeError("predicate must be callable")
+    if not isinstance(allow_effects, bool):
+        raise TypeError("allow_effects must be a bool")
 
     canonical = serialize_module(module)
     validated = deserialize_module(canonical)
-    _validate_reducible_module(validated)
+    _validate_reducible_module(validated, allow_effects=allow_effects)
     original_return_count = len(_return_op(validated).operands)
 
     if not _predicate_holds(canonical, predicate):
@@ -140,14 +160,21 @@ def minimize_return_roots(
 def minimize_operations(
     module: Module,
     predicate: Callable[[Module], bool],
+    *,
+    allow_effects: bool = False,
 ) -> OperationMinimizationResult:
     """Greedily substitute pure operations with exact-typed operands under a predicate.
 
-    Only a single-result pure operation whose result type exactly equals one of its
+    Only a single-result known-pure operation whose result type exactly equals one of its
     operand types is a candidate.  Candidates are considered deterministically from the
     end of the function toward the beginning and from the rightmost operand toward the
     leftmost.  Every accepted candidate is rebuilt as fresh SSA, preserves every declared
     input and its dense index, and is reverified before the trusted predicate observes it.
+
+    By default mutation/effect operations still fail closed.  With ``allow_effects=True``
+    the known effects are preserved as non-candidates while pure dependencies around them
+    may be reduced.  A substitution that would violate storage-generation or alias
+    freshness is rejected by the ordinary verifier before the predicate is called.
 
     The result is one-minimal with respect to one additional exact-type operand
     substitution under this deterministic order.  It is not a superoptimizer and does
@@ -158,10 +185,12 @@ def minimize_operations(
         raise TypeError("minimize_operations requires a Module")
     if not callable(predicate):
         raise TypeError("predicate must be callable")
+    if not isinstance(allow_effects, bool):
+        raise TypeError("allow_effects must be a bool")
 
     canonical = serialize_module(module)
     validated = deserialize_module(canonical)
-    _validate_reducible_module(validated)
+    _validate_reducible_module(validated, allow_effects=allow_effects)
     original_operation_count = _pure_operation_count(validated)
 
     if not _predicate_holds(canonical, predicate):
@@ -175,9 +204,14 @@ def minimize_operations(
         current = deserialize_module(current_json)
         reduced = False
         for op_index, operand_index in _operation_substitutions(current):
-            candidate = _substitute_operation_with_operand(current, op_index, operand_index)
-            candidate_json = serialize_module(candidate)
             attempts += 1
+            try:
+                candidate = _substitute_operation_with_operand(current, op_index, operand_index)
+            except ValueError:
+                if allow_effects:
+                    continue
+                raise
+            candidate_json = serialize_module(candidate)
             if not _predicate_holds(candidate_json, predicate):
                 continue
             current_json = candidate_json
@@ -198,6 +232,69 @@ def minimize_operations(
     )
 
 
+def minimize_effects(
+    module: Module,
+    predicate: Callable[[Module], bool],
+) -> EffectMinimizationResult:
+    """Greedily remove verified mutation generations under an explicit repro predicate.
+
+    One candidate removes a single known effect operation and maps that operation's fresh
+    full-root generation result back to its exact-typed pre-write root operand.  The whole
+    module is rebuilt as fresh SSA and passed through the ordinary verifier.  Candidates
+    that violate storage-generation, alias-freshness, dominance, or any other verifier
+    invariant are rejected before the trusted predicate observes them.
+
+    Acceptance means only that the caller-supplied predicate still reproduces after this
+    bounded generation rollback.  It is not a claim that dropping the write is generally
+    semantics-preserving, and it does not reorder effects or synthesize replacements.
+    """
+    if not isinstance(module, Module):
+        raise TypeError("minimize_effects requires a Module")
+    if not callable(predicate):
+        raise TypeError("predicate must be callable")
+
+    canonical = serialize_module(module)
+    validated = deserialize_module(canonical)
+    _validate_reducible_module(validated, allow_effects=True)
+    original_effect_count = _effect_operation_count(validated)
+
+    if not _predicate_holds(canonical, predicate):
+        raise InitialReproductionMissing("initial module does not satisfy reproduction predicate")
+
+    current_json = canonical
+    attempts = 0
+    accepted_reductions = 0
+
+    while True:
+        current = deserialize_module(current_json)
+        reduced = False
+        for op_index in _effect_substitutions(current):
+            attempts += 1
+            try:
+                candidate = _substitute_effect_with_root(current, op_index)
+            except ValueError:
+                continue
+            candidate_json = serialize_module(candidate)
+            if not _predicate_holds(candidate_json, predicate):
+                continue
+            current_json = candidate_json
+            accepted_reductions += 1
+            reduced = True
+            break
+
+        if not reduced:
+            break
+
+    minimized = deserialize_module(current_json)
+    return EffectMinimizationResult(
+        module_json=current_json,
+        original_effect_count=original_effect_count,
+        minimized_effect_count=_effect_operation_count(minimized),
+        attempts=attempts,
+        accepted_reductions=accepted_reductions,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Minimize serialized tensor IR with an explicit cross-process predicate command."""
     parser = argparse.ArgumentParser(
@@ -209,6 +306,14 @@ def main(argv: list[str] | None = None) -> int:
         "--reduce-operations",
         action="store_true",
         help="after return-root reduction, minimize exact-type pure operations by substitution",
+    )
+    parser.add_argument(
+        "--reduce-effects",
+        action="store_true",
+        help=(
+            "allow verified mutation generations during reduction and then minimize them "
+            "by predicate-guarded generation rollback"
+        ),
     )
     parser.add_argument(
         "--predicate",
@@ -224,15 +329,29 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--predicate requires a command")
 
     operation_result: OperationMinimizationResult | None = None
+    effect_result: EffectMinimizationResult | None = None
     try:
         module_document = Path(args.module).read_text(encoding="utf-8")
         module = deserialize_module(module_document)
         predicate = _external_predicate(tuple(args.predicate))
-        result = minimize_return_roots(module, predicate)
+        result = minimize_return_roots(
+            module,
+            predicate,
+            allow_effects=args.reduce_effects,
+        )
+        current = result.module
         output_json = result.module_json
         if args.reduce_operations:
-            operation_result = minimize_operations(result.module, predicate)
+            operation_result = minimize_operations(
+                current,
+                predicate,
+                allow_effects=args.reduce_effects,
+            )
+            current = operation_result.module
             output_json = operation_result.module_json
+        if args.reduce_effects:
+            effect_result = minimize_effects(current, predicate)
+            output_json = effect_result.module_json
         Path(args.output).write_text(output_json, encoding="utf-8")
     except InitialReproductionMissing as exc:
         print(f"not reproduced: {exc}", file=sys.stderr)
@@ -258,20 +377,28 @@ def main(argv: list[str] | None = None) -> int:
             f"{operation_result.attempts}; operation reductions: "
             f"{operation_result.accepted_reductions}"
         )
+    if effect_result is not None:
+        summary += (
+            f"; effects: {effect_result.original_effect_count} -> "
+            f"{effect_result.minimized_effect_count}; effect attempts: "
+            f"{effect_result.attempts}; effect reductions: "
+            f"{effect_result.accepted_reductions}"
+        )
     print(summary)
     return 0
 
 
-def _validate_reducible_module(module: Module) -> None:
+def _validate_reducible_module(module: Module, *, allow_effects: bool = False) -> None:
     verify(module)
     for op in module.function.ops:
         if op.opcode in {"input", "return"}:
             continue
         if op.opcode in _EFFECT_OPCODES:
-            raise ReproMinimizationError(
-                f"effectful opcode {op.opcode!r} is outside repro minimization"
-            )
-        if op.opcode not in _PURE_OPCODES:
+            if not allow_effects:
+                raise ReproMinimizationError(
+                    f"effectful opcode {op.opcode!r} is outside repro minimization"
+                )
+        elif op.opcode not in _PURE_OPCODES:
             raise ReproMinimizationError(
                 f"unsupported opcode {op.opcode!r} is outside repro minimization"
             )
@@ -352,7 +479,7 @@ def _operation_substitutions(module: Module) -> Iterator[tuple[int, int]]:
     ops = module.function.ops
     for op_index in reversed(range(len(ops))):
         op = ops[op_index]
-        if op.opcode in {"input", "return", "const"} or len(op.results) != 1:
+        if op.opcode not in _PURE_OPCODES or op.opcode == "const" or len(op.results) != 1:
             continue
         result_type = op.results[0].type
         for operand_index in reversed(range(len(op.operands))):
@@ -369,7 +496,7 @@ def _substitute_operation_with_operand(
     if op_index < 0 or op_index >= len(ops):
         raise ReproMinimizationError("operation reduction index is out of range")
     target = ops[op_index]
-    if target.opcode in {"input", "return", "const"} or len(target.results) != 1:
+    if target.opcode not in _PURE_OPCODES or target.opcode == "const" or len(target.results) != 1:
         raise ReproMinimizationError("operation is not eligible for operand substitution")
     if operand_index < 0 or operand_index >= len(target.operands):
         raise ReproMinimizationError("operation operand reduction index is out of range")
@@ -415,8 +542,67 @@ def _substitute_operation_with_operand(
     return result
 
 
+def _effect_substitutions(module: Module) -> Iterator[int]:
+    for op_index in reversed(range(len(module.function.ops))):
+        if module.function.ops[op_index].opcode in _EFFECT_OPCODES:
+            yield op_index
+
+
+def _substitute_effect_with_root(module: Module, op_index: int) -> Module:
+    ops = module.function.ops
+    if op_index < 0 or op_index >= len(ops):
+        raise ReproMinimizationError("effect reduction index is out of range")
+    target = ops[op_index]
+    if target.opcode not in _EFFECT_OPCODES or len(target.results) != 1 or not target.operands:
+        raise ReproMinimizationError("operation is not an eligible mutation generation")
+    root = target.operands[0]
+    if root.type != target.results[0].type:
+        raise ReproMinimizationError("effect rollback requires an exact result/root type")
+
+    rebuilt = Function(module.function.name)
+    values: dict[Value, Value] = {}
+    for index, op in enumerate(ops):
+        if op.opcode == "return":
+            try:
+                returns = [values[operand] for operand in op.operands]
+            except KeyError as exc:
+                raise RuntimeError("internal error: repro effect rollback lost a return") from exc
+            rebuilt.add_op("return", operands=returns)
+            continue
+
+        if index == op_index:
+            try:
+                values[op.results[0]] = values[root]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal error: repro effect root does not dominate mutation"
+                ) from exc
+            continue
+
+        try:
+            operands = [values[operand] for operand in op.operands]
+        except KeyError as exc:
+            raise RuntimeError("internal error: repro effect rollback lost an operand") from exc
+        cloned = rebuilt.add_op(
+            op.opcode,
+            operands=operands,
+            result_types=[result.type for result in op.results],
+            attrs=copy.deepcopy(op.attrs),
+        )
+        for source, destination in zip(op.results, cloned.results, strict=True):
+            values[source] = destination
+
+    result = Module(rebuilt)
+    verify(result)
+    return result
+
+
 def _pure_operation_count(module: Module) -> int:
     return sum(op.opcode in _PURE_OPCODES for op in module.function.ops)
+
+
+def _effect_operation_count(module: Module) -> int:
+    return sum(op.opcode in _EFFECT_OPCODES for op in module.function.ops)
 
 
 def _dependency_closure(values: Sequence[Value]) -> frozenset[Operation]:
