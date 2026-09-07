@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from .avx2_codegen import (
+    avx2_support_prelude,
+    emit_i32_avx2_dispatch,
+    emit_i32_avx2_helper,
+)
 from .c_codegen import (
     _c_type,
     _emit_input,
     _emit_kernel,
     _emit_return_copy,
+    _select_i32_sse2_plan,
     _storage_size,
 )
 from .input_binding import BorrowedLoopProgram
@@ -14,11 +20,13 @@ from .loop_ir import (
     LoopCopyInto,
     LoopInplaceBinary,
     LoopInput,
+    LoopKernel,
     LoopProgram,
     LoopReturn,
     LoopView,
 )
 from .parallel_codegen import emit_parallel_binary_into, emit_parallel_kernel
+from .simd_codegen import I32SSE2Plan, emit_i32_sse2_plan
 from .write_codegen import emit_binary_into, emit_copy_into, emit_inplace_binary
 
 
@@ -45,6 +53,15 @@ def generate_c(
         for index, input_type in enumerate(program.input_types)
     )
 
+    avx2_plans: dict[int, I32SSE2Plan] = {}
+    if not parallel:
+        for kernel_number, kernel in enumerate(
+            op for op in program.operations if isinstance(op, LoopKernel)
+        ):
+            plan = _select_i32_sse2_plan(kernel, types, layouts=layouts)
+            if plan is not None:
+                avx2_plans[kernel_number] = plan
+
     lines = [
         "#include <math.h>",
         "#include <stdint.h>",
@@ -62,18 +79,31 @@ def generate_c(
         "#define TINY_TENSOR_EXPORT",
         "#endif",
         "",
-        "#if defined(_MSC_VER)",
-        "#define TINY_TENSOR_VECTORIZE_LOOP __pragma(loop(ivdep))",
-        "#elif defined(__clang__)",
-        '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")',
-        "#elif defined(__GNUC__)",
-        '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("GCC ivdep")',
-        "#else",
-        "#define TINY_TENSOR_VECTORIZE_LOOP",
-        "#endif",
-        "",
-        f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{",
     ]
+    if avx2_plans:
+        lines.extend(avx2_support_prelude())
+    lines.extend(
+        [
+            "#if defined(_MSC_VER)",
+            "#define TINY_TENSOR_VECTORIZE_LOOP __pragma(loop(ivdep))",
+            "#elif defined(__clang__)",
+            '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")',
+            "#elif defined(__GNUC__)",
+            '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("GCC ivdep")',
+            "#else",
+            "#define TINY_TENSOR_VECTORIZE_LOOP",
+            "#endif",
+            "",
+        ]
+    )
+    for kernel_number, plan in avx2_plans.items():
+        lines.extend(
+            emit_i32_avx2_helper(
+                plan,
+                helper_name=f"tiny_tensor_avx2_kernel_{kernel_number}",
+            )
+        )
+    lines.append(f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{")
 
     borrowed_by_slot = {
         binding.buffer: binding for binding in getattr(program, "borrowed_inputs", ())
@@ -126,8 +156,27 @@ def generate_c(
             )
             return_number += 1
             continue
-        emitter = emit_parallel_kernel if parallel else _emit_kernel
-        lines.extend(emitter(op, types, kernel_number, layouts=layouts))
+
+        plan = avx2_plans.get(kernel_number)
+        if plan is not None:
+            lines.append("    {")
+            lines.extend(
+                emit_i32_avx2_dispatch(
+                    plan,
+                    helper_name=f"tiny_tensor_avx2_kernel_{kernel_number}",
+                    output=op.output,
+                    count=_storage_size(types[op.output]),
+                    sse2_lines=emit_i32_sse2_plan(
+                        plan,
+                        output=op.output,
+                        count=_storage_size(types[op.output]),
+                    ),
+                )
+            )
+            lines.extend(["    }", ""])
+        else:
+            emitter = emit_parallel_kernel if parallel else _emit_kernel
+            lines.extend(emitter(op, types, kernel_number, layouts=layouts))
         kernel_number += 1
 
     if return_number != len(output_names):
