@@ -63,20 +63,32 @@ The stored JSON is treated as untrusted diagnostic input. A phase whose text no 
 
 Python callers can use `compare_trace_json()` or `compare_trace_files()` from `tiny_tensor_compiler.trace_diff` and inspect the structured `CompilerTraceComparison` / `CompilerTracePhaseDiff` values. The package root intentionally remains focused on trace capture; comparison is a tooling submodule and does not alter compilation semantics.
 
+## Repro artifact integration
+
+`tiny_tensor_compiler.repro_artifact` builds directly on this trace contract. A versioned repro document stores one canonical serialized concrete module, the trace-affecting `borrow_inputs` / `parallel` configuration, the expected canonical trace, per-component SHA-256 digests, and a whole-document digest. Replay validates the artifact, deserializes and reverifies the module, reruns `trace_module()`, then delegates first-divergence localization to the same trace-diff implementation.
+
+```bash
+python -m tiny_tensor_compiler.repro_artifact capture module.json repro.json
+python -m tiny_tensor_compiler.repro_artifact replay repro.json
+```
+
+See `docs/compiler-repro-artifact.md` for the exact schema, fail-closed checks, CLI exit contract, and evidence boundary.
+
 ## Stability and evidence boundary
 
 Phase fingerprints are intended for deterministic regression snapshots, differential debugging, and localizing compiler drift. They are not a compatibility promise across compiler versions: an intentional lowering or code-generation change is expected to change the affected phase text and digest.
 
 The SHA-256 values identify the captured text only. They are not publisher signatures, supply-chain attestations, native-artifact trust decisions, or proofs of semantic equivalence. Likewise, equality of two traces is strong evidence that the captured compiler representations are byte-for-byte identical, but it is not a substitute for verifier, differential, native-execution, or conformance tests.
 
-A successful comparison also does not certify the native compiler or generated artifact because the trace boundary intentionally stops at generated C. Host compiler invocation, timeout/process-tree behavior, cache leases, signed bundles, and native loading retain their own validation surfaces.
+A successful comparison or repro replay also does not certify the native compiler or generated artifact because the trace boundary intentionally stops at generated C. Host compiler invocation, timeout/process-tree behavior, cache leases, signed bundles, and native loading retain their own validation surfaces.
 
-The compiler-report and trace APIs are complementary:
+The compiler-report, trace, and repro APIs are complementary:
 
 - use `analyze_module()` / `CompilerReport` for stable structural facts and admission-policy inputs;
 - use `trace_module()` / `CompilerTrace` to capture exact phase-by-phase compiler state;
-- use `tiny_tensor_compiler.trace_diff` when two stored snapshots need deterministic first-divergence localization or fail-closed repro triage.
+- use `tiny_tensor_compiler.trace_diff` when two stored snapshots need deterministic first-divergence localization;
+- use `tiny_tensor_compiler.repro_artifact` when the original canonical Module plus trace-affecting configuration must travel with the expected trace and be replayed fail-closed.
 
 ## Phase boundary
 
-This milestone closes the deterministic trace-comparison/repro-diagnosis layer without changing execution semantics, optimizer policy, native-compilation behavior, or cache policy. Further observability work should only continue when it adds a genuinely new executable diagnostic capability—such as a bounded reproducibility artifact workflow—rather than more trace fields, presentation switches, or statistics-only surfaces.
+The deterministic trace-comparison layer and the bounded compiler-repro artifact workflow are now both executable. Further observability work should only continue when it adds a qualitatively new diagnostic capability—such as independently replayable runtime-input/output evidence or deterministic minimization of a valid reproducer—rather than more trace fields, checksums, presentation switches, or statistics-only surfaces.
