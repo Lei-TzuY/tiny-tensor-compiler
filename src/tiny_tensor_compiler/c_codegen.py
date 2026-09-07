@@ -7,6 +7,11 @@ from typing import Any
 
 import numpy as np
 
+from .avx2_codegen import (
+    avx2_support_prelude,
+    emit_i32_avx2_dispatch,
+    emit_i32_avx2_helper,
+)
 from .fused_expr import FusedExpression
 from .ir import DType, TensorType
 from .layout import StorageLayout
@@ -35,6 +40,14 @@ def generate_c(program: LoopProgram) -> str:
         for index, input_type in enumerate(program.input_types)
     )
 
+    avx2_plans: dict[int, I32SSE2Plan] = {}
+    for kernel_number, kernel in enumerate(
+        op for op in program.operations if isinstance(op, LoopKernel)
+    ):
+        plan = _select_i32_sse2_plan(kernel, types, layouts=layouts)
+        if plan is not None:
+            avx2_plans[kernel_number] = plan
+
     lines = [
         "#include <math.h>",
         "#include <stdint.h>",
@@ -52,18 +65,31 @@ def generate_c(program: LoopProgram) -> str:
         "#define TINY_TENSOR_EXPORT",
         "#endif",
         "",
-        "#if defined(_MSC_VER)",
-        "#define TINY_TENSOR_VECTORIZE_LOOP __pragma(loop(ivdep))",
-        "#elif defined(__clang__)",
-        '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")',
-        "#elif defined(__GNUC__)",
-        '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("GCC ivdep")',
-        "#else",
-        "#define TINY_TENSOR_VECTORIZE_LOOP",
-        "#endif",
-        "",
-        f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{",
     ]
+    if avx2_plans:
+        lines.extend(avx2_support_prelude())
+    lines.extend(
+        [
+            "#if defined(_MSC_VER)",
+            "#define TINY_TENSOR_VECTORIZE_LOOP __pragma(loop(ivdep))",
+            "#elif defined(__clang__)",
+            '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("clang loop vectorize(enable)")',
+            "#elif defined(__GNUC__)",
+            '#define TINY_TENSOR_VECTORIZE_LOOP _Pragma("GCC ivdep")',
+            "#else",
+            "#define TINY_TENSOR_VECTORIZE_LOOP",
+            "#endif",
+            "",
+        ]
+    )
+    for kernel_number, plan in avx2_plans.items():
+        lines.extend(
+            emit_i32_avx2_helper(
+                plan,
+                helper_name=f"tiny_tensor_avx2_kernel_{kernel_number}",
+            )
+        )
+    lines.append(f"TINY_TENSOR_EXPORT void tiny_tensor_run({', '.join(parameters)}) {{")
 
     for alloc in program.allocations:
         lines.append(f"    {_c_type(alloc.type.dtype)} p{alloc.buffer}[{_storage_size(alloc.type)}];")
@@ -87,7 +113,27 @@ def generate_c(program: LoopProgram) -> str:
         if isinstance(op, LoopReturn):
             lines.extend(_emit_return_copy(op.buffer, types[op.buffer], layouts[op.buffer], "out"))
             continue
-        lines.extend(_emit_kernel(op, types, kernel_number, layouts=layouts))
+
+        plan = avx2_plans.get(kernel_number)
+        if plan is not None:
+            lines.append("    {")
+            count = _element_count(types[op.output])
+            lines.extend(
+                emit_i32_avx2_dispatch(
+                    plan,
+                    helper_name=f"tiny_tensor_avx2_kernel_{kernel_number}",
+                    output=op.output,
+                    count=count,
+                    sse2_lines=emit_i32_sse2_plan(
+                        plan,
+                        output=op.output,
+                        count=count,
+                    ),
+                )
+            )
+            lines.extend(["    }", ""])
+        else:
+            lines.extend(_emit_kernel(op, types, kernel_number, layouts=layouts))
         kernel_number += 1
 
     lines.append("}")
