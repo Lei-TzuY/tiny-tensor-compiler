@@ -62,6 +62,32 @@ Replay validates the artifact again even when a caller passes an already constru
 
 Unspecialized symbolic modules remain outside the capture boundary because deterministic compiler traces require concrete Buffer IR, Loop IR, and generated C. Callers must capture a concrete specialization if the source program is symbolic.
 
+## Deterministic return-root minimization
+
+`tiny_tensor_compiler.repro_minimizer` adds a bounded reducer for concrete multi-output modules when the caller can supply an explicit reproduction predicate. It does not pretend that a version-1 artifact contains an oracle for how an older compiler would have traced a different, reduced module.
+
+Python callers use `minimize_return_roots(module, predicate)`. The reducer first canonicalizes and verifies the module, requires the initial module to satisfy the predicate, then greedily tries single return-root removals in deterministic right-to-left order. Every candidate is rebuilt into a fresh function from the backward SSA dependency closure of the retained return values while preserving all declared inputs and their dense runtime indices. Fresh rebuilding gives canonical SSA ids instead of relying on in-place erasure.
+
+The returned `ReproMinimizationResult` records the canonical minimized module JSON, original/minimized return counts, predicate attempts, and accepted reductions. The result is **one-minimal with respect to another single return-root removal under that deterministic order**. It is not a claim of globally minimum operation count, input count, tensor extent, or serialized byte size.
+
+The CLI accepts an external predicate command without invoking a shell:
+
+```bash
+python -m tiny_tensor_compiler.repro_minimizer \
+  module.json minimized.json \
+  --predicate python reproduce.py
+```
+
+The temporary canonical candidate-module path is appended as the final argument to the predicate command. Predicate exit codes are fail-closed:
+
+- exit `0`: candidate still reproduces;
+- exit `1`: candidate does not reproduce;
+- any other exit code: predicate infrastructure error, abort minimization.
+
+The minimizer CLI itself exits `0` after a successful minimization, `1` when the initial module does not reproduce, and `2` for malformed IR, unsupported reduction surfaces, or predicate execution failures.
+
+This first minimization phase deliberately retains all input declarations to preserve the runtime-input ABI and only reduces returned roots plus pure dependencies that become unreachable. Concrete known-pure expression/view/reduction operations are rebuildable. Mutation/effect operations such as `copy_into`, `binary_into`, and `binary_inplace`, unknown opcodes, unspecialized symbolic shapes, malformed return structure, and empty-result candidates fail closed rather than being rewritten speculatively. General operation-level delta debugging and effect-aware repro reduction require a separate correctness model.
+
 ## Evidence boundary
 
 The three SHA-256 values are corruption/tamper-detection checks for the repro document. They are not publisher signatures, identities, timestamps, rollback protection, transparency evidence, or supply-chain attestations. Those concerns remain on the repository's native-bundle trust surfaces.
@@ -72,4 +98,4 @@ The workflow intentionally stops before native compiler invocation. It does not 
 
 ## Phase boundary
 
-This phase closes the bounded compiler-reproduction workflow built on canonical IR serialization, deterministic phase traces, and first-divergence comparison. Further observability work should only continue if it adds a qualitatively new executable diagnostic capability, such as independently replayable runtime-input/output evidence or deterministic minimization of a valid reproducer. Adding more checksums, presentation switches, or duplicate trace metadata is not the next milestone.
+The compiler-reproduction surface now includes canonical capture/replay, first-divergence localization, and deterministic predicate-driven return-root minimization. Further minimizer work should only proceed when it can safely reduce another semantic dimension with an explicit preservation rule—for example operation-level reduction under a trusted external oracle or effect-aware reduction with generation/dependence proofs. Farming return-order variants, extra counters, or cosmetic CLI switches is not the next milestone.
