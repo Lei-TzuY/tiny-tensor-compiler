@@ -68,10 +68,12 @@ def test_single_return_is_already_one_minimal():
 
 def test_minimizer_fails_closed_on_effectful_module():
     builder = GraphBuilder()
-    destination = builder.input((4,), dtype="float32")
+    lhs = builder.input((4,), dtype="float32")
+    rhs = builder.input((4,), dtype="float32")
     source = builder.input((4,), dtype="float32")
-    builder.copy_into(destination, source)
-    module = builder.finish(destination)
+    root = lhs + rhs
+    updated = root.copy_into(root, source)
+    module = builder.finish(updated)
 
     with pytest.raises(ReproMinimizationError, match="effectful opcode"):
         minimize_return_roots(module, lambda candidate: True)
