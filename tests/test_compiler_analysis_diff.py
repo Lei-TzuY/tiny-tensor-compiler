@@ -57,6 +57,11 @@ def test_strict_report_parser_rejects_duplicate_unknown_and_inconsistent_fields(
     with pytest.raises(CompilerReportValidationError, match="storage slot byte count"):
         parse_compiler_report(json.dumps(slot_payload))
 
+    dtype_payload = json.loads(document)
+    dtype_payload["storage_slots"][0]["dtype"] = ["i32"]
+    with pytest.raises(CompilerReportValidationError, match="unsupported dtype"):
+        parse_compiler_report(json.dumps(dtype_payload))
+
 
 def test_report_delta_is_deterministic_and_tracks_histogram_and_storage_changes():
     baseline, candidate = _reports()
