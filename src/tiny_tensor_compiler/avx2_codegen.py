@@ -126,7 +126,7 @@ def emit_i32_avx2_dispatch(
         "        #endif",
         "        {",
     ]
-    lines.extend(f"    {line}" if line else line for line in sse2_lines)
+    lines.extend(sse2_lines)
     lines.append("        }")
     return lines
 
