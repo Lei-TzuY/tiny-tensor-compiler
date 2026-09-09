@@ -50,14 +50,16 @@ def test_widening_write_materializes_exact_typed_source(source_dtype, target_dty
 
     assert materialized.type.dtype == effect.operands[1].type.dtype
     assert materialized.producer is not None
-    assert materialized.producer.opcode == "add"
+    assert materialized.producer.opcode == "mul"
     assert materialized.producer.operands[0].type.dtype.value == {
         "int32": "i32",
         "float32": "f32",
     }[source_dtype]
-    assert materialized.producer.operands[1].producer is not None
-    assert materialized.producer.operands[1].producer.opcode == "const"
-    assert materialized.producer.operands[1].type.dtype == materialized.type.dtype
+    identity = materialized.producer.operands[1]
+    assert identity.producer is not None
+    assert identity.producer.opcode == "const"
+    assert identity.type.dtype == materialized.type.dtype
+    assert np.asarray(identity.producer.attrs["value"]).item() == 1
 
 
 @pytest.mark.parametrize(
@@ -89,7 +91,7 @@ def test_same_dtype_widen_policy_does_not_insert_materialization():
     effect = next(op for op in module.function.ops if op.opcode == "copy_into")
 
     assert effect.operands[2] is source.value
-    assert sum(op.opcode == "add" for op in module.function.ops) == 0
+    assert sum(op.opcode == "mul" for op in module.function.ops) == 0
 
 
 def test_widening_write_serialization_records_lowered_exact_ir():
@@ -100,7 +102,27 @@ def test_widening_write_serialization_records_lowered_exact_ir():
     assert effect.attrs == {}
     assert effect.operands[2].type.dtype == effect.operands[1].type.dtype
     assert effect.operands[2].producer is not None
-    assert effect.operands[2].producer.opcode == "add"
+    assert effect.operands[2].producer.opcode == "mul"
+
+
+def test_float_widening_preserves_signed_zero_reference_and_native():
+    _default_compiler_or_skip()
+    builder = GraphBuilder()
+    base = builder.input((2,), dtype="float64")
+    source_tensor = builder.input((2,), dtype="float32")
+    root = base.relu()
+    module = builder.finish(root.copy_into(root, source_tensor, casting="widen"))
+
+    base_value = np.array([3.0, 4.0], dtype=np.float64)
+    source = np.array([-0.0, 0.0], dtype=np.float32)
+    expected = source.astype(np.float64)
+    reference = execute_reference(module, inputs=[base_value, source])
+    actual = compile_module(module, borrow_inputs=True)(inputs=[base_value, source])
+
+    np.testing.assert_array_equal(reference, expected)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(np.signbit(reference), np.signbit(expected))
+    np.testing.assert_array_equal(np.signbit(actual), np.signbit(expected))
 
 
 def test_widening_copy_native_handles_broadcast_negative_stride_borrow_and_openmp():
