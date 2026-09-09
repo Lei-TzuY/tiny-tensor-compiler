@@ -4,7 +4,13 @@ import shutil
 import numpy as np
 import pytest
 
-from tiny_tensor_compiler import GraphBuilder, compile_module, generate_c, lower_to_cpu, lower_to_loops
+from tiny_tensor_compiler import (
+    GraphBuilder,
+    compile_module,
+    generate_c,
+    lower_to_cpu,
+    lower_to_loops,
+)
 from tiny_tensor_compiler.effect_schedule import plan_parallel_effect_groups
 from tiny_tensor_compiler.loop_ir import LoopCopyInto, LoopInplaceBinary
 
