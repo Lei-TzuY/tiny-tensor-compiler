@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 from .c_codegen import _element_count, _emit_kernel, _select_i32_sse2_plan
+from .effect_schedule import ParallelEffectGroup
 from .ir import TensorType
 from .layout import StorageLayout
 from .loop_ir import (
     LoopBinaryInto,
     LoopCopyInto,
+    LoopInplaceBinary,
     LoopKernel,
     _layout_is_non_overlapping,
 )
-from .write_codegen import emit_binary_into, emit_copy_into
+from .write_codegen import (
+    emit_binary_into,
+    emit_copy_into,
+    emit_effect_result_alias,
+    emit_inplace_binary,
+)
 
 _OPENMP_PARALLEL_FOR = "#pragma omp parallel for schedule(static)"
 
@@ -21,80 +28,73 @@ def emit_parallel_kernel(
     *,
     layouts: dict[int, StorageLayout] | None = None,
 ) -> list[str]:
-    """Emit one kernel with a barriered OpenMP loop when the scalar C path is safe."""
     lines = _emit_kernel(op, types, kernel_number, layouts=layouts)
     output_type = types[op.output]
-
-    # The current SSE2 emitter owns a vector loop plus scalar tail. Keep that proven
-    # implementation intact instead of stacking OpenMP directives onto its control flow.
     if _select_i32_sse2_plan(op, types, layouts=layouts) is not None:
         return lines
     if not op.iteration_shape or _element_count(output_type) == 0:
         return lines
-
     for index, line in enumerate(lines):
         stripped = line.strip()
-
         if stripped == "TINY_TENSOR_VECTORIZE_LOOP":
             loop_index = index + 1
-            if loop_index >= len(lines) or not lines[loop_index].strip().startswith(
-                "for (int64_t n ="
-            ):
-                raise RuntimeError(
-                    "linearized kernel vectorization marker is not followed by its n loop"
-                )
+            if loop_index >= len(lines) or not lines[loop_index].strip().startswith("for (int64_t n ="):
+                raise RuntimeError("linearized kernel vectorization marker is not followed by its n loop")
             _externalize_openmp_induction_variable(lines, loop_index, "n")
             lines[index] = f"{_indent_of(line)}int64_t n;"
             lines.insert(index + 1, f"{_indent_of(line)}{_OPENMP_PARALLEL_FOR}")
             return lines
-
         if stripped.startswith("for (int64_t i0 ="):
             indent = _indent_of(line)
             _externalize_openmp_induction_variable(lines, index, "i0")
             lines.insert(index, f"{indent}{_OPENMP_PARALLEL_FOR}")
             lines.insert(index, f"{indent}int64_t i0;")
             return lines
-
     raise RuntimeError("verified non-scalar kernel unexpectedly has no schedulable C loop")
 
 
-def emit_parallel_copy_into(
-    op: LoopCopyInto,
-    types: dict[int, TensorType],
-    layouts: dict[int, StorageLayout],
-) -> list[str]:
-    """Schedule a copy effect only when each logical target index writes distinct storage."""
+def emit_parallel_copy_into(op: LoopCopyInto, types: dict[int, TensorType], layouts: dict[int, StorageLayout]) -> list[str]:
     lines = emit_copy_into(op, types, layouts)
     target_type = types[op.target]
-    target_layout = layouts[op.target]
-    if not _layout_is_non_overlapping(target_type.shape, target_layout):
+    if not _layout_is_non_overlapping(target_type.shape, layouts[op.target]):
         return lines
     return _parallelize_effect_outer_loop(lines, target_type, effect_name="copy_into")
 
 
-def emit_parallel_binary_into(
-    op: LoopBinaryInto,
-    types: dict[int, TensorType],
-    layouts: dict[int, StorageLayout],
-) -> list[str]:
-    """Schedule one verifier-safe partial binary effect over disjoint target indices."""
+def emit_parallel_binary_into(op: LoopBinaryInto, types: dict[int, TensorType], layouts: dict[int, StorageLayout]) -> list[str]:
     lines = emit_binary_into(op, types, layouts)
-    return _parallelize_effect_outer_loop(
-        lines,
-        types[op.target],
-        effect_name="binary_into",
-    )
+    return _parallelize_effect_outer_loop(lines, types[op.target], effect_name="binary_into")
 
 
-def _parallelize_effect_outer_loop(
-    lines: list[str],
-    target_type: TensorType,
-    *,
-    effect_name: str,
-) -> list[str]:
+def emit_parallel_effect_group(group: ParallelEffectGroup, types: dict[int, TensorType], layouts: dict[int, StorageLayout]) -> list[str]:
+    """Emit pairwise-independent effects as one barriered OpenMP sections region."""
+    if len(group.effects) < 2:
+        raise ValueError("parallel effect sections require at least two independent effects")
+    lines = ["    #pragma omp parallel sections", "    {"]
+    for op in group.effects:
+        lines.extend(("        #pragma omp section", "        {"))
+        body = _emit_serial_effect_body(op, types, layouts)
+        lines.extend(f"        {line}" for line in body if line)
+        lines.append("        }")
+    lines.append("    }")
+    for op in group.effects:
+        lines.extend(emit_effect_result_alias(op))
+    return lines
+
+
+def _emit_serial_effect_body(op: LoopCopyInto | LoopBinaryInto | LoopInplaceBinary, types: dict[int, TensorType], layouts: dict[int, StorageLayout]) -> list[str]:
+    if isinstance(op, LoopCopyInto):
+        return emit_copy_into(op, types, layouts, expose_output=False)
+    if isinstance(op, LoopBinaryInto):
+        return emit_binary_into(op, types, layouts, expose_output=False)
+    if isinstance(op, LoopInplaceBinary):
+        return emit_inplace_binary(op, types, layouts, expose_output=False)
+    raise TypeError("unsupported write effect in parallel sections")
+
+
+def _parallelize_effect_outer_loop(lines: list[str], target_type: TensorType, *, effect_name: str) -> list[str]:
     if not target_type.shape or _element_count(target_type) == 0:
         return lines
-
     for index, line in enumerate(lines):
         if not line.strip().startswith("for (int64_t i0 ="):
             continue
@@ -103,15 +103,10 @@ def _parallelize_effect_outer_loop(
         lines.insert(index, f"{indent}{_OPENMP_PARALLEL_FOR}")
         lines.insert(index, f"{indent}int64_t i0;")
         return lines
-
     raise RuntimeError(f"verified {effect_name} unexpectedly has no schedulable target loop")
 
 
-def _externalize_openmp_induction_variable(
-    lines: list[str],
-    loop_index: int,
-    variable: str,
-) -> None:
+def _externalize_openmp_induction_variable(lines: list[str], loop_index: int, variable: str) -> None:
     declaration = f"for (int64_t {variable} = 0;"
     replacement = f"for ({variable} = 0;"
     line = lines[loop_index]
