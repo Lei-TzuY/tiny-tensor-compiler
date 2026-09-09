@@ -23,6 +23,14 @@ from .inference import (
 from .ir import DType, Function, Module, ShapeDim, TensorType, Value
 
 _ALIAS_OPCODES = frozenset({"view", "slice", "reverse", "transpose"})
+_WRITE_CASTING_POLICIES = frozenset({"exact", "widen"})
+_EXACT_WRITE_WIDENINGS = frozenset(
+    {
+        (DType.INT32, DType.INT64),
+        (DType.INT32, DType.FLOAT64),
+        (DType.FLOAT32, DType.FLOAT64),
+    }
+)
 
 
 class Tensor:
@@ -96,19 +104,50 @@ class Tensor:
     def transpose(self, axes: Iterable[int] | None = None) -> Tensor:
         return self._builder.transpose(self, axes)
 
-    def copy_into(self, target: Tensor, source: Tensor) -> Tensor:
-        """Copy ``source`` into one alias region of this fresh internal root generation."""
-        return self._builder.copy_into(self, target, source)
+    def copy_into(
+        self,
+        target: Tensor,
+        source: Tensor,
+        *,
+        casting: str = "exact",
+    ) -> Tensor:
+        """Copy ``source`` into one alias region with an explicit write-cast policy."""
+        return self._builder.copy_into(self, target, source, casting=casting)
 
-    def binary_into(self, target: Tensor, source: Tensor, *, operator: str) -> Tensor:
-        """Apply one exact-dtype broadcast-compatible update through an alias region."""
-        return self._builder.binary_into(self, target, source, operator=operator)
+    def binary_into(
+        self,
+        target: Tensor,
+        source: Tensor,
+        *,
+        operator: str,
+        casting: str = "exact",
+    ) -> Tensor:
+        """Apply one broadcast-compatible update through an alias region."""
+        return self._builder.binary_into(
+            self,
+            target,
+            source,
+            operator=operator,
+            casting=casting,
+        )
 
-    def add_into(self, target: Tensor, source: Tensor) -> Tensor:
-        return self.binary_into(target, source, operator="add")
+    def add_into(
+        self,
+        target: Tensor,
+        source: Tensor,
+        *,
+        casting: str = "exact",
+    ) -> Tensor:
+        return self.binary_into(target, source, operator="add", casting=casting)
 
-    def mul_into(self, target: Tensor, source: Tensor) -> Tensor:
-        return self.binary_into(target, source, operator="mul")
+    def mul_into(
+        self,
+        target: Tensor,
+        source: Tensor,
+        *,
+        casting: str = "exact",
+    ) -> Tensor:
+        return self.binary_into(target, source, operator="mul", casting=casting)
 
     def binary_inplace(self, source: Tensor, *, operator: str) -> Tensor:
         """Apply one exact-typed binary update to this fresh internal storage root."""
@@ -393,7 +432,14 @@ class GraphBuilder:
         )
         return Tensor(self, op.results[0])
 
-    def copy_into(self, root: Tensor, target: Tensor, source: Tensor) -> Tensor:
+    def copy_into(
+        self,
+        root: Tensor,
+        target: Tensor,
+        source: Tensor,
+        *,
+        casting: str = "exact",
+    ) -> Tensor:
         self._ensure_open()
         for tensor in (root, target, source):
             self._check_tensor_owner(tensor)
@@ -406,8 +452,7 @@ class GraphBuilder:
             raise ValueError("copy_into root must use internal computed storage")
         if _storage_root(target.value) is not owner:
             raise ValueError("copy_into target must alias the supplied root storage")
-        if target.type.dtype != source.type.dtype:
-            raise ValueError("copy_into target and source dtypes must exactly match")
+        source = self._prepare_write_source(target, source, casting=casting, operation="copy_into")
         try:
             result_type = infer_binary(target.type, source.type)
         except TypeInferenceError as exc:
@@ -431,6 +476,7 @@ class GraphBuilder:
         source: Tensor,
         *,
         operator: str,
+        casting: str = "exact",
     ) -> Tensor:
         self._ensure_open()
         for tensor in (root, target, source):
@@ -446,8 +492,12 @@ class GraphBuilder:
             raise ValueError("binary_into root must use internal computed storage")
         if _storage_root(target.value) is not owner:
             raise ValueError("binary_into target must alias the supplied root storage")
-        if target.type.dtype != source.type.dtype:
-            raise ValueError("binary_into target and source dtypes must exactly match")
+        source = self._prepare_write_source(
+            target,
+            source,
+            casting=casting,
+            operation="binary_into",
+        )
         try:
             result_type = infer_binary(target.type, source.type)
         except TypeInferenceError as exc:
@@ -490,6 +540,33 @@ class GraphBuilder:
             attrs={"operator": operator},
         )
         return Tensor(self, op.results[0])
+
+    def _prepare_write_source(
+        self,
+        target: Tensor,
+        source: Tensor,
+        *,
+        casting: str,
+        operation: str,
+    ) -> Tensor:
+        if not isinstance(casting, str) or casting not in _WRITE_CASTING_POLICIES:
+            raise ValueError(f"{operation} casting must be 'exact' or 'widen'")
+        if target.type.dtype == source.type.dtype:
+            return source
+        if casting == "exact":
+            raise ValueError(f"{operation} target and source dtypes must exactly match")
+        pair = (source.type.dtype, target.type.dtype)
+        if pair not in _EXACT_WRITE_WIDENINGS:
+            raise ValueError(
+                f"{operation} cannot widen source dtype {source.type.dtype.value} "
+                f"to target dtype {target.type.dtype.value}"
+            )
+
+        one = self.tensor(1, dtype=target.type.dtype)
+        widened = self.binary("mul", source, one)
+        if widened.type.shape != source.type.shape or widened.type.dtype != target.type.dtype:
+            raise RuntimeError("write widening materialization produced an unexpected tensor type")
+        return widened
 
     def finish(self, result: Tensor | Sequence[Tensor]) -> Module:
         self._ensure_open()
