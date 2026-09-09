@@ -8,6 +8,8 @@ from .frontend import Tensor
 from .inference import TypeInferenceError
 from .ir import DType
 
+__all__ = ["lossless_cast"]
+
 # Conversions accepted here must preserve every value representable by the source dtype.
 # Keep this table deliberately smaller than NumPy's general casting surface.
 _LOSSLESS_CASTS = frozenset(
