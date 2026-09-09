@@ -24,11 +24,13 @@ The policy deliberately rejects narrowing, floating-to-integer conversion, and `
 
 ## Lowering boundary
 
-Widening is resolved before writable-effect IR. The frontend materializes the RHS with the compiler's existing typed binary semantics by adding a scalar zero in the destination dtype. For an allowed pair this produces an owning tensor with:
+Widening is resolved before writable-effect IR. The frontend materializes the RHS with the compiler's existing typed binary semantics by multiplying by a scalar one in the destination dtype. For an allowed pair this produces an owning tensor with:
 
 - the same logical shape as the source;
 - the destination dtype;
-- ordinary verified `add` semantics through reference, Buffer IR, Loop IR, CPU, generated C, native, and OpenMP execution.
+- ordinary verified `mul` semantics through reference, Buffer IR, Loop IR, CPU, generated C, native, and OpenMP execution.
+
+Multiplication by positive one is intentional rather than an addition-by-zero identity: for floating-point widening it preserves the sign of `-0.0`, which is part of the compiler's existing IEEE edge-semantics contract. Regression coverage checks signed-zero preservation in both reference and native execution.
 
 The subsequent `copy_into` / `binary_into` operation therefore still receives an exact-dtype source. No casting field is added to `BufferCopyInto`, `BufferBinaryInto`, `LoopCopyInto`, or `LoopBinaryInto`, and no second alias/layout/storage-generation proof is introduced.
 
