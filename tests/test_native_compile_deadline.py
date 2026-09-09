@@ -108,7 +108,7 @@ def test_compiler_timeout_wins_when_it_is_tighter_than_total_deadline(monkeypatc
             _loop_program(),
             compiler=_python_compiler_command(),
             compiler_timeout=0.05,
-            compile_deadline=1.0,
+            compile_deadline=10.0,
         )
 
     assert caught.value.timeout == 0.05

@@ -6,6 +6,7 @@ from tiny_tensor_compiler.frontend import GraphBuilder
 from tiny_tensor_compiler.repro_minimizer import (
     ReproMinimizationError,
     main,
+    minimize_effects,
     minimize_operations,
     minimize_return_roots,
 )
@@ -18,6 +19,23 @@ def _multi_output_module():
     target = builder.input((3,), dtype="float32").relu()
     third = builder.input((4,), dtype="float32").relu()
     return builder.finish((first, target, third))
+
+
+def _effectful_module(opcode: str = "copy_into"):
+    builder = GraphBuilder()
+    lhs = builder.input((4,), dtype="float32")
+    rhs = builder.input((4,), dtype="float32")
+    source = builder.input((4,), dtype="float32")
+    root = lhs + rhs
+    if opcode == "copy_into":
+        updated = root.copy_into(root, source)
+    elif opcode == "binary_into":
+        updated = root.add_into(root, source)
+    elif opcode == "binary_inplace":
+        updated = root.add_inplace(source)
+    else:
+        raise AssertionError(f"unsupported test effect opcode: {opcode}")
+    return builder.finish(updated)
 
 
 def _returned_shapes(module):
@@ -68,16 +86,34 @@ def test_single_return_is_already_one_minimal():
 
 
 def test_minimizer_fails_closed_on_effectful_module():
+    module = _effectful_module()
+
+    with pytest.raises(ReproMinimizationError, match="effectful opcode"):
+        minimize_return_roots(module, lambda candidate: True)
+
+
+def test_return_root_minimizer_can_prune_effect_chain_when_explicitly_enabled():
     builder = GraphBuilder()
     lhs = builder.input((4,), dtype="float32")
     rhs = builder.input((4,), dtype="float32")
     source = builder.input((4,), dtype="float32")
+    keep = builder.input((3,), dtype="float32")
     root = lhs + rhs
     updated = root.copy_into(root, source)
-    module = builder.finish(updated)
+    module = builder.finish((updated, keep.relu()))
 
-    with pytest.raises(ReproMinimizationError, match="effectful opcode"):
-        minimize_return_roots(module, lambda candidate: True)
+    result = minimize_return_roots(
+        module,
+        _target_shape_predicate,
+        allow_effects=True,
+    )
+
+    minimized = result.module
+    assert result.original_return_count == 2
+    assert result.minimized_return_count == 1
+    assert _returned_shapes(minimized) == ((3,),)
+    assert not any(op.opcode == "copy_into" for op in minimized.function.ops)
+    assert [op.attrs["index"] for op in minimized.function.ops if op.opcode == "input"] == [0, 1, 2, 3]
 
 
 def test_operation_minimizer_is_deterministic_and_reduces_exact_typed_chain():
@@ -139,15 +175,59 @@ def test_operation_minimizer_only_substitutes_exact_result_type_operands():
 
 
 def test_operation_minimizer_fails_closed_on_effectful_module():
+    module = _effectful_module()
+
+    with pytest.raises(ReproMinimizationError, match="effectful opcode"):
+        minimize_operations(module, lambda candidate: True)
+
+
+def test_operation_minimizer_can_reduce_pure_dependencies_around_effects():
     builder = GraphBuilder()
     lhs = builder.input((4,), dtype="float32")
     rhs = builder.input((4,), dtype="float32")
     source = builder.input((4,), dtype="float32")
     root = lhs + rhs
-    module = builder.finish(root.copy_into(root, source))
+    updated = root.add_inplace(source.relu())
+    module = builder.finish(updated)
 
-    with pytest.raises(ReproMinimizationError, match="effectful opcode"):
-        minimize_operations(module, lambda candidate: True)
+    result = minimize_operations(module, lambda candidate: True, allow_effects=True)
+
+    minimized = result.module
+    assert result.original_operation_count == 2
+    assert result.minimized_operation_count == 1
+    assert any(op.opcode == "binary_inplace" for op in minimized.function.ops)
+    assert not any(op.opcode == "relu" for op in minimized.function.ops)
+
+
+@pytest.mark.parametrize("opcode", ["copy_into", "binary_into", "binary_inplace"])
+def test_effect_minimizer_rolls_back_one_generation_under_predicate(opcode):
+    module = _effectful_module(opcode)
+
+    result = minimize_effects(module, lambda candidate: True)
+
+    minimized = result.module
+    assert result.original_effect_count == 1
+    assert result.minimized_effect_count == 0
+    assert result.attempts == 1
+    assert result.accepted_reductions == 1
+    assert not any(op.opcode in {"copy_into", "binary_into", "binary_inplace"} for op in minimized.function.ops)
+    assert minimized.function.ops[-1].operands[0].producer is not None
+    assert minimized.function.ops[-1].operands[0].producer.opcode == "add"
+
+
+def test_effect_minimizer_obeys_predicate_and_keeps_required_generation():
+    module = _effectful_module("copy_into")
+
+    def requires_copy(candidate):
+        return any(op.opcode == "copy_into" for op in candidate.function.ops)
+
+    result = minimize_effects(module, requires_copy)
+
+    assert result.original_effect_count == 1
+    assert result.minimized_effect_count == 1
+    assert result.attempts == 1
+    assert result.accepted_reductions == 0
+    assert result.module_json == serialize_module(module)
 
 
 def test_cli_runs_external_predicate_without_a_shell(tmp_path, capsys):
@@ -209,6 +289,45 @@ def test_cli_can_apply_operation_reduction_with_external_predicate(tmp_path, cap
     output = capsys.readouterr().out
     assert "operations: 2 -> 0" in output
     assert "operation reductions: 2" in output
+
+
+def test_cli_effect_reduction_is_explicit_and_preserves_default_fail_closed_behavior(
+    tmp_path,
+    capsys,
+):
+    module_path = tmp_path / "module.json"
+    output_path = tmp_path / "minimized.json"
+    predicate_path = tmp_path / "predicate.py"
+    module_path.write_text(serialize_module(_effectful_module()), encoding="utf-8")
+    predicate_path.write_text("raise SystemExit(0)\n", encoding="utf-8")
+
+    assert main(
+        [
+            str(module_path),
+            str(output_path),
+            "--predicate",
+            sys.executable,
+            str(predicate_path),
+        ]
+    ) == 2
+    assert not output_path.exists()
+
+    assert main(
+        [
+            str(module_path),
+            str(output_path),
+            "--reduce-effects",
+            "--predicate",
+            sys.executable,
+            str(predicate_path),
+        ]
+    ) == 0
+
+    minimized = deserialize_module(output_path.read_text(encoding="utf-8"))
+    assert not any(op.opcode in {"copy_into", "binary_into", "binary_inplace"} for op in minimized.function.ops)
+    output = capsys.readouterr().out
+    assert "effects: 1 -> 0" in output
+    assert "effect reductions: 1" in output
 
 
 def test_cli_distinguishes_nonreproduction_from_predicate_failure(tmp_path):
