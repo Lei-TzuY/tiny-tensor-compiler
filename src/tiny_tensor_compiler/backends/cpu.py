@@ -84,7 +84,14 @@ def execute_loop(
             continue
 
         if isinstance(op, LoopCopyInto):
-            np.copyto(buffers[op.target], buffers[op.source])
+            target = buffers[op.target]
+            source = buffers[op.source]
+            source_map = op.source_map
+            if source_map is None:
+                source_map = IndexMap(tuple(range(source.ndim)))
+            for target_index in np.ndindex(target.shape):
+                source_index = source_map.apply(target_index)
+                target[target_index] = source[source_index]
             buffers[op.output] = buffers[op.root]
             continue
 

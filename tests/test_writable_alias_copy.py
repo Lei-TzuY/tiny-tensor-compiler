@@ -124,13 +124,13 @@ def test_copy_into_rejects_input_or_const_storage_targets():
         root.copy_into(root.view((2, 2)), patch)
 
 
-def test_copy_into_rejects_type_mismatch():
+def test_copy_into_rejects_nonbroadcastable_shape_mismatch():
     builder = GraphBuilder()
     base = builder.input((2, 4), dtype="int32")
     owned = base.relu()
     target = owned.slice(axis=1, start=0, stop=4, step=2)
     patch = builder.input((2, 3), dtype="int32")
-    with pytest.raises(ValueError, match="exactly match"):
+    with pytest.raises(ValueError, match="broadcast"):
         owned.copy_into(target, patch)
 
 

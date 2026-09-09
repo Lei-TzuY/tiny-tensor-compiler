@@ -13,28 +13,32 @@ def emit_copy_into(
     """Emit one serial copy into a verified target layout and expose the fresh root alias."""
     target_type = types[op.target]
     source_type = types[op.source]
-    if target_type != source_type:
-        raise RuntimeError("verified copy_into unexpectedly has mismatched source/target types")
+    if target_type.dtype != source_type.dtype:
+        raise RuntimeError("verified copy_into unexpectedly changes source/target dtype")
 
     target_layout = layouts[op.target]
     source_layout = layouts[op.source]
     c_type = _c_type(target_type.dtype)
+    source_axes = (
+        tuple(range(len(source_type.shape)))
+        if op.source_map is None
+        else op.source_map.axes
+    )
     lines = ["    {"]
 
     if not target_type.shape:
         destination = _root_ref(op.root, target_layout.offset, ())
-        source = f"p{op.source}[0]"
-        lines.append(f"        {destination} = {source};")
+        source_offset = _stride_offset(source_axes, source_layout.strides)
+        lines.append(f"        {destination} = p{op.source}[{source_offset}];")
     else:
         indent = "        "
-        axes = tuple(range(len(target_type.shape)))
         for axis, bound in enumerate(target_type.shape):
             lines.append(
                 f"{indent}for (int64_t i{axis} = 0; i{axis} < {bound}; ++i{axis}) {{"
             )
             indent += "    "
         destination = _root_ref(op.root, target_layout.offset, target_layout.strides)
-        source_offset = _stride_offset(axes, source_layout.strides)
+        source_offset = _stride_offset(source_axes, source_layout.strides)
         lines.append(f"{indent}{destination} = p{op.source}[{source_offset}];")
         for _ in target_type.shape:
             indent = indent[:-4]

@@ -219,6 +219,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
                     source=remap_handle(op.source),
                     type=op.type,
                     layout=op.layout,
+                    source_map=op.source_map,
                 )
             )
             continue
