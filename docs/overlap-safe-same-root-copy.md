@@ -44,7 +44,9 @@ This is deliberately stronger and simpler than the previous bounding-span disjoi
 
 The snapshot reads the current fresh root generation. `copy_into` then advances that destination root generation exactly as before. All pre-write root/view handles become stale; only the returned full-root handle represents the new generation.
 
-The reference runtime and Loop CPU backend still execute only verified different-root `copy_into` effects. Generated C still emits the existing deterministic logical copy. OpenMP ordering is unchanged: the ordinary snapshot kernel completes, including its implicit barrier when parallel scheduling applies, before the serial write effect executes.
+The reference runtime and Loop CPU backend still execute only verified different-root `copy_into` effects. Generated C reuses the same deterministic logical copy emitter in both serial and parallel modes. With `parallel=True`, a non-scalar, non-empty copy whose target layout is conservatively proven injective schedules only its outer target loop with `#pragma omp parallel for schedule(static)`. The implicit barrier publishes the completed destination generation before later operations. Scalar, zero-extent, or potentially self-overlapping target layouts retain the historical serial write loop.
+
+For a high-level same-root source, the ordinary snapshot kernel completes before the write effect begins. If the later copy is eligible for OpenMP, the snapshot's own completion barrier/order still precedes that effect, so snapshot-before-write semantics are unchanged.
 
 Borrowed runtime inputs remain read-only. Same-root mutation is still limited to compiler-owned internal storage roots; the snapshot rule does not make caller-owned input roots writable.
 
@@ -56,14 +58,14 @@ This phase intentionally does not add:
 - backend `memmove` or traversal-direction-dependent semantics;
 - zero-copy overlap handling or a peak-memory reduction claim;
 - writable caller-owned input roots;
-- casts or broadcasting during `copy_into`;
-- unordered or concurrent writable effects;
+- destination casts or promotion during `copy_into`;
+- asynchronous effects, effect reordering, or graph-level task scheduling;
 - general in-place elementwise kernels or arbitrary destination-bearing operators;
 - effect-aware optimizer motion across writes;
 - caller-visible mutable native views.
 
-The explicit temporary allocation is a correctness mechanism. No wall-clock speedup or memory-usage improvement is claimed.
+Parallel copy scheduling does not make a self-overlapping target safe: if injectivity cannot be proven, codegen deliberately falls back to the existing serial copy. The explicit same-root snapshot allocation remains a correctness mechanism. No wall-clock speedup or memory-usage improvement is claimed.
 
 ## Phase promotion
 
-This closes the same-root copy dependence phase at the public API boundary: all same-root source layouts have one deterministic snapshot semantics while lower layers retain the simpler different-root invariant. Further copy-region examples are not a new milestone. The next storage/mutation frontier should change execution semantics again, such as a bounded verifier-backed in-place elementwise kernel contract, or the project should promote to another subsystem such as deployment provenance or a second executable backend.
+The same-root copy dependence phase remains closed at the public API boundary, and the verified copy effect now also has a bounded parallel execution policy. Further copy-region examples, OpenMP chunk-size variants, or thread-count knobs are not a new milestone. The next storage/mutation frontier should add new semantics such as an explicit destination-casting policy or broader dependence-aware scheduling across ordered effects, or the project should promote to another independent subsystem.
