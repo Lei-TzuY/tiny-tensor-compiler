@@ -233,6 +233,7 @@ def borrow_inputs(program: LoopProgram) -> BorrowedLoopProgram:
                     operator=op.operator,
                     type=op.type,
                     layout=op.layout,
+                    source_map=op.source_map,
                 )
             )
             continue

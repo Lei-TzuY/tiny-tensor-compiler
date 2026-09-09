@@ -688,8 +688,12 @@ def _verify_buffer_ir(operations: tuple[BufferOperation, ...]) -> None:
                 raise ValueError("binary_into root handle type must match owning storage")
             if allocated[op.output] != allocated[op.root]:
                 raise ValueError("binary_into result type must match its root handle type")
-            if allocated[op.target] != allocated[op.source]:
-                raise ValueError("binary_into target and source types must exactly match")
+            target_type = allocated[op.target]
+            source_type = allocated[op.source]
+            if target_type.dtype != source_type.dtype:
+                raise ValueError("binary_into target and source dtypes must exactly match")
+            if infer_binary(target_type, source_type) != target_type:
+                raise ValueError("binary_into source must broadcast exactly to target type")
             alias_sources[op.output] = op.root
             root_generations[owner] += 1
             roots[op.output] = owner

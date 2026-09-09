@@ -160,7 +160,7 @@ def test_binary_into_rejects_unsafe_root_target_source_types_and_operator():
     root = base.relu()
     target = root.slice(axis=0, start=0, stop=4, step=2)
     wrong = builder.input((3,), dtype="int32")
-    with pytest.raises(ValueError, match="exactly match"):
+    with pytest.raises(ValueError, match="broadcast"):
         root.binary_into(target, wrong, operator="add")
 
     builder = GraphBuilder()

@@ -53,11 +53,11 @@ def emit_binary_into(
     types: dict[int, TensorType],
     layouts: dict[int, StorageLayout],
 ) -> list[str]:
-    """Emit one serial exact-typed binary update through a verified target view."""
+    """Emit one serial exact-dtype broadcast update through a verified target view."""
     target_type = types[op.target]
     source_type = types[op.source]
-    if target_type != source_type:
-        raise RuntimeError("verified binary_into unexpectedly has mismatched source/target types")
+    if target_type.dtype != source_type.dtype:
+        raise RuntimeError("verified binary_into unexpectedly changes source/target dtype")
     if op.operator not in {"add", "mul"}:
         raise RuntimeError("verified binary_into unexpectedly has an unsupported operator")
 
@@ -65,25 +65,33 @@ def emit_binary_into(
     source_layout = layouts[op.source]
     operator = "+" if op.operator == "add" else "*"
     c_type = _c_type(target_type.dtype)
+    source_axes = (
+        tuple(range(len(source_type.shape)))
+        if op.source_map is None
+        else op.source_map.axes
+    )
     lines = ["    {"]
 
     if not target_type.shape:
         destination = _root_ref(op.root, target_layout.offset, ())
-        lines.append(f"        {destination} = {destination} {operator} p{op.source}[0];")
+        source_offset = _stride_offset(source_axes, source_layout.strides)
+        lines.append(
+            f"        {destination} = {destination} {operator} p{op.source}[{source_offset}];"
+        )
     else:
         indent = "        "
-        axes = tuple(range(len(target_type.shape)))
+        target_axes = tuple(range(len(target_type.shape)))
         for axis, bound in enumerate(target_type.shape):
             lines.append(
                 f"{indent}for (int64_t i{axis} = 0; i{axis} < {bound}; ++i{axis}) {{"
             )
             indent += "    "
         destination = _root_ref(op.root, target_layout.offset, target_layout.strides)
-        source_offset = _stride_offset(axes, source_layout.strides)
+        source_offset = _stride_offset(source_axes, source_layout.strides)
         lines.append(
             f"{indent}{destination} = {destination} {operator} p{op.source}[{source_offset}];"
         )
-        for _ in target_type.shape:
+        for _ in target_axes:
             indent = indent[:-4]
             lines.append(f"{indent}}}")
 
@@ -144,7 +152,7 @@ def _root_ref(root: int, base_offset: int, strides: tuple[int, ...]) -> str:
 
 
 def _stride_offset(
-    axes: tuple[int, ...],
+    axes: tuple[int | None, ...],
     strides: tuple[int, ...],
     *,
     base_offset: int = 0,
@@ -153,6 +161,8 @@ def _stride_offset(
     if base_offset:
         terms.append(str(base_offset))
     for axis, stride in zip(axes, strides, strict=True):
+        if axis is None:
+            continue
         index = f"i{axis}"
         if stride == 1:
             terms.append(index)
