@@ -6,7 +6,7 @@ The storage subsystem has four bounded zero-copy read-only alias transforms over
 - `Tensor.slice(axis=..., start=..., stop=..., step=...)` creates one positive-stride single-axis slice;
 - `Tensor.reverse(axis)` reverses one logical axis by flipping the sign of that axis storage stride;
 - `Tensor.transpose(axes)` creates one compile-time axis-permutation view by reordering logical shape and storage strides;
-- `copy_into(root, target, source)` copies one same-typed source tensor into a verified alias region of internally owned storage and returns the fresh full-root generation handle.
+- `copy_into(root, target, source)` copies one exact-dtype source tensor that broadcasts exactly to the verified target alias region of internally owned storage and returns the fresh full-root generation handle.
 
 The four view transforms create no second physical storage allocation. Logical view handles remain distinct from their backing storage root, while verification tracks root lifetime and storage generation independently. Writable effects use that same model explicitly: every write consumes fresh handles, advances exactly one root generation, invalidates older aliases of that root, and produces the only fresh full-root handle that may represent the new generation. This is ordered mutation semantics, not a general in-place kernel mode.
 
@@ -85,7 +85,7 @@ The descriptor is absolute relative to the storage root, so transitive views do 
 - the underlying owner to be compiler-owned computed storage rather than an input or constant;
 - `target` to resolve to the same owning storage root through a fresh verified alias chain;
 - the actual `copy_into` source operand to be fresh and resolve to a different storage root;
-- source and target `TensorType` values to match exactly, with no cast or broadcast;
+- source and target dtypes to match exactly, while the source shape must broadcast exactly to the target logical shape without expanding the target; no cast or promotion is performed;
 - the result type to match the complete owning-root type and layout;
 - every root, target, source, and later consumer to match the current generation of its storage root.
 
@@ -93,7 +93,7 @@ The public builder defines every same-root source through explicit snapshot-befo
 
 A write increments the owner generation exactly once. Every pre-write root or view handle for that storage becomes stale immediately; only the returned full-root handle represents the new generation. A later view may be derived from that fresh result and used by another ordered write. Ordinary pure computation may also consume the fresh generation between writes, so sequencing is defined by SSA operation order plus explicit generation checks rather than by a special terminal-only syntax. Returning or reading an older root/view generation is rejected.
 
-Reference execution uses NumPy views and requires `numpy.shares_memory()` for non-empty view/slice/reverse/transpose results. Canonical `copy_into` executes with `numpy.copyto(target, source)` and then exposes the owning array as the fresh post-write value. Every high-level same-root request has already been rewritten to an explicit snapshot plus a different-root copy before verification/execution, so runtime behavior never depends on NumPy overlap traversal. Caller-visible return values still copy through the existing result contract.
+Reference execution uses NumPy views and requires `numpy.shares_memory()` for non-empty view/slice/reverse/transpose results. Canonical `copy_into` executes with `numpy.copyto(target, source)` after verification has proven exact dtype plus source-to-target broadcasting, then exposes the owning array as the fresh post-write value. Every high-level same-root request has already been rewritten to an explicit snapshot plus a different-root copy before verification/execution, so runtime behavior never depends on NumPy overlap traversal. Caller-visible return values still copy through the existing result contract.
 
 ## Buffer planning and lifetimes
 
@@ -141,7 +141,7 @@ The Loop CPU backend materializes no view buffer. It creates NumPy logical views
 
 Downstream elementwise kernels then index that logical NumPy view normally. Positive slices, reversals, and transposes all use exactly the same layout-driven path. Borrowed external inputs remain compatible: a verified borrowed root may feed one or more view transforms without input or view materialization.
 
-For each `LoopCopyInto`, the backend executes `np.copyto(target, source)` only after Loop IR has proven that target and source use different storage roots and exact matching types. The fresh logical output references the same mutated owning array and can safely feed later views, kernels, or another verified write. High-level same-root copies never reach this operation directly: their explicit source snapshot owns distinct storage before the write.
+For each `LoopCopyInto`, the backend iterates the target logical shape and reads the source through the verifier-proven canonical source `IndexMap`; exact-shape copies retain the historical identity-map compatibility form. Loop IR has already proven different storage roots, exact dtype, and source-to-target broadcasting. The fresh logical output references the same mutated owning array and can safely feed later views, kernels, or another verified write. High-level same-root copies never reach this operation directly: their explicit source snapshot owns distinct storage before the write.
 
 ## Generated C and native execution
 
@@ -153,7 +153,7 @@ const int32_t *p3 = p0 + 5;
 
 Logical reads then use the layout strides rather than assuming the view type is physically row-major. A `(3, 3)` reversed slice with strides `(6, -2)` computes offsets from `i0 * 6 + i1 * -2`; a transposed reversed view with strides `(-2, 6)` uses those same verified signed strides in its logical index expression.
 
-`LoopCopyInto` is emitted as a deterministic serial copy over the verified logical target/source shapes. Destination addresses use the current fresh root handle plus the target's root-relative offset and signed strides; source addresses use the source layout. After each copy, generated C exposes a **mutable** typed pointer for the fresh full-root generation handle so a later verified `copy_into` may write through it. Read-only views derived from that handle remain `const` aliases. The copy itself is deliberately not OpenMP-scheduled.
+`LoopCopyInto` is emitted as a deterministic serial copy over the verified logical target shape. Destination addresses use the current fresh root handle plus the target's root-relative offset and signed strides; source addresses combine the source layout with the canonical source `IndexMap`, so lower-rank and scalar broadcasts use the same verifier-owned mapping as CPU execution. After each copy, generated C exposes a **mutable** typed pointer for the fresh full-root generation handle so a later verified `copy_into` may write through it. Read-only views derived from that handle remain `const` aliases. The copy itself is deliberately not OpenMP-scheduled.
 
 For every high-level same-root request, generated C first executes the ordinary reshape snapshot kernel. That kernel reads the source view in logical C-order, including signed or permuted layouts, into distinct storage. Only then does the existing serial `LoopCopyInto` run. No backend needs same-root copy, `memmove`, or overlap-direction semantics.
 
@@ -173,7 +173,7 @@ Verified borrowed inputs still split an external read epoch when planned storage
 
 The signed layout descriptor is preserved by that transform, so a borrowed input may flow directly through slice, reverse, and transpose aliases into downstream CPU/native kernels without hidden normalization or view copies.
 
-The borrowing transform also preserves every `LoopCopyInto` handle and remaps root/target/source references. A copy into an internally owned root counts as a write for lifetime splitting, while Loop verification continues to reject any attempt to mutate a runtime-input root. Ordered writable generations therefore remain compatible with borrowed external sources without exposing caller-owned storage to mutation. Every same-root source request is already an explicit snapshot plus ordinary write by this stage, so borrowing needs no overlap-specific path.
+The borrowing transform also preserves every `LoopCopyInto` handle, its canonical broadcast source map, and remaps root/target/source references. A copy into an internally owned root counts as a write for lifetime splitting, while Loop verification continues to reject any attempt to mutate a runtime-input root. Ordered writable generations therefore remain compatible with borrowed external sources without exposing caller-owned storage to mutation. Every same-root source request is already an explicit snapshot plus ordinary write by this stage, so borrowing needs no overlap-specific path.
 
 ## Optimization and fusion boundary
 
@@ -204,7 +204,7 @@ Regression coverage includes:
 - multiple ordered writes to one internal root, with pure computation and fresh-view derivation between generations;
 - high-level same-root snapshot copies for disjoint, shifted-overlap, interleaved, reversed, and runtime-symbolic source layouts across reference, Loop CPU, GCC/MSVC native, borrowed-input, and OpenMP execution;
 - explicit pre-write snapshot semantics that preserve the source logical C-order independently of destination overlap or copy traversal order;
-- rejection of input/constant roots, non-full-root handles, direct low-level same-root sources, type mismatches, and every stale post-write root/view use or return;
+- rejection of input/constant roots, non-full-root handles, direct low-level same-root sources, dtype mismatches, non-broadcastable copy sources, malformed broadcast source maps, and every stale post-write root/view use or return;
 - preservation of writable effects through borrowed-input rewriting;
 - native ordered-write execution with OpenMP kernels between writes on GCC-style and MSVC toolchains;
 - optimizer effect-barrier behavior;

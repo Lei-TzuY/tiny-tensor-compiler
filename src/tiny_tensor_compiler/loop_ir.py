@@ -66,6 +66,7 @@ class LoopCopyInto:
     source: int
     type: TensorType
     layout: StorageLayout
+    source_map: IndexMap | None = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +385,10 @@ def lower_to_loops(program: CPUProgram) -> LoopProgram:
                     source=virtual_handles[op.source],
                     type=virtual_types[op.output],
                     layout=alias.layout,
+                    source_map=_optional_broadcast_index_map(
+                        virtual_types[op.source].shape,
+                        virtual_types[op.target].shape,
+                    ),
                 )
             )
             continue
@@ -476,6 +481,14 @@ def _broadcast_index_map(input_shape: tuple[int, ...], output_shape: tuple[int, 
         else:
             raise ValueError("input shape is not broadcast-compatible with loop iteration shape")
     return IndexMap(tuple(axes))
+
+
+def _optional_broadcast_index_map(
+    input_shape: tuple[int, ...], output_shape: tuple[int, ...]
+) -> IndexMap | None:
+    expected = _broadcast_index_map(input_shape, output_shape)
+    identity = _broadcast_index_map(output_shape, output_shape)
+    return None if expected == identity else expected
 
 
 def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
@@ -576,8 +589,25 @@ def _verify_loop_ir(operations: tuple[LoopOperation, ...]) -> None:
                 raise ValueError("copy_into target must alias its owning root")
             if roots[op.source] == root:
                 raise ValueError("copy_into source must use a different storage root")
-            if types[op.target] != types[op.source]:
-                raise ValueError("copy_into target and source types must exactly match")
+            target_type = types[op.target]
+            source_type = types[op.source]
+            if target_type.dtype != source_type.dtype:
+                raise ValueError("copy_into target and source dtypes must exactly match")
+            try:
+                expected_source_map = _broadcast_index_map(
+                    source_type.shape,
+                    target_type.shape,
+                )
+            except ValueError as exc:
+                raise ValueError("copy_into source must broadcast exactly to target type") from exc
+            if infer_binary(target_type, source_type) != target_type:
+                raise ValueError("copy_into source must broadcast exactly to target type")
+            if op.source_map is None:
+                identity_map = _broadcast_index_map(target_type.shape, target_type.shape)
+                if expected_source_map != identity_map:
+                    raise ValueError("broadcast copy_into requires an explicit source index map")
+            elif op.source_map != expected_source_map:
+                raise ValueError("copy_into source index map does not match broadcasting semantics")
             if op.type != allocated[root]:
                 raise ValueError("copy_into fresh result type must match its owning root")
             if op.layout != layouts[root]:

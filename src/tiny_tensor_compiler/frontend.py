@@ -406,8 +406,14 @@ class GraphBuilder:
             raise ValueError("copy_into root must use internal computed storage")
         if _storage_root(target.value) is not owner:
             raise ValueError("copy_into target must alias the supplied root storage")
-        if target.type != source.type:
-            raise ValueError("copy_into target and source types must exactly match")
+        if target.type.dtype != source.type.dtype:
+            raise ValueError("copy_into target and source dtypes must exactly match")
+        try:
+            result_type = infer_binary(target.type, source.type)
+        except TypeInferenceError as exc:
+            raise ValueError(f"copy_into source is not broadcast-compatible: {exc}") from exc
+        if result_type != target.type:
+            raise ValueError("copy_into source must broadcast exactly to the target type")
         if _storage_root(source.value) is owner:
             source = self.reshape(source, source.type.shape)
 
