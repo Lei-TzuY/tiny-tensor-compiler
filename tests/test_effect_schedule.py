@@ -75,7 +75,7 @@ def _cross_root_raw_module():
     target_b = root_b.slice(axis=1, start=0, stop=4, step=1)
     written_a = root_a.copy_into(target_a, patch)
     written_b = root_b.copy_into(target_b, written_a)
-    return builder.finish((written_a, written_b))
+    return builder.finish((written_a, written_b, base_a, base_b))
 
 
 def test_effect_schedule_groups_independent_roots_with_shared_read_source():
@@ -163,6 +163,10 @@ def test_cross_root_raw_dependency_forces_a_barrier_level():
     expected_a = np.maximum(base_a, 0)
     expected_a[:, 0:4:2] = patch
     expected_b = expected_a.copy()
-    actual_a, actual_b = compile_module(module, parallel=True)(inputs=[base_a, base_b, patch])
+    actual_a, actual_b, returned_a, returned_b = compile_module(module, parallel=True)(
+        inputs=[base_a, base_b, patch]
+    )
     np.testing.assert_array_equal(actual_a, expected_a)
     np.testing.assert_array_equal(actual_b, expected_b)
+    np.testing.assert_array_equal(returned_a, base_a)
+    np.testing.assert_array_equal(returned_b, base_b)
