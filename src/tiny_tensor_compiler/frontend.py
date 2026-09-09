@@ -562,8 +562,8 @@ class GraphBuilder:
                 f"to target dtype {target.type.dtype.value}"
             )
 
-        zero = self.tensor(0, dtype=target.type.dtype)
-        widened = self.binary("add", source, zero)
+        one = self.tensor(1, dtype=target.type.dtype)
+        widened = self.binary("mul", source, one)
         if widened.type.shape != source.type.shape or widened.type.dtype != target.type.dtype:
             raise RuntimeError("write widening materialization produced an unexpected tensor type")
         return widened
