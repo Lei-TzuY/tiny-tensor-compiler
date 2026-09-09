@@ -3,8 +3,13 @@ from __future__ import annotations
 from .c_codegen import _element_count, _emit_kernel, _select_i32_sse2_plan
 from .ir import TensorType
 from .layout import StorageLayout
-from .loop_ir import LoopBinaryInto, LoopKernel
-from .write_codegen import emit_binary_into
+from .loop_ir import (
+    LoopBinaryInto,
+    LoopCopyInto,
+    LoopKernel,
+    _layout_is_non_overlapping,
+)
+from .write_codegen import emit_binary_into, emit_copy_into
 
 _OPENMP_PARALLEL_FOR = "#pragma omp parallel for schedule(static)"
 
@@ -53,6 +58,20 @@ def emit_parallel_kernel(
     raise RuntimeError("verified non-scalar kernel unexpectedly has no schedulable C loop")
 
 
+def emit_parallel_copy_into(
+    op: LoopCopyInto,
+    types: dict[int, TensorType],
+    layouts: dict[int, StorageLayout],
+) -> list[str]:
+    """Schedule a copy effect only when each logical target index writes distinct storage."""
+    lines = emit_copy_into(op, types, layouts)
+    target_type = types[op.target]
+    target_layout = layouts[op.target]
+    if not _layout_is_non_overlapping(target_type.shape, target_layout):
+        return lines
+    return _parallelize_effect_outer_loop(lines, target_type, effect_name="copy_into")
+
+
 def emit_parallel_binary_into(
     op: LoopBinaryInto,
     types: dict[int, TensorType],
@@ -60,7 +79,19 @@ def emit_parallel_binary_into(
 ) -> list[str]:
     """Schedule one verifier-safe partial binary effect over disjoint target indices."""
     lines = emit_binary_into(op, types, layouts)
-    target_type = types[op.target]
+    return _parallelize_effect_outer_loop(
+        lines,
+        types[op.target],
+        effect_name="binary_into",
+    )
+
+
+def _parallelize_effect_outer_loop(
+    lines: list[str],
+    target_type: TensorType,
+    *,
+    effect_name: str,
+) -> list[str]:
     if not target_type.shape or _element_count(target_type) == 0:
         return lines
 
@@ -73,7 +104,7 @@ def emit_parallel_binary_into(
         lines.insert(index, f"{indent}int64_t i0;")
         return lines
 
-    raise RuntimeError("verified binary_into unexpectedly has no schedulable target loop")
+    raise RuntimeError(f"verified {effect_name} unexpectedly has no schedulable target loop")
 
 
 def _externalize_openmp_induction_variable(
