@@ -4,13 +4,17 @@ from .ir import DType, TensorType
 from .layout import StorageLayout
 from .loop_ir import LoopBinaryInto, LoopCopyInto, LoopInplaceBinary
 
+WriteEffect = LoopCopyInto | LoopBinaryInto | LoopInplaceBinary
+
 
 def emit_copy_into(
     op: LoopCopyInto,
     types: dict[int, TensorType],
     layouts: dict[int, StorageLayout],
+    *,
+    expose_output: bool = True,
 ) -> list[str]:
-    """Emit one serial copy into a verified target layout and expose the fresh root alias."""
+    """Emit one serial copy into a verified target layout."""
     target_type = types[op.target]
     source_type = types[op.source]
     if target_type.dtype != source_type.dtype:
@@ -18,7 +22,6 @@ def emit_copy_into(
 
     target_layout = layouts[op.target]
     source_layout = layouts[op.source]
-    c_type = _c_type(target_type.dtype)
     source_axes = (
         tuple(range(len(source_type.shape)))
         if op.source_map is None
@@ -45,10 +48,8 @@ def emit_copy_into(
             lines.append(f"{indent}}}")
 
     lines.append("    }")
-    root_offset = op.layout.offset
-    pointer = f"p{op.root}" if root_offset == 0 else f"p{op.root} + {root_offset}"
-    lines.append(f"    {c_type} *p{op.output} = {pointer};")
-    lines.append("")
+    if expose_output:
+        lines.extend(emit_effect_result_alias(op))
     return lines
 
 
@@ -56,6 +57,8 @@ def emit_binary_into(
     op: LoopBinaryInto,
     types: dict[int, TensorType],
     layouts: dict[int, StorageLayout],
+    *,
+    expose_output: bool = True,
 ) -> list[str]:
     """Emit one serial exact-dtype broadcast update through a verified target view."""
     target_type = types[op.target]
@@ -68,7 +71,6 @@ def emit_binary_into(
     target_layout = layouts[op.target]
     source_layout = layouts[op.source]
     operator = "+" if op.operator == "add" else "*"
-    c_type = _c_type(target_type.dtype)
     source_axes = (
         tuple(range(len(source_type.shape)))
         if op.source_map is None
@@ -100,10 +102,8 @@ def emit_binary_into(
             lines.append(f"{indent}}}")
 
     lines.append("    }")
-    root_offset = op.layout.offset
-    pointer = f"p{op.root}" if root_offset == 0 else f"p{op.root} + {root_offset}"
-    lines.append(f"    {c_type} *p{op.output} = {pointer};")
-    lines.append("")
+    if expose_output:
+        lines.extend(emit_effect_result_alias(op))
     return lines
 
 
@@ -111,8 +111,10 @@ def emit_inplace_binary(
     op: LoopInplaceBinary,
     types: dict[int, TensorType],
     layouts: dict[int, StorageLayout],
+    *,
+    expose_output: bool = True,
 ) -> list[str]:
-    """Emit one serial exact-typed full-root binary update and expose its fresh handle."""
+    """Emit one serial exact-typed full-root binary update."""
     root_type = types[op.root]
     source_type = types[op.source]
     if root_type != source_type or op.type != root_type:
@@ -123,7 +125,6 @@ def emit_inplace_binary(
     root_layout = layouts[op.root]
     source_layout = layouts[op.source]
     operator = "+" if op.operator == "add" else "*"
-    c_type = _c_type(root_type.dtype)
     lines = ["    {"]
     if not root_type.shape:
         destination = _root_ref(op.root, root_layout.offset, ())
@@ -145,9 +146,20 @@ def emit_inplace_binary(
             indent = indent[:-4]
             lines.append(f"{indent}}}")
     lines.append("    }")
-    lines.append(f"    {c_type} *p{op.output} = p{op.root};")
-    lines.append("")
+    if expose_output:
+        lines.extend(emit_effect_result_alias(op))
     return lines
+
+
+def emit_effect_result_alias(op: WriteEffect) -> list[str]:
+    """Expose one verifier-fresh effect result after its mutation has completed."""
+    c_type = _c_type(op.type.dtype)
+    if isinstance(op, LoopInplaceBinary):
+        pointer = f"p{op.root}"
+    else:
+        root_offset = op.layout.offset
+        pointer = f"p{op.root}" if root_offset == 0 else f"p{op.root} + {root_offset}"
+    return [f"    {c_type} *p{op.output} = {pointer};", ""]
 
 
 def _root_ref(root: int, base_offset: int, strides: tuple[int, ...]) -> str:

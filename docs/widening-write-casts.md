@@ -48,7 +48,7 @@ All existing mutation rules remain unchanged after materialization:
 - signed-stride and transposed target layouts use the existing write emitter;
 - eligible `parallel=True` effects reuse the existing barriered OpenMP scheduling proof.
 
-The widening materialization is an ordinary pure kernel and may itself use the established kernel scheduling/backend paths. The writable effect never sees mixed dtypes.
+The widening materialization is an ordinary pure kernel and may itself use the established kernel scheduling/backend paths. The writable effect never sees mixed dtypes. It also acts as an explicit boundary for the first dependence-aware multi-effect scheduler: that scheduler groups only already-consecutive write effects and never moves an effect across the widening kernel.
 
 ## Deliberate non-goals
 
@@ -63,4 +63,4 @@ This phase does not add:
 - zero-copy cast views;
 - a performance claim for the extra materialization.
 
-The next storage/mutation promotion should move to genuinely new effect semantics, such as dependence-aware scheduling across multiple ordered effects, rather than adding more ad-hoc conversion pairs.
+Dependence-aware scheduling across consecutive ordered effects is now a separate implemented phase. Further storage/mutation promotion should add genuinely new dependence information—such as region-aware disjoint-write analysis on one storage root or safe scheduling across intervening pure operations—rather than adding more ad-hoc conversion pairs or more scheduler spellings.
