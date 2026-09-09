@@ -24,6 +24,7 @@ from .parallel_codegen import (
     emit_parallel_copy_into,
     emit_parallel_effect_group,
     emit_parallel_kernel,
+    emit_view_alias,
 )
 from .write_codegen import emit_binary_into, emit_copy_into, emit_inplace_binary
 
@@ -87,7 +88,9 @@ def generate_c(
     for alloc in program.allocations:
         binding = borrowed_by_slot.get(alloc.buffer)
         if binding is None:
-            lines.append(f"    {_c_type(alloc.type.dtype)} p{alloc.buffer}[{_storage_size(alloc.type)}];")
+            lines.append(
+                f"    {_c_type(alloc.type.dtype)} p{alloc.buffer}[{_storage_size(alloc.type)}];"
+            )
         else:
             lines.append(
                 f"    const {_c_type(alloc.type.dtype)} *p{alloc.buffer} = input{binding.index};"
@@ -95,22 +98,22 @@ def generate_c(
     if program.allocations:
         lines.append("")
 
+    schedule_program = program.program if isinstance(program, BorrowedLoopProgram) else program
     grouped_by_start = {}
     grouped_indices: set[int] = set()
     if parallel:
-        schedule_program = program.program if isinstance(program, BorrowedLoopProgram) else program
         for group in plan_parallel_effect_groups(schedule_program):
             if len(group.effects) < 2:
                 continue
             grouped_by_start[group.start] = group
-            grouped_indices.update(group.operation_indices)
+            grouped_indices.update(group.consumed_indices)
 
     kernel_number = 0
     return_number = 0
     for operation_index, op in enumerate(program.operations):
         group = grouped_by_start.get(operation_index)
         if group is not None:
-            lines.extend(emit_parallel_effect_group(group, types, layouts))
+            lines.extend(emit_parallel_effect_group(group, schedule_program, types, layouts))
             continue
         if operation_index in grouped_indices:
             continue
@@ -121,11 +124,7 @@ def generate_c(
                 lines.extend(_emit_input(op, types[op.output]))
             continue
         if isinstance(op, LoopView):
-            root = program.storage_root(op.output)
-            offset = layouts[op.output].offset
-            pointer = f"p{root}" if offset == 0 else f"p{root} + {offset}"
-            lines.append(f"    const {_c_type(op.type.dtype)} *p{op.output} = {pointer};")
-            lines.append("")
+            lines.extend(emit_view_alias(op, schedule_program, layouts))
             continue
         if isinstance(op, LoopCopyInto):
             emitter = emit_parallel_copy_into if parallel else emit_copy_into
