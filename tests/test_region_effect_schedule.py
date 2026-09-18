@@ -132,7 +132,7 @@ def _independent_pure_kernel_crossing_module():
     first = left_owned.add_inplace(left_delta)
     snapshot = side.relu()
     second = right_owned.add_inplace(right_delta)
-    return builder.finish((first, second, snapshot))
+    return builder.finish((first, second, snapshot, left, right))
 
 
 def _pure_kernel_producer_barrier_module():
@@ -146,7 +146,7 @@ def _pure_kernel_producer_barrier_module():
     first = left_owned.add_inplace(left_delta)
     produced = side.relu()
     second = right_owned.add_inplace(produced)
-    return builder.finish((first, second))
+    return builder.finish((first, second, left, right))
 
 
 def _multi_effect_groups(module):
@@ -235,12 +235,14 @@ def test_effect_may_cross_independent_pure_kernel_and_native_result_stays_exact(
     left_delta = np.arange(6, dtype=np.int32) + 10
     right_delta = np.arange(6, dtype=np.int32) + 20
     side = np.array([-9, -2, 0, 1, 5, 11], dtype=np.int32)
-    actual_left, actual_right, actual_side = compile_module(module, parallel=True)(
-        inputs=[left, right, left_delta, right_delta, side]
-    )
+    actual_left, actual_right, actual_side, returned_left, returned_right = compile_module(
+        module, parallel=True
+    )(inputs=[left, right, left_delta, right_delta, side])
     np.testing.assert_array_equal(actual_left, np.maximum(left, 0) + left_delta)
     np.testing.assert_array_equal(actual_right, np.maximum(right, 0) + right_delta)
     np.testing.assert_array_equal(actual_side, np.maximum(side, 0))
+    np.testing.assert_array_equal(returned_left, left)
+    np.testing.assert_array_equal(returned_right, right)
 
 
 def test_pure_kernel_read_hazard_remains_a_scheduling_barrier():
