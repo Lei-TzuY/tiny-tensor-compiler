@@ -120,6 +120,35 @@ def _pure_kernel_barrier_module():
     return builder.finish((generation2, snapshot))
 
 
+def _independent_pure_kernel_crossing_module():
+    builder = GraphBuilder()
+    left = builder.input((6,), dtype="int32")
+    right = builder.input((6,), dtype="int32")
+    left_delta = builder.input((6,), dtype="int32")
+    right_delta = builder.input((6,), dtype="int32")
+    side = builder.input((6,), dtype="int32")
+    left_owned = left.relu()
+    right_owned = right.relu()
+    first = left_owned.add_inplace(left_delta)
+    snapshot = side.relu()
+    second = right_owned.add_inplace(right_delta)
+    return builder.finish((first, second, snapshot))
+
+
+def _pure_kernel_producer_barrier_module():
+    builder = GraphBuilder()
+    left = builder.input((6,), dtype="int32")
+    right = builder.input((6,), dtype="int32")
+    left_delta = builder.input((6,), dtype="int32")
+    side = builder.input((6,), dtype="int32")
+    left_owned = left.relu()
+    right_owned = right.relu()
+    first = left_owned.add_inplace(left_delta)
+    produced = side.relu()
+    second = right_owned.add_inplace(produced)
+    return builder.finish((first, second))
+
+
 def _multi_effect_groups(module):
     loops = lower_to_loops(lower_to_cpu(module))
     return loops, [
@@ -191,7 +220,36 @@ def test_full_root_inplace_effect_conflicts_with_partial_same_root_write():
     assert "#pragma omp parallel sections" not in generate_c(loops, parallel=True)
 
 
-def test_pure_kernel_remains_a_hard_scheduling_barrier():
+def test_effect_may_cross_independent_pure_kernel_and_native_result_stays_exact():
+    _default_compiler_or_skip()
+    module = _independent_pure_kernel_crossing_module()
+    loops, multi = _multi_effect_groups(module)
+    assert len(multi) == 1
+    group = multi[0]
+    assert len(group.effects) == 2
+    assert group.operation_indices[1] > group.operation_indices[0] + 1
+    assert generate_c(loops, parallel=True).count("#pragma omp section") == 2
+
+    left = np.array([-3, -1, 0, 2, 4, 7], dtype=np.int32)
+    right = np.array([-5, 1, 3, -2, 8, 0], dtype=np.int32)
+    left_delta = np.arange(6, dtype=np.int32) + 10
+    right_delta = np.arange(6, dtype=np.int32) + 20
+    side = np.array([-9, -2, 0, 1, 5, 11], dtype=np.int32)
+    actual_left, actual_right, actual_side = compile_module(module, parallel=True)(
+        inputs=[left, right, left_delta, right_delta, side]
+    )
+    np.testing.assert_array_equal(actual_left, np.maximum(left, 0) + left_delta)
+    np.testing.assert_array_equal(actual_right, np.maximum(right, 0) + right_delta)
+    np.testing.assert_array_equal(actual_side, np.maximum(side, 0))
+
+
+def test_pure_kernel_read_hazard_remains_a_scheduling_barrier():
     loops, multi = _multi_effect_groups(_pure_kernel_barrier_module())
+    assert multi == []
+    assert "#pragma omp parallel sections" not in generate_c(loops, parallel=True)
+
+
+def test_pure_kernel_producer_dependency_remains_a_scheduling_barrier():
+    loops, multi = _multi_effect_groups(_pure_kernel_producer_barrier_module())
     assert multi == []
     assert "#pragma omp parallel sections" not in generate_c(loops, parallel=True)
