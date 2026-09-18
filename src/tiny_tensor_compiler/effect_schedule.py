@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from math import gcd, prod
 
 from .layout import StorageLayout
-from .loop_ir import LoopBinaryInto, LoopCopyInto, LoopInplaceBinary, LoopProgram, LoopView
+from .loop_ir import (
+    LoopBinaryInto,
+    LoopCopyInto,
+    LoopInplaceBinary,
+    LoopKernel,
+    LoopProgram,
+    LoopView,
+)
 
 EffectOperation = LoopCopyInto | LoopBinaryInto | LoopInplaceBinary
 
@@ -19,8 +26,8 @@ class StorageRegion:
 
 
 @dataclass(frozen=True)
-class EffectAccess:
-    """Concrete storage regions read and written by one verified mutation effect."""
+class OperationAccess:
+    """Concrete storage regions read and written by one verified executable operation."""
 
     reads: tuple[StorageRegion, ...]
     writes: tuple[StorageRegion, ...]
@@ -30,9 +37,10 @@ class EffectAccess:
 class ParallelEffectGroup:
     """One effect group that may execute under a shared barrier.
 
-    Effects remain in original program order. Alias-only ``LoopView`` operations may appear
-    between grouped effects and are replayed after the sections barrier; no executable kernel
-    or other operation is crossed.
+    Effects remain ordered within the source program, but a later independent effect may be
+    hoisted across verified pure kernels into this group. Crossed kernels remain in the ordinary
+    operation stream and therefore execute after the sections barrier. Alias-only ``LoopView``
+    operations may be replayed around grouped effects as before.
     """
 
     operation_indices: tuple[int, ...]
@@ -77,15 +85,17 @@ class ParallelEffectGroup:
 def plan_parallel_effect_groups(program: LoopProgram) -> tuple[ParallelEffectGroup, ...]:
     """Partition verified mutation effects into deterministic hazard-free groups.
 
-    Only alias-only ``LoopView`` operations may be crossed. A normal kernel, input, return, or
-    allocation remains a hard scheduling boundary. Within one eligible run, effects stay in
-    one group only while their concrete read/write regions are pairwise independent.
+    Alias-only ``LoopView`` operations remain transparent. A pure ``LoopKernel`` may also be
+    crossed by a later effect when the effect's concrete storage access is independent of every
+    crossed kernel. The crossed kernels themselves stay at their original operation positions;
+    inputs, returns, allocations, and other operation kinds remain hard boundaries.
     """
 
     groups: list[ParallelEffectGroup] = []
     indices: list[int] = []
     effects: list[EffectOperation] = []
-    accesses: list[EffectAccess] = []
+    accesses: list[OperationAccess] = []
+    crossed_accesses: list[OperationAccess] = []
     transparent_indices: list[int] = []
     transparent_views: list[LoopView] = []
     pending_indices: list[int] = []
@@ -108,6 +118,7 @@ def plan_parallel_effect_groups(program: LoopProgram) -> tuple[ParallelEffectGro
         indices.clear()
         effects.clear()
         accesses.clear()
+        crossed_accesses.clear()
         transparent_indices.clear()
         transparent_views.clear()
         clear_pending()
@@ -119,12 +130,23 @@ def plan_parallel_effect_groups(program: LoopProgram) -> tuple[ParallelEffectGro
                 pending_views.append(op)
             continue
 
+        if isinstance(op, LoopKernel):
+            if effects:
+                crossed_accesses.append(operation_access(program, op))
+            continue
+
         if not isinstance(op, (LoopCopyInto, LoopBinaryInto, LoopInplaceBinary)):
             flush()
             continue
 
-        access = effect_access(program, op)
-        if effects and any(effect_accesses_conflict(access, previous) for previous in accesses):
+        access = operation_access(program, op)
+        if effects and (
+            any(operation_accesses_conflict(access, previous) for previous in accesses)
+            or any(
+                operation_accesses_conflict(access, crossed)
+                for crossed in crossed_accesses
+            )
+        ):
             flush()
 
         if effects:
@@ -139,24 +161,39 @@ def plan_parallel_effect_groups(program: LoopProgram) -> tuple[ParallelEffectGro
     return tuple(groups)
 
 
-def effect_access(program: LoopProgram, op: EffectOperation) -> EffectAccess:
-    """Return the concrete dependence footprint of one verified mutation effect."""
+def operation_access(
+    program: LoopProgram,
+    op: EffectOperation | LoopKernel,
+) -> OperationAccess:
+    """Return the concrete dependence footprint of one verified executable operation."""
+
+    if isinstance(op, LoopKernel):
+        return OperationAccess(
+            reads=tuple(_value_region(program, buffer) for buffer in op.inputs),
+            writes=(_value_region(program, op.output),),
+        )
 
     source = _value_region(program, op.source)
     if isinstance(op, LoopCopyInto):
         target = _value_region(program, op.target)
-        return EffectAccess(reads=(source,), writes=(target,))
+        return OperationAccess(reads=(source,), writes=(target,))
     if isinstance(op, LoopBinaryInto):
         target = _value_region(program, op.target)
-        return EffectAccess(reads=(target, source), writes=(target,))
+        return OperationAccess(reads=(target, source), writes=(target,))
     if isinstance(op, LoopInplaceBinary):
         root = _root_region(program, op.root)
-        return EffectAccess(reads=(root, source), writes=(root,))
-    raise TypeError("unsupported write effect for dependence analysis")
+        return OperationAccess(reads=(root, source), writes=(root,))
+    raise TypeError("unsupported operation for dependence analysis")
 
 
-def effect_accesses_conflict(lhs: EffectAccess, rhs: EffectAccess) -> bool:
-    """Return whether two effects have a conservatively proven RAW, WAR, or WAW hazard."""
+def effect_access(program: LoopProgram, op: EffectOperation) -> OperationAccess:
+    """Compatibility wrapper for callers that inspect mutation-effect access."""
+
+    return operation_access(program, op)
+
+
+def operation_accesses_conflict(lhs: OperationAccess, rhs: OperationAccess) -> bool:
+    """Return whether two operations have a conservatively proven RAW, WAR, or WAW hazard."""
 
     return any(
         _regions_may_overlap(write, other)
@@ -167,6 +204,12 @@ def effect_accesses_conflict(lhs: EffectAccess, rhs: EffectAccess) -> bool:
         for write in rhs.writes
         for other in (*lhs.reads, *lhs.writes)
     )
+
+
+def effect_accesses_conflict(lhs: OperationAccess, rhs: OperationAccess) -> bool:
+    """Compatibility wrapper for mutation-only dependence checks."""
+
+    return operation_accesses_conflict(lhs, rhs)
 
 
 def regions_provably_disjoint(lhs: StorageRegion, rhs: StorageRegion) -> bool:
