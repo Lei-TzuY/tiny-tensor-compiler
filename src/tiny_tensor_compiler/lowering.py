@@ -406,12 +406,14 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
     types: dict[int, TensorType] = {}
     last_uses: dict[int, int] = {}
     alias_sources: dict[int, int] = {}
+    input_virtuals: set[int] = set()
 
     for index, op in enumerate(program.operations):
         if isinstance(op, BufferAlloc):
             allocation_positions[op.buffer] = index
             types[op.buffer] = op.type
         elif isinstance(op, BufferInput):
+            input_virtuals.add(op.output)
             last_uses[op.output] = max(last_uses.get(op.output, -1), index)
         elif isinstance(op, BufferView):
             alias_sources[op.output] = op.source
@@ -446,7 +448,14 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         root = root_virtual(buffer)
         last_uses[root] = max(last_uses.get(root, -1), last_use)
 
+    write_roots = {
+        root_virtual(op.root)
+        for op in program.operations
+        if isinstance(op, (BufferCopyInto, BufferBinaryInto, BufferInplaceBinary))
+    }
+
     physical_state: list[tuple[TensorType, int]] = []
+    input_tainted_slots: set[int] = set()
     assignments: list[BufferAssignment] = []
 
     for buffer, start in allocation_positions.items():
@@ -456,8 +465,16 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
         end = max(start, last_uses.get(buffer, start))
         physical: int | None = None
 
+        requires_writable_owner = buffer in write_roots
         for slot, (slot_type, previous_end) in enumerate(physical_state):
-            if slot_type == buffer_type and previous_end < start:
+            if (
+                slot_type == buffer_type
+                and previous_end < start
+                and (
+                    not requires_writable_owner
+                    or slot not in input_tainted_slots
+                )
+            ):
                 physical = slot
                 break
 
@@ -468,6 +485,8 @@ def plan_memory(program: CPUProgram) -> MemoryPlan:
             physical_state[physical] = (buffer_type, end)
 
         assignments.append(BufferAssignment(buffer, physical, buffer_type))
+        if buffer in input_virtuals:
+            input_tainted_slots.add(physical)
 
     layouts: dict[int, StorageLayout] = {}
     alias_outputs = set(alias_sources)

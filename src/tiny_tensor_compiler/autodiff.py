@@ -34,6 +34,7 @@ _SUPPORTED_BACKWARD_OPS = frozenset(
         "slice",
         "reverse",
         "transpose",
+        "copy_into",
     }
 )
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
@@ -275,6 +276,9 @@ def _validate_backward_slice(ancestors: frozenset[Value], output_dtype: DType) -
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on reverse-mode backward slice"
             )
+        if op.opcode == "copy_into":
+            _direct_slice_copy_attrs(op)
+            _validate_copy_into_prewrite_isolation(op, ancestors)
         if len(op.results) != 1:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} multi-result operation on backward slice"
@@ -363,7 +367,104 @@ def _propagate_adjoint(
         contribution = _scatter_slice(function, upstream, operand.type, op.attrs)
         _accumulate(function, gradients, operand, contribution)
         return
+    if op.opcode == "copy_into":
+        root, _target, source = op.operands
+        attrs = _direct_slice_copy_attrs(op)
+        root_contribution = _zero_slice_region(function, upstream, root.type, attrs)
+        source_contribution = _unbroadcast(
+            function,
+            _slice(
+                function,
+                upstream,
+                axis=attrs["axis"],
+                start=attrs["start"],
+                stop=attrs["stop"],
+                step=attrs["step"],
+            ),
+            source.type,
+        )
+        _accumulate(function, gradients, root, root_contribution)
+        _accumulate(function, gradients, source, source_contribution)
+        return
     raise RuntimeError(f"internal autodiff error: unsupported propagated opcode {op.opcode!r}")
+
+
+def _validate_copy_into_prewrite_isolation(
+    op: Operation,
+    ancestors: frozenset[Value],
+) -> None:
+    root, target, _source = op.operands
+    result = op.results[0]
+    for value in ancestors:
+        if value in {root, target, result}:
+            continue
+        if _value_depends_on(value, result):
+            continue
+        if _value_depends_on(value, root):
+            raise AutodiffError(
+                "copy_into backward currently requires the pre-write root to be "
+                "isolated from source and other ancestor paths"
+            )
+
+
+def _value_depends_on(value: Value, ancestor: Value) -> bool:
+    stack = [value]
+    seen: set[Value] = set()
+    while stack:
+        current = stack.pop()
+        if current is ancestor:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        producer = current.producer
+        if producer is not None:
+            stack.extend(producer.operands)
+    return False
+
+
+def _direct_slice_copy_attrs(op: Operation) -> dict[str, Any]:
+    if op.opcode != "copy_into":
+        raise RuntimeError("internal autodiff error: expected copy_into operation")
+    root, target, _source = op.operands
+    producer = target.producer
+    if (
+        producer is None
+        or producer.opcode != "slice"
+        or len(producer.operands) != 1
+        or producer.operands[0] is not root
+    ):
+        raise AutodiffError(
+            "copy_into backward currently requires a direct slice target"
+        )
+    return dict(producer.attrs)
+
+
+def _zero_slice_region(
+    function: Function,
+    upstream: Value,
+    root_type: TensorType,
+    attrs: dict[str, Any],
+) -> Value:
+    if upstream.type != root_type:
+        raise RuntimeError(
+            "internal autodiff error: copy_into output cotangent must match root type"
+        )
+    copied_root = _multiply(function, upstream, _ones(function, root_type))
+    target = _slice(
+        function,
+        copied_root,
+        axis=attrs["axis"],
+        start=attrs["start"],
+        stop=attrs["stop"],
+        step=attrs["step"],
+    )
+    op = function.add_op(
+        "copy_into",
+        operands=(copied_root, target, _zeros(function, target.type)),
+        result_types=(root_type,),
+    )
+    return op.results[0]
 
 
 def _accumulate(

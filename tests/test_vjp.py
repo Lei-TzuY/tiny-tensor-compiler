@@ -57,16 +57,81 @@ def test_runtime_seeded_vjp_composes_into_hessian_vector_product():
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
 
 
-def test_runtime_seeded_vjp_keeps_effectful_higher_order_fail_closed():
+def test_runtime_seeded_vjp_differentiates_direct_slice_copy_into_across_backends():
+    builder = GraphBuilder("copy-into-vjp")
+    base = builder.input((6,), DType.FLOAT64)
+    patch = builder.input((3,), DType.FLOAT64)
+    owned = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = owned.slice(axis=0, start=1, stop=6, step=2)
+    module = builder.finish(owned.copy_into(target, patch))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    patch_value = np.array([7.0, 8.0, 9.0], dtype=np.float64)
+    cotangent = np.array(
+        [np.inf, -3.0, -0.0, 5.0, 11.0, -7.0],
+        dtype=np.float64,
+    )
+    expected_base = np.array(
+        [np.inf, 0.0, -0.0, 0.0, 11.0, 0.0],
+        dtype=np.float64,
+    )
+    expected_patch = cotangent[1:6:2]
+
+    for actual in _execute_all_backends(
+        vjp,
+        (base_value, patch_value, cotangent),
+    ):
+        assert isinstance(actual, tuple)
+        np.testing.assert_array_equal(actual[0], expected_base)
+        np.testing.assert_array_equal(actual[1], expected_patch)
+
+
+def test_runtime_seeded_vjp_composes_through_slice_scatter_gradient():
     builder = GraphBuilder("effectful-gradient")
     x = builder.input((6,), DType.FLOAT64)
-    weights = builder.input((3,), DType.FLOAT64)
-    sliced = x.reverse(0).slice(axis=0, start=1, stop=6, step=2)
+    sliced = x.slice(axis=0, start=1, stop=6, step=2)
     gradient = differentiate_module(
-        builder.finish((sliced * weights).sum()),
+        builder.finish((sliced * sliced).sum()),
         wrt=(0,),
     )
     assert "copy_into" in gradient.dump()
 
-    with pytest.raises(AutodiffError, match="unsupported.*copy_into.*backward"):
-        vector_jacobian_product_module(gradient, wrt=(0,))
+    hvp = vector_jacobian_product_module(gradient, wrt=(0,))
+    x_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    vector = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+    expected = np.zeros_like(vector)
+    expected[1:6:2] = 2.0 * vector[1:6:2]
+
+    for actual in _execute_all_backends(hvp, (x_value, vector)):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_runtime_seeded_vjp_rejects_non_slice_copy_target():
+    builder = GraphBuilder("non-slice-copy-target")
+    base = builder.input((4,), DType.FLOAT64)
+    patch = builder.input((4,), DType.FLOAT64)
+    owned = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(owned.copy_into(owned.reverse(0), patch))
+
+    with pytest.raises(
+        AutodiffError,
+        match="copy_into backward currently requires a direct slice target",
+    ):
+        vector_jacobian_product_module(module, wrt=(0, 1))
+
+
+
+def test_runtime_seeded_vjp_rejects_copy_source_depending_on_prewrite_root():
+    builder = GraphBuilder("copy-source-prewrite-dependency")
+    base = builder.input((4,), DType.FLOAT64)
+    owned = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    source = owned * builder.tensor(2.0, dtype=DType.FLOAT64)
+    target = owned.slice(axis=0, start=0, stop=4, step=1)
+    module = builder.finish(owned.copy_into(target, source))
+
+    with pytest.raises(
+        AutodiffError,
+        match="pre-write root.*isolated",
+    ):
+        vector_jacobian_product_module(module, wrt=(0,))
