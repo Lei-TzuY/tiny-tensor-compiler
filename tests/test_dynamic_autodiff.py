@@ -5,10 +5,15 @@ import pytest
 
 from tiny_tensor_compiler import (
     AutodiffError,
+    CompileBudget,
     GraphBuilder,
     SymbolicDim,
+    compile_adaptive_dynamic_gradient_module,
     compile_dynamic_gradient_module,
+    differentiate_module,
+    specialize_module,
 )
+from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.ir import DType
 
 
@@ -61,4 +66,84 @@ def test_dynamic_gradient_fails_closed_after_specialization_for_unsupported_ops(
     with pytest.raises(AutodiffError, match="unsupported.*backward"):
         executable(
             inputs=(np.ones((2, 3), dtype=np.float32),)
+        )
+
+
+
+def test_adaptive_dynamic_gradient_uses_concrete_gradient_budget_per_binding():
+    batch = SymbolicDim("B")
+    width = SymbolicDim("W")
+    builder = GraphBuilder("adaptive-dynamic-gradient")
+    x = builder.input((batch, width), DType.FLOAT64)
+    weights = builder.input((batch, width), DType.FLOAT64)
+    module = builder.finish((x * weights).sum())
+
+    small_binding = {batch: 1, width: 2}
+    large_binding = {batch: 4, width: 4}
+    small_gradient = differentiate_module(
+        specialize_module(module, small_binding),
+        wrt=(0, 1),
+    )
+    large_gradient = differentiate_module(
+        specialize_module(module, large_binding),
+        wrt=(0, 1),
+    )
+    small_bytes = analyze_module(small_gradient).planned_owning_storage_bytes
+    large_bytes = analyze_module(large_gradient).planned_owning_storage_bytes
+    assert small_bytes < large_bytes
+
+    executable = compile_adaptive_dynamic_gradient_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0, 1),
+        borrow_inputs=True,
+        parallel=True,
+    )
+
+    small_x = np.array([[1.0, -2.0]], dtype=np.float64)
+    small_weights = np.array([[3.0, 4.0]], dtype=np.float64)
+    small_dx, small_dweights = executable(inputs=(small_x, small_weights))
+    np.testing.assert_allclose(small_dx, small_weights, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(small_dweights, small_x, rtol=0.0, atol=0.0)
+
+    large_x = np.arange(16, dtype=np.float64).reshape(4, 4) - 5.0
+    large_weights = (
+        np.arange(16, dtype=np.float64).reshape(4, 4) * 0.5 + 1.0
+    )
+    large_dx, large_dweights = executable(inputs=(large_x, large_weights))
+    np.testing.assert_allclose(large_dx, large_weights, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(large_dweights, large_x, rtol=0.0, atol=0.0)
+
+    small_specialization = executable.specialize({width: 2, batch: 1})
+    large_specialization = executable.specialize({width: 4, batch: 4})
+    assert small_specialization.backend == "native"
+    assert small_specialization.budget_exceeded is None
+    assert large_specialization.backend == "loop"
+    assert large_specialization.budget_exceeded is not None
+    assert large_specialization.budget_exceeded.metric == "planned_owning_storage_bytes"
+    assert large_specialization.budget_exceeded.limit == small_bytes
+    assert large_specialization.budget_exceeded.actual == large_bytes
+
+    assert executable.specialize(small_binding) is small_specialization
+    assert executable.specialize(large_binding) is large_specialization
+    assert executable.cached_bindings == (
+        (("B", 1), ("W", 2)),
+        (("B", 4), ("W", 4)),
+    )
+    assert executable.cached_binding_backends == (
+        ((("B", 1), ("W", 2)), "native"),
+        ((("B", 4), ("W", 4)), "loop"),
+    )
+
+
+def test_adaptive_dynamic_gradient_requires_explicit_budget():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("adaptive-dynamic-gradient-budget")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish((x * x).sum())
+
+    with pytest.raises(TypeError, match="budget must be a CompileBudget"):
+        compile_adaptive_dynamic_gradient_module(  # type: ignore[arg-type]
+            module,
+            budget=None,
         )
