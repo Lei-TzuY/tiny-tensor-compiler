@@ -89,7 +89,7 @@ def test_jvp_composes_through_matmul_primitives():
 def test_jvp_returns_exact_zero_when_requested_input_does_not_reach_output():
     builder = GraphBuilder("jvp-unused")
     x = builder.input((3,), DType.FLOAT32)
-    y = builder.input((3,), DType.FLOAT32)
+    builder.input((3,), DType.FLOAT32)
     module = builder.finish(x * x)
 
     jvp = jacobian_vector_product_module(module, wrt=(1,))
