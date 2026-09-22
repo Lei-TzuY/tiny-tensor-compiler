@@ -342,14 +342,9 @@ class DynamicHVPExecutable(DynamicVJPExecutable):
         )
 
     def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
-        gradient = differentiate_module(
+        return _single_input_hvp_module(
             concrete_forward,
             output_index=self._output_index,
-            wrt=self._wrt,
-        )
-        return vector_jacobian_product_module(
-            gradient,
-            output_index=0,
             wrt=self._wrt,
         )
 
@@ -567,6 +562,53 @@ class AdaptiveDynamicVJPExecutable(AdaptiveDynamicGradientExecutable):
         return self.specialize(bindings)(inputs=provided)
 
 
+class AdaptiveDynamicHVPExecutable(AdaptiveDynamicVJPExecutable):
+    """Cache per-binding native-or-Loop single-input HVP specializations."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        if isinstance(wrt, (str, bytes)):
+            raise TypeError("wrt must be a sequence of runtime input indices")
+        try:
+            frozen_wrt = tuple(wrt)
+        except TypeError as exc:
+            raise TypeError("wrt must be a sequence of runtime input indices") from exc
+        if len(frozen_wrt) != 1:
+            raise ValueError("adaptive dynamic HVP requires exactly one wrt input")
+
+        super().__init__(
+            module,
+            budget,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=frozen_wrt,
+            borrow_inputs=borrow_inputs,
+            parallel=parallel,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return _single_input_hvp_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+
 def compile_module(
     module: Module,
     compiler: str | None = None,
@@ -761,6 +803,36 @@ def compile_dynamic_vjp_module(
     )
 
 
+def compile_adaptive_dynamic_hvp_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> AdaptiveDynamicHVPExecutable:
+    """Prepare per-binding adaptive single-input HVP specializations."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    return AdaptiveDynamicHVPExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
 def compile_adaptive_dynamic_vjp_module(
     module: Module,
     *,
@@ -856,6 +928,24 @@ def _lower_concrete_module(
     if borrow_inputs:
         loops = bind_borrowed_inputs(loops)
     return loops
+
+
+def _single_input_hvp_module(
+    concrete_forward: Module,
+    *,
+    output_index: int,
+    wrt: Sequence[int],
+) -> Module:
+    gradient = differentiate_module(
+        concrete_forward,
+        output_index=output_index,
+        wrt=wrt,
+    )
+    return vector_jacobian_product_module(
+        gradient,
+        output_index=0,
+        wrt=wrt,
+    )
 
 
 def _bind_runtime_seeded_forward_shapes(
