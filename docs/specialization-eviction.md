@@ -8,8 +8,10 @@ The resource-managed dynamic facades add a separate `max_cached_specializations`
 
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_gradient_module(...)`
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_vjp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_gradient_module(...)`
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_vjp_module(...)`
 
 The returned handles retain at most the configured number of specialization decisions in deterministic least-recently-used order. A cache hit refreshes that binding to most-recently-used position. `max_cached_specializations=0` is valid: a specialization may be returned to the caller while the managed handle retains no binding afterward.
 
@@ -23,9 +25,9 @@ Ownership is counted per handle and per retained specialization rather than as a
 
 An external reference to an evicted `NativeExecutable` remains valid but is deliberately not a managed-retention owner. After the final managed owner releases an identity, such a reference reacquires that artifact on its next invocation. Without a persistent cache this may compile again; with a configured persistent cache it reloads the durable artifact without invoking the compiler. Eviction never deletes the user-configured persistent cache artifact.
 
-Dynamic-gradient handles use the same native artifact identity and ownership registry after runtime shape specialization and autodiff. Evicting a retained gradient specialization therefore releases the generated gradient artifact under the same final-owner rule, while an external `NativeExecutable` gradient reference remains usable and may reacquire the artifact later.
+Dynamic-gradient and dynamic-VJP handles use the same native artifact identity and ownership registry after runtime shape specialization and autodiff. Evicting a retained gradient or VJP specialization therefore releases the generated transformed artifact under the same final-owner rule, while an external `NativeExecutable` reference remains usable and may reacquire the artifact later.
 
-Adaptive dynamic execution, including adaptive dynamic gradients, preserves the same distinction:
+Adaptive dynamic execution, including adaptive dynamic gradients and runtime-seeded VJPs, preserves the same distinction:
 
 - an evicted `backend="native"` specialization releases one managed native ownership reference and unloads only when it was the final managed owner;
 - an evicted `backend="loop"` specialization releases only the retained backend decision because no native artifact exists.
@@ -73,6 +75,7 @@ Regression coverage proves the lifecycle instead of inferring it from cache leng
 - an externally retained evicted executable can reacquire and execute again;
 - a persistent-cache-backed executable reloads after final-owner eviction without another compiler invocation;
 - adaptive Loop eviction does not register or release native ownership;
+- native and adaptive dynamic VJP specializations obey the same LRU, final-owner unload, external-handle reacquisition, and truthful Loop-eviction accounting as ordinary and gradient specializations;
 - a resource-managed concrete handle unloads its serial artifact on final `close()` and fails closed afterward;
 - two concrete owners share one artifact and only final close unloads it;
 - concrete and dynamic managed owners coordinate on one shared artifact identity;
@@ -85,6 +88,6 @@ The production exact heads are verified on Ubuntu and Windows with Python 3.11 a
 
 ## Phase boundary
 
-This closes the explicit managed serial-native ownership phase across both dynamic specialization retention and concrete native leases. Raising retention counts, adding `close()` aliases, exposing the registry as another cache-control surface, or adding replacement-policy variants would be lifecycle-policy farming rather than a new architecture milestone.
+This closes the explicit managed serial-native ownership phase across ordinary, gradient, and runtime-seeded VJP dynamic specialization retention as well as concrete native leases. Raising retention counts, adding `close()` aliases, exposing the registry as another cache-control surface, or adding replacement-policy variants would be lifecycle-policy farming rather than a new architecture milestone.
 
 The remaining qualitatively different lifecycle frontier is safe reclaim of process-pinned OpenMP artifacts, which requires evidence that OpenMP worker/runtime references can no longer execute generated code before unload. Without such evidence, the project should promote to another subsystem frontier rather than weakening the process-pinned safety boundary.
