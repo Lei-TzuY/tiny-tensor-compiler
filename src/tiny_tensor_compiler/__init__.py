@@ -4,8 +4,10 @@ from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
 from .compiler import (
+    AdaptiveDynamicGradientExecutable,
     DynamicExecutable,
     DynamicGradientExecutable,
+    compile_adaptive_dynamic_gradient_module,
     compile_dynamic_gradient_module,
     compile_dynamic_module,
     compile_module,
@@ -176,6 +178,7 @@ from .symbolic import (
 from .verifier import VerificationError, verify
 
 __all__ = [
+    "AdaptiveDynamicGradientExecutable",
     "AffineDim",
     "AttestedNativeBundleRegistryExecutable",
     "AutodiffError",
@@ -263,6 +266,7 @@ __all__ = [
     "canonicalize",
     "clear_native_cache",
     "common_subexpression_eliminate",
+    "compile_adaptive_dynamic_gradient_module",
     "compile_dynamic_gradient_module",
     "compile_dynamic_module",
     "compile_module",
