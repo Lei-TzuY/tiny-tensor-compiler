@@ -11,9 +11,11 @@ from .compiler import (
     AdaptiveDynamicGradientExecutable,
     DynamicExecutable,
     DynamicGradientExecutable,
+    DynamicVJPExecutable,
     compile_adaptive_dynamic_gradient_module,
     compile_dynamic_gradient_module,
     compile_dynamic_module,
+    compile_dynamic_vjp_module,
     compile_module,
 )
 from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
@@ -204,6 +206,7 @@ __all__ = [
     "CompilerTracePhase",
     "DynamicExecutable",
     "DynamicGradientExecutable",
+    "DynamicVJPExecutable",
     "GradientConsistencyCampaignResult",
     "GradientConsistencyFailure",
     "GraphBuilder",
@@ -273,6 +276,7 @@ __all__ = [
     "compile_adaptive_dynamic_gradient_module",
     "compile_dynamic_gradient_module",
     "compile_dynamic_module",
+    "compile_dynamic_vjp_module",
     "compile_module",
     "compile_native",
     "compile_resource_managed_module",

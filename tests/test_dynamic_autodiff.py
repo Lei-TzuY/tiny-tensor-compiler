@@ -10,6 +10,7 @@ from tiny_tensor_compiler import (
     SymbolicDim,
     compile_adaptive_dynamic_gradient_module,
     compile_dynamic_gradient_module,
+    compile_dynamic_vjp_module,
     differentiate_module,
     specialize_module,
 )
@@ -147,3 +148,90 @@ def test_adaptive_dynamic_gradient_requires_explicit_budget():
             module,
             budget=None,
         )
+
+
+
+def test_dynamic_vjp_specializes_output_cotangent_shape_and_reuses_multi_symbol_cache():
+    batch = SymbolicDim("B")
+    width = SymbolicDim("W")
+    builder = GraphBuilder("dynamic-vjp")
+    x = builder.input((batch, width), DType.FLOAT64)
+    module = builder.finish(x.transpose((1, 0)))
+
+    executable = compile_dynamic_vjp_module(
+        module,
+        wrt=(0,),
+        borrow_inputs=True,
+    )
+
+    cases = (
+        (2, 3),
+        (4, 1),
+        (2, 3),
+    )
+    for batch_size, width_size in cases:
+        x_value = np.arange(
+            batch_size * width_size,
+            dtype=np.float64,
+        ).reshape(batch_size, width_size)
+        cotangent = (
+            np.arange(
+                width_size * batch_size,
+                dtype=np.float64,
+            ).reshape(width_size, batch_size)
+            + 0.5
+        )
+
+        actual = executable(inputs=(x_value, cotangent))
+        np.testing.assert_array_equal(actual, cotangent.transpose(1, 0))
+
+    assert executable.cached_bindings == (
+        (("B", 2), ("W", 3)),
+        (("B", 4), ("W", 1)),
+    )
+
+
+def test_dynamic_vjp_validates_appended_cotangent_after_forward_shape_binding():
+    batch = SymbolicDim("B")
+    width = SymbolicDim("W")
+    builder = GraphBuilder("dynamic-vjp-cotangent-contract")
+    x = builder.input((batch, width), DType.FLOAT32)
+    module = builder.finish(x.transpose((1, 0)))
+    executable = compile_dynamic_vjp_module(module, wrt=(0,))
+
+    x_value = np.ones((2, 3), dtype=np.float32)
+
+    with pytest.raises(ValueError):
+        executable(
+            inputs=(
+                x_value,
+                np.ones((2, 3), dtype=np.float32),
+            )
+        )
+
+    with pytest.raises(ValueError):
+        executable(
+            inputs=(
+                x_value,
+                np.ones((3, 2), dtype=np.float64),
+            )
+        )
+
+    assert executable.cached_bindings == ((("B", 2), ("W", 3)),)
+
+
+def test_dynamic_vjp_requires_forward_inputs_plus_one_cotangent():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("dynamic-vjp-input-count")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish(x * x)
+    executable = compile_dynamic_vjp_module(module, wrt=(0,))
+
+    x_value = np.ones((3, 2), dtype=np.float64)
+    cotangent = np.ones((3, 2), dtype=np.float64)
+
+    with pytest.raises(ValueError, match="1 forward inputs plus one cotangent"):
+        executable(inputs=(x_value,))
+
+    with pytest.raises(ValueError, match="1 forward inputs plus one cotangent"):
+        executable(inputs=(x_value, cotangent, cotangent))
