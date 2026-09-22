@@ -10,8 +10,8 @@ import numpy as np
 from .autodiff import differentiate_module
 from .differential import (
     _CANDIDATE_FAILURE_EXCEPTIONS,
-    _SplitMix64,
     _require_seed,
+    _SplitMix64,
 )
 from .frontend import GraphBuilder
 from .ir import DType, Module
@@ -163,7 +163,7 @@ def _reference_autodiff_runner(
     differentiated = differentiate_module(module, wrt=(0,))
     result = execute_reference(differentiated, inputs=inputs)
     if isinstance(result, tuple):
-        raise RuntimeError("single-input gradient unexpectedly returned multiple outputs")
+        raise TypeError("single-input gradient unexpectedly returned multiple outputs")
     return result
 
 
@@ -282,7 +282,7 @@ def _scalar_loss(
 ) -> float:
     result = execute_reference(module, inputs=inputs)
     if isinstance(result, tuple):
-        raise RuntimeError("gradient consistency case unexpectedly returned multiple outputs")
+        raise TypeError("gradient consistency case unexpectedly returned multiple outputs")
     array = np.asarray(result)
     if array.shape != ():
         raise RuntimeError("gradient consistency case unexpectedly returned a non-scalar loss")
