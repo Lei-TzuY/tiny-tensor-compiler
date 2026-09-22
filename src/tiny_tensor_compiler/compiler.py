@@ -295,19 +295,9 @@ class DynamicVJPExecutable(DynamicGradientExecutable):
         inputs: Sequence[Any] = (),
         out: Any = None,
     ):
-        provided = tuple(inputs)
-        forward_input_count = sum(
-            op.opcode == "input" for op in self._module.function.ops
-        )
-        expected = forward_input_count + 1
-        if len(provided) != expected:
-            raise ValueError(
-                f"expected {forward_input_count} forward inputs plus one cotangent, "
-                f"got {len(provided)} runtime inputs"
-            )
-        bindings = bind_dynamic_shapes(
+        provided, bindings = _bind_runtime_seeded_forward_shapes(
             self._module,
-            provided[:forward_input_count],
+            inputs,
         )
         return self.specialize(bindings)(inputs=provided, out=out)
 
@@ -483,11 +473,7 @@ class AdaptiveDynamicGradientExecutable(AdaptiveDynamicExecutable):
                 self._budget,
             )
             concrete_forward = specialize_module(self._module, normalized)
-            concrete_gradient = differentiate_module(
-                concrete_forward,
-                output_index=self._output_index,
-                wrt=self._wrt,
-            )
+            transformed = self._transform_concrete_forward(concrete_forward)
             kwargs: dict[str, Any] = {
                 "budget": self._budget,
                 "compiler": self._compiler,
@@ -499,9 +485,36 @@ class AdaptiveDynamicGradientExecutable(AdaptiveDynamicExecutable):
                 kwargs["compiler_timeout"] = self._compiler_timeout
             if self._compile_deadline is not None:
                 kwargs["compile_deadline"] = self._compile_deadline
-            executable = compile_adaptive_module(concrete_gradient, **kwargs)
+            executable = compile_adaptive_module(transformed, **kwargs)
             self._specializations[key] = executable
             return executable
+
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return differentiate_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+
+class AdaptiveDynamicVJPExecutable(AdaptiveDynamicGradientExecutable):
+    """Cache per-binding native-or-Loop runtime-seeded VJP specializations."""
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return vector_jacobian_product_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+    def execute(self, inputs: Sequence[Any] = ()):
+        provided, bindings = _bind_runtime_seeded_forward_shapes(
+            self._module,
+            inputs,
+        )
+        return self.specialize(bindings)(inputs=provided)
+
 
 
 def compile_module(
@@ -670,6 +683,36 @@ def compile_dynamic_vjp_module(
     )
 
 
+def compile_adaptive_dynamic_vjp_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> AdaptiveDynamicVJPExecutable:
+    """Prepare per-binding adaptive runtime-seeded VJP specializations."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    return AdaptiveDynamicVJPExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
 def compile_adaptive_dynamic_gradient_module(
     module: Module,
     *,
@@ -735,6 +778,27 @@ def _lower_concrete_module(
     if borrow_inputs:
         loops = bind_borrowed_inputs(loops)
     return loops
+
+
+def _bind_runtime_seeded_forward_shapes(
+    module: Module,
+    inputs: Sequence[Any],
+) -> tuple[tuple[Any, ...], dict[SymbolicDim, int]]:
+    provided = tuple(inputs)
+    forward_input_count = sum(
+        op.opcode == "input" for op in module.function.ops
+    )
+    expected = forward_input_count + 1
+    if len(provided) != expected:
+        raise ValueError(
+            f"expected {forward_input_count} forward inputs plus one cotangent, "
+            f"got {len(provided)} runtime inputs"
+        )
+    bindings = bind_dynamic_shapes(
+        module,
+        provided[:forward_input_count],
+    )
+    return provided, bindings
 
 
 def _normalize_specialization_bindings(
