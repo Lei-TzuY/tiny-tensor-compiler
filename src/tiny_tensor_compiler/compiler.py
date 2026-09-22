@@ -12,6 +12,7 @@ from .admission import (
     enforce_compile_budget,
 )
 from .analysis import CompilerReport
+from .autodiff import differentiate_module
 from .backends.cpu import execute_loop
 from .compiler_control import normalize_compile_deadline, normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
@@ -195,6 +196,85 @@ class DynamicExecutable:
         out: Any = None,
     ):
         return self.execute(inputs=inputs, out=out)
+
+
+class DynamicGradientExecutable(DynamicExecutable):
+    """Lazy native gradients specialized only after runtime symbolic binding."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        if isinstance(wrt, (str, bytes)):
+            raise TypeError("wrt must be a sequence of runtime input indices")
+        try:
+            frozen_wrt = tuple(wrt)
+        except TypeError as exc:
+            raise TypeError("wrt must be a sequence of runtime input indices") from exc
+
+        self._output_index = output_index
+        self._wrt = frozen_wrt
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            borrow_inputs=borrow_inputs,
+            parallel=parallel,
+            budget=budget,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> NativeExecutable:
+        normalized, key = _normalize_specialization_bindings(
+            self._module,
+            self._symbols,
+            bindings,
+        )
+        with self._lock:
+            executable = self._specializations.get(key)
+            if executable is not None:
+                return executable
+            _enforce_dynamic_specialization_budget(
+                self._symbols,
+                self._specializations,
+                key,
+                self._budget,
+            )
+            concrete_forward = specialize_module(self._module, normalized)
+            concrete_gradient = differentiate_module(
+                concrete_forward,
+                output_index=self._output_index,
+                wrt=self._wrt,
+            )
+            kwargs: dict[str, Any] = {
+                "compiler": self._compiler,
+                "cache_dir": self._cache_dir,
+                "borrow_inputs": self._borrow_inputs,
+                "parallel": self._parallel,
+            }
+            if self._budget is not None:
+                kwargs["budget"] = self._budget
+            if self._compiler_timeout is not None:
+                kwargs["compiler_timeout"] = self._compiler_timeout
+            if self._compile_deadline is not None:
+                kwargs["compile_deadline"] = self._compile_deadline
+            executable = compile_module(concrete_gradient, **kwargs)
+            self._specializations[key] = executable
+            return executable
 
 
 class AdaptiveDynamicExecutable:
@@ -413,6 +493,34 @@ def compile_dynamic_module(
         module,
         compiler=compiler,
         cache_dir=cache_dir,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_dynamic_gradient_module(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> DynamicGradientExecutable:
+    """Prepare lazy gradients by specializing symbolic shapes before autodiff."""
+    return DynamicGradientExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
         borrow_inputs=borrow_inputs,
         parallel=parallel,
         budget=budget,

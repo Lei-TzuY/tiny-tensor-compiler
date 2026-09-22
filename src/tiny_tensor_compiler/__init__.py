@@ -5,6 +5,8 @@ from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
 from .compiler import (
     DynamicExecutable,
+    DynamicGradientExecutable,
+    compile_dynamic_gradient_module,
     compile_dynamic_module,
     compile_module,
 )
@@ -194,6 +196,7 @@ __all__ = [
     "CompilerTrace",
     "CompilerTracePhase",
     "DynamicExecutable",
+    "DynamicGradientExecutable",
     "GradientConsistencyCampaignResult",
     "GradientConsistencyFailure",
     "GraphBuilder",
@@ -260,6 +263,7 @@ __all__ = [
     "canonicalize",
     "clear_native_cache",
     "common_subexpression_eliminate",
+    "compile_dynamic_gradient_module",
     "compile_dynamic_module",
     "compile_module",
     "compile_native",
