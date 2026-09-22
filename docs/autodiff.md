@@ -52,4 +52,4 @@ Focused regressions cover closed-form broadcast gradients, multi-path accumulati
 
 ## Next architectural frontier
 
-The autodiff phase now has source-to-source VJPs, alias/write-effect integration, backend differential regressions, independent finite-difference consistency evidence, lazy runtime symbolic specialization, multi-symbol gradient caching, and per-binding adaptive native/Loop policy. The next architectural gap is an explicit higher-order/differentiated-effect contract once transformed gradient IR is deliberately accepted as differentiable input, or stronger lifecycle semantics for retained gradient specializations.
+The autodiff phase now has source-to-source VJPs, alias/write-effect integration, backend differential regressions, independent finite-difference consistency evidence, lazy runtime symbolic specialization, multi-symbol gradient caching, per-binding adaptive native/Loop policy, and resource-managed LRU ownership/release for retained native and adaptive gradient specializations. The next architectural gap is an explicit higher-order/differentiated-effect contract once transformed gradient IR is deliberately accepted as differentiable input.
