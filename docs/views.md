@@ -111,6 +111,8 @@ Writable effects lower to ordered `BufferCopyInto` operations. Each fresh result
 
 Every direct or transitive alias use extends the storage root's lifetime. A physical slot cannot be reused while any live alias can still observe its prior contents. Buffer verification independently tracks storage roots and generations: every operand must be fresh before use; `BufferCopyInto` still requires a fresh full-root handle, a fresh same-root target, and a fresh different-root source; the write advances the owner generation and makes only its result fresh. Same-root public requests have been canonicalized through an owning snapshot before this layer, so malformed low-level IR cannot bypass the invariant.
 
+Physical reuse also preserves input ownership. A physical slot that has ever hosted a runtime input may still be reused by later pure kernels after that input's lifetime ends, but `plan_memory()` never assigns such an input-tainted slot to a virtual storage root that becomes the owning destination of `copy_into`, `binary_into`, or `binary_inplace`. This keeps deterministic scratch reuse without letting a destination-bearing effect mutate storage that Loop IR has classified as runtime-input-owned.
+
 Alias validation is layout-based rather than element-count-only: dtype must be preserved and the complete minimum/maximum reachable root-relative interval must remain inside the backing allocation. A reverse or transpose therefore needs no special lifetime rule; each changes only the existing alias layout.
 
 ## Loop IR and storage generations
