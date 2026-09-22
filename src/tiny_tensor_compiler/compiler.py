@@ -12,7 +12,7 @@ from .admission import (
     enforce_compile_budget,
 )
 from .analysis import CompilerReport
-from .autodiff import differentiate_module
+from .autodiff import differentiate_module, vector_jacobian_product_module
 from .backends.cpu import execute_loop
 from .compiler_control import normalize_compile_deadline, normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
@@ -255,11 +255,7 @@ class DynamicGradientExecutable(DynamicExecutable):
                 self._budget,
             )
             concrete_forward = specialize_module(self._module, normalized)
-            concrete_gradient = differentiate_module(
-                concrete_forward,
-                output_index=self._output_index,
-                wrt=self._wrt,
-            )
+            transformed = self._transform_concrete_forward(concrete_forward)
             kwargs: dict[str, Any] = {
                 "compiler": self._compiler,
                 "cache_dir": self._cache_dir,
@@ -272,9 +268,49 @@ class DynamicGradientExecutable(DynamicExecutable):
                 kwargs["compiler_timeout"] = self._compiler_timeout
             if self._compile_deadline is not None:
                 kwargs["compile_deadline"] = self._compile_deadline
-            executable = compile_module(concrete_gradient, **kwargs)
+            executable = compile_module(transformed, **kwargs)
             self._specializations[key] = executable
             return executable
+
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return differentiate_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+
+class DynamicVJPExecutable(DynamicGradientExecutable):
+    """Lazy runtime-seeded VJPs specialized after forward-input shape binding."""
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return vector_jacobian_product_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+    def execute(
+        self,
+        inputs: Sequence[Any] = (),
+        out: Any = None,
+    ):
+        provided = tuple(inputs)
+        forward_input_count = sum(
+            op.opcode == "input" for op in self._module.function.ops
+        )
+        expected = forward_input_count + 1
+        if len(provided) != expected:
+            raise ValueError(
+                f"expected {forward_input_count} forward inputs plus one cotangent, "
+                f"got {len(provided)} runtime inputs"
+            )
+        bindings = bind_dynamic_shapes(
+            self._module,
+            provided[:forward_input_count],
+        )
+        return self.specialize(bindings)(inputs=provided, out=out)
 
 
 class AdaptiveDynamicExecutable:
@@ -594,6 +630,34 @@ def compile_dynamic_gradient_module(
 ) -> DynamicGradientExecutable:
     """Prepare lazy gradients by specializing symbolic shapes before autodiff."""
     return DynamicGradientExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_dynamic_vjp_module(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> DynamicVJPExecutable:
+    """Prepare lazy runtime-seeded VJPs after symbolic forward specialization."""
+    return DynamicVJPExecutable(
         module,
         compiler=compiler,
         cache_dir=cache_dir,
