@@ -10,13 +10,13 @@ from .compiler import (
 )
 from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
 from .frontend import GraphBuilder, Tensor
+from .fusion_planner import fuse_elementwise
 from .gradient_consistency import (
     GradientConsistencyCampaignResult,
     GradientConsistencyFailure,
     generate_gradient_consistency_case,
     run_gradient_consistency_campaign,
 )
-from .fusion_planner import fuse_elementwise
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
 from .ir import AffineDim, LinearDim, SymbolicDim
@@ -304,9 +304,9 @@ __all__ = [
     "publish_dynamic_bundle_set_archive",
     "publish_release_channel",
     "publish_threshold_release_channel",
-    "run_gradient_consistency_campaign",
     "publisher_id_from_public_key",
     "publisher_public_key_from_private_key",
+    "run_gradient_consistency_campaign",
     "specialize_module",
     "trace_module",
     "transparency_leaf_hash",
