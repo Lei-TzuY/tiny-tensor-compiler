@@ -218,3 +218,72 @@ def test_runtime_seeded_vjp_differentiates_broadcast_binary_into_mul_across_back
         assert isinstance(actual, tuple)
         np.testing.assert_allclose(actual[0], expected_base, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(actual[1], expected_scale, rtol=0.0, atol=0.0)
+
+
+
+def test_runtime_seeded_vjp_differentiates_binary_inplace_add_across_backends():
+    builder = GraphBuilder("binary-inplace-add-vjp")
+    base = builder.input((4,), DType.FLOAT64)
+    source = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.binary_inplace(source, operator="add"))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    source_value = np.array([5.0, 6.0, -7.0, 8.0], dtype=np.float64)
+    cotangent = np.array([2.0, -3.0, 4.0, 0.25], dtype=np.float64)
+
+    for actual in _execute_all_backends(
+        vjp,
+        (base_value, source_value, cotangent),
+    ):
+        assert isinstance(actual, tuple)
+        np.testing.assert_allclose(actual[0], cotangent, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actual[1], cotangent, rtol=0.0, atol=0.0)
+
+
+def test_runtime_seeded_vjp_differentiates_binary_inplace_mul_across_backends():
+    builder = GraphBuilder("binary-inplace-mul-vjp")
+    base = builder.input((4,), DType.FLOAT64)
+    source = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.binary_inplace(source, operator="mul"))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    source_value = np.array([5.0, 6.0, -7.0, 8.0], dtype=np.float64)
+    cotangent = np.array([2.0, -3.0, 4.0, 0.25], dtype=np.float64)
+    expected_base = cotangent * source_value
+    expected_source = cotangent * base_value
+
+    for actual in _execute_all_backends(
+        vjp,
+        (base_value, source_value, cotangent),
+    ):
+        assert isinstance(actual, tuple)
+        np.testing.assert_allclose(actual[0], expected_base, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actual[1], expected_source, rtol=0.0, atol=0.0)
+
+
+def test_runtime_seeded_vjp_tapes_root_for_binary_inplace_source_path():
+    builder = GraphBuilder("binary-inplace-source-prewrite")
+    base = builder.input((4,), DType.FLOAT64)
+    factor = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    source = root * factor
+    module = builder.finish(root.binary_inplace(source, operator="add"))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    factor_value = np.array([0.5, -1.5, 2.0, 3.0], dtype=np.float64)
+    cotangent = np.array([2.0, -3.0, 4.0, 0.25], dtype=np.float64)
+    expected_base = cotangent * (1.0 + factor_value)
+    expected_factor = cotangent * base_value
+
+    for actual in _execute_all_backends(
+        vjp,
+        (base_value, factor_value, cotangent),
+    ):
+        assert isinstance(actual, tuple)
+        np.testing.assert_allclose(actual[0], expected_base, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actual[1], expected_factor, rtol=0.0, atol=0.0)
