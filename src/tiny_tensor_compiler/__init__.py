@@ -1,5 +1,9 @@
 from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
-from .autodiff import AutodiffError, differentiate_module
+from .autodiff import (
+    AutodiffError,
+    differentiate_module,
+    vector_jacobian_product_module,
+)
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
@@ -319,6 +323,7 @@ __all__ = [
     "trace_module",
     "transparency_leaf_hash",
     "transparency_node_hash",
+    "vector_jacobian_product_module",
     "verify",
     "verify_archive_attestation",
     "verify_release_checkpoint",

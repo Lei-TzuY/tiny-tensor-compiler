@@ -48,17 +48,54 @@ def differentiate_module(
     """Differentiate one static scalar floating output with respect to runtime inputs.
 
     The returned verified module keeps the original runtime-input ABI and returns gradients
-    in ``wrt`` order. The first phase intentionally supports only the pure differentiable
-    subset of arithmetic plus shape/alias transforms with verifier-backed inverse or
-    scatter VJP semantics. Every adjoint is expressed with ordinary tensor IR operations
-    so all existing lowering/backends remain unchanged.
+    in requested wrt order. The bounded contract supports arithmetic plus shape/alias
+    transforms with verifier-backed inverse or scatter VJP semantics.
     """
+    return _reverse_mode_module(
+        module,
+        output_index=output_index,
+        wrt=wrt,
+        runtime_cotangent=False,
+    )
+
+
+def vector_jacobian_product_module(
+    module: Module,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+) -> Module:
+    """Build a runtime-seeded VJP for one static floating output.
+
+    The returned verified module preserves all original runtime inputs and appends one
+    cotangent input whose type exactly matches the selected output. Results are the
+    vector-Jacobian product components for requested wrt inputs in order.
+    """
+    return _reverse_mode_module(
+        module,
+        output_index=output_index,
+        wrt=wrt,
+        runtime_cotangent=True,
+    )
+
+
+def _reverse_mode_module(
+    module: Module,
+    *,
+    output_index: int,
+    wrt: Sequence[int],
+    runtime_cotangent: bool,
+) -> Module:
     if not isinstance(module, Module):
-        raise TypeError("differentiate_module requires a Module")
+        raise TypeError("reverse-mode autodiff requires a Module")
     verify(module)
 
     return_op = _terminal_return(module)
-    selected_output = _select_output(return_op, output_index)
+    selected_output = _select_output(
+        return_op,
+        output_index,
+        require_scalar=not runtime_cotangent,
+    )
     input_ops = _input_ops_by_index(module)
     requested = _normalize_wrt(wrt, input_ops)
     ancestors = _collect_ancestors(selected_output)
@@ -66,27 +103,51 @@ def differentiate_module(
     _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
     _validate_backward_slice(ancestors, selected_output.type.dtype)
 
-    function = Function(f"{module.function.name}_grad")
+    suffix = "vjp" if runtime_cotangent else "grad"
+    function = Function(f"{module.function.name}_{suffix}")
     value_map: dict[Value, Value] = {}
     cloned_forward_ops: list[Operation] = []
 
-    for op in module.function.ops:
-        if op.opcode == "return":
-            continue
-        include = op.opcode == "input" or any(result in ancestors for result in op.results)
-        if not include:
-            continue
-        cloned = _clone_op(function, op, value_map)
-        cloned_forward_ops.append(cloned)
+    if runtime_cotangent:
+        for op in module.function.ops:
+            if op.opcode != "input":
+                continue
+            cloned_forward_ops.append(_clone_op(function, op, value_map))
+
+        cotangent = function.add_op(
+            "input",
+            result_types=(selected_output.type,),
+            attrs={"index": len(input_ops)},
+        ).results[0]
+
+        for op in module.function.ops:
+            if op.opcode in {"input", "return"}:
+                continue
+            if not any(result in ancestors for result in op.results):
+                continue
+            cloned_forward_ops.append(_clone_op(function, op, value_map))
+        seed = cotangent
+    else:
+        for op in module.function.ops:
+            if op.opcode == "return":
+                continue
+            include = op.opcode == "input" or any(
+                result in ancestors for result in op.results
+            )
+            if not include:
+                continue
+            cloned_forward_ops.append(_clone_op(function, op, value_map))
+        seed = _constant(
+            function,
+            np.array(1, dtype=selected_output.type.dtype.to_numpy()),
+        )
 
     try:
         cloned_output = value_map[selected_output]
     except KeyError as exc:  # pragma: no cover - guarded by ancestor collection
         raise RuntimeError("internal autodiff error: selected output was not cloned") from exc
 
-    gradients: dict[Value, Value] = {
-        cloned_output: _constant(function, np.array(1, dtype=cloned_output.type.dtype.to_numpy()))
-    }
+    gradients: dict[Value, Value] = {cloned_output: seed}
 
     for op in reversed(cloned_forward_ops):
         if not op.results:
@@ -111,10 +172,9 @@ def differentiate_module(
         outputs.append(gradient)
 
     function.add_op("return", operands=outputs)
-    differentiated = Module(function)
-    verify(differentiated)
-    return differentiated
-
+    transformed = Module(function)
+    verify(transformed)
+    return transformed
 
 def _terminal_return(module: Module) -> Operation:
     returns = [op for op in module.function.ops if op.opcode == "return"]
@@ -123,7 +183,12 @@ def _terminal_return(module: Module) -> Operation:
     return returns[0]
 
 
-def _select_output(return_op: Operation, output_index: int) -> Value:
+def _select_output(
+    return_op: Operation,
+    output_index: int,
+    *,
+    require_scalar: bool = True,
+) -> Value:
     if not isinstance(output_index, int) or isinstance(output_index, bool):
         raise AutodiffError("output index must be an integer")
     if output_index < 0 or output_index >= len(return_op.operands):
@@ -131,7 +196,7 @@ def _select_output(return_op: Operation, output_index: int) -> Value:
             f"output index {output_index} is out of range for {len(return_op.operands)} outputs"
         )
     output = return_op.operands[output_index]
-    if output.type.shape:
+    if require_scalar and output.type.shape:
         raise AutodiffError("reverse-mode autodiff currently requires a scalar selected output")
     if output.type.dtype not in _FLOAT_DTYPES:
         raise AutodiffError("reverse-mode autodiff currently requires a floating selected output")
