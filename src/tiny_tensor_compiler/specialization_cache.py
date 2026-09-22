@@ -9,9 +9,11 @@ from .admission import CompileBudget
 from .compiler import (
     AdaptiveDynamicExecutable,
     AdaptiveDynamicGradientExecutable,
+    AdaptiveDynamicVJPExecutable,
     AdaptiveExecutable,
     DynamicExecutable,
     DynamicGradientExecutable,
+    DynamicVJPExecutable,
     _display_binding,
     _normalize_specialization_bindings,
 )
@@ -205,6 +207,86 @@ class ResourceManagedDynamicGradientExecutable(
         )
 
 
+class ResourceManagedDynamicVJPExecutable(
+    _ResourceManagedRetentionMixin,
+    DynamicVJPExecutable,
+):
+    """Dynamic VJPs with deterministic LRU native-artifact retention."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        max_cached_specializations: int,
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        self._configure_managed_retention(
+            max_cached_specializations=max_cached_specializations,
+            budget=budget,
+            parallel=parallel,
+        )
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            borrow_inputs=borrow_inputs,
+            parallel=False,
+            budget=budget,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+
+
+class ResourceManagedAdaptiveDynamicVJPExecutable(
+    _ResourceManagedRetentionMixin,
+    AdaptiveDynamicVJPExecutable,
+):
+    """Adaptive dynamic VJPs with deterministic LRU specialization retention."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        max_cached_specializations: int,
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        self._configure_managed_retention(
+            max_cached_specializations=max_cached_specializations,
+            budget=budget,
+            parallel=parallel,
+        )
+        super().__init__(
+            module,
+            budget,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            borrow_inputs=borrow_inputs,
+            parallel=False,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+
+
 class ResourceManagedAdaptiveDynamicGradientExecutable(
     _ResourceManagedRetentionMixin,
     AdaptiveDynamicGradientExecutable,
@@ -295,6 +377,66 @@ def compile_resource_managed_adaptive_dynamic_module(
         compile_deadline=compile_deadline,
     )
 
+
+
+def compile_resource_managed_dynamic_vjp_module(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    max_cached_specializations: int,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> ResourceManagedDynamicVJPExecutable:
+    """Prepare serial native VJP specializations with bounded LRU retention."""
+    return ResourceManagedDynamicVJPExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        max_cached_specializations=max_cached_specializations,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_resource_managed_adaptive_dynamic_vjp_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    max_cached_specializations: int,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> ResourceManagedAdaptiveDynamicVJPExecutable:
+    """Prepare adaptive VJP specializations with bounded LRU retention."""
+    return ResourceManagedAdaptiveDynamicVJPExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        max_cached_specializations=max_cached_specializations,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
 
 
 def compile_resource_managed_dynamic_gradient_module(
