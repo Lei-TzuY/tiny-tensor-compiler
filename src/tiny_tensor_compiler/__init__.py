@@ -11,6 +11,12 @@ from .compiler import (
 from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
 from .frontend import GraphBuilder, Tensor
 from .fusion_planner import fuse_elementwise
+from .gradient_consistency import (
+    GradientConsistencyCampaignResult,
+    GradientConsistencyFailure,
+    generate_gradient_consistency_case,
+    run_gradient_consistency_campaign,
+)
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
 from .ir import AffineDim, LinearDim, SymbolicDim
@@ -188,6 +194,8 @@ __all__ = [
     "CompilerTrace",
     "CompilerTracePhase",
     "DynamicExecutable",
+    "GradientConsistencyCampaignResult",
+    "GradientConsistencyFailure",
     "GraphBuilder",
     "IndexMap",
     "LinearDim",
@@ -279,6 +287,7 @@ __all__ = [
     "fetch_transparency_witness_evidence_publication",
     "fuse_elementwise",
     "generate_c",
+    "generate_gradient_consistency_case",
     "has_symbolic_shapes",
     "load_attested_dynamic_bundle_set_registry",
     "load_dynamic_bundle_set_archive",
@@ -297,6 +306,7 @@ __all__ = [
     "publish_threshold_release_channel",
     "publisher_id_from_public_key",
     "publisher_public_key_from_private_key",
+    "run_gradient_consistency_campaign",
     "specialize_module",
     "trace_module",
     "transparency_leaf_hash",
