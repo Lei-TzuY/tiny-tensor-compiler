@@ -132,12 +132,56 @@ def test_reverse_mode_composes_through_view_and_matmul_across_backends():
         np.testing.assert_allclose(actual[1], expected_rhs, rtol=0.0, atol=0.0)
 
 
+def test_reverse_mode_alias_vjp_scatter_composes_across_backends():
+    builder = GraphBuilder()
+    x = builder.input((2, 3, 6), DType.FLOAT64)
+    weights = builder.input((3, 2, 3), DType.FLOAT64)
+    aliased = x.transpose((2, 0, 1)).reverse(0).slice(
+        axis=0,
+        start=1,
+        stop=6,
+        step=2,
+    )
+    module = builder.finish((aliased * weights).sum())
+
+    differentiated = differentiate_module(module, wrt=(0,))
+    x_value = np.arange(36, dtype=np.float64).reshape(2, 3, 6) - 11.0
+    weights_value = np.array(
+        [
+            [[1.0, -2.0, 3.0], [4.0, 0.5, -1.0]],
+            [[-3.0, 2.5, 1.0], [0.25, -4.0, 2.0]],
+            [[5.0, -0.5, 1.5], [-2.0, 3.0, 4.0]],
+        ],
+        dtype=np.float64,
+    )
+
+    scattered = np.zeros((6, 2, 3), dtype=np.float64)
+    scattered[1:6:2] = weights_value
+    expected = scattered[::-1].transpose((1, 2, 0))
+
+    cpu_program = lower_to_cpu(differentiated)
+    loops = lower_to_loops(cpu_program)
+    assert len(loops.copies) == 1
+    assert "copy_into" in differentiated.dump()
+
+    reference = execute_reference(differentiated, inputs=(x_value, weights_value))
+    cpu = execute_cpu(cpu_program, inputs=(x_value, weights_value))
+    loop = execute_loop(loops, inputs=(x_value, weights_value))
+    native = compile_module(
+        differentiated,
+        borrow_inputs=True,
+        parallel=True,
+    )(inputs=(x_value, weights_value))
+
+    for actual in (reference, cpu, loop, native):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
 @pytest.mark.parametrize(
     "build",
     [
         lambda x: x.relu().sum(),
         lambda x: x.prod(),
-        lambda x: x.transpose((1, 0)).sum(),
     ],
 )
 def test_reverse_mode_rejects_unsupported_backward_ops_fail_closed(build):
