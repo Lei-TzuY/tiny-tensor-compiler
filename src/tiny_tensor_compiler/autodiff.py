@@ -278,6 +278,7 @@ def _validate_backward_slice(ancestors: frozenset[Value], output_dtype: DType) -
             )
         if op.opcode == "copy_into":
             _direct_slice_copy_attrs(op)
+            _validate_copy_into_prewrite_isolation(op, ancestors)
         if len(op.results) != 1:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} multi-result operation on backward slice"
@@ -386,6 +387,40 @@ def _propagate_adjoint(
         _accumulate(function, gradients, source, source_contribution)
         return
     raise RuntimeError(f"internal autodiff error: unsupported propagated opcode {op.opcode!r}")
+
+
+def _validate_copy_into_prewrite_isolation(
+    op: Operation,
+    ancestors: frozenset[Value],
+) -> None:
+    root, target, _source = op.operands
+    result = op.results[0]
+    for value in ancestors:
+        if value in {root, target, result}:
+            continue
+        if _value_depends_on(value, result):
+            continue
+        if _value_depends_on(value, root):
+            raise AutodiffError(
+                "copy_into backward currently requires the pre-write root to be "
+                "isolated from source and other ancestor paths"
+            )
+
+
+def _value_depends_on(value: Value, ancestor: Value) -> bool:
+    stack = [value]
+    seen: set[Value] = set()
+    while stack:
+        current = stack.pop()
+        if current is ancestor:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        producer = current.producer
+        if producer is not None:
+            stack.extend(producer.operands)
+    return False
 
 
 def _direct_slice_copy_attrs(op: Operation) -> dict[str, Any]:
