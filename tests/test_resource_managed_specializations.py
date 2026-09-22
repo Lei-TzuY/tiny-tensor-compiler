@@ -12,8 +12,8 @@ from tiny_tensor_compiler import (
     differentiate_module,
     specialize_module,
 )
-from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler import native as native_module
+from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.specialization_cache import (
     compile_resource_managed_adaptive_dynamic_gradient_module,
     compile_resource_managed_adaptive_dynamic_module,
