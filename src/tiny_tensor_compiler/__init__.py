@@ -14,8 +14,8 @@ from .compiler import (
     DynamicVJPExecutable,
     compile_adaptive_dynamic_gradient_module,
     compile_dynamic_gradient_module,
-    compile_dynamic_vjp_module,
     compile_dynamic_module,
+    compile_dynamic_vjp_module,
     compile_module,
 )
 from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
