@@ -119,3 +119,19 @@ def test_runtime_seeded_vjp_rejects_non_slice_copy_target():
         match="copy_into backward currently requires a direct slice target",
     ):
         vector_jacobian_product_module(module, wrt=(0, 1))
+
+
+
+def test_runtime_seeded_vjp_rejects_copy_source_depending_on_prewrite_root():
+    builder = GraphBuilder("copy-source-prewrite-dependency")
+    base = builder.input((4,), DType.FLOAT64)
+    owned = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    source = owned * builder.tensor(2.0, dtype=DType.FLOAT64)
+    target = owned.slice(axis=0, start=0, stop=4, step=1)
+    module = builder.finish(owned.copy_into(target, source))
+
+    with pytest.raises(
+        AutodiffError,
+        match="pre-write root.*isolated",
+    ):
+        vector_jacobian_product_module(module, wrt=(0,))
