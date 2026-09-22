@@ -12,7 +12,11 @@ from .admission import (
     enforce_compile_budget,
 )
 from .analysis import CompilerReport
-from .autodiff import differentiate_module, vector_jacobian_product_module
+from .autodiff import (
+    differentiate_module,
+    jacobian_vector_product_module,
+    vector_jacobian_product_module,
+)
 from .backends.cpu import execute_loop
 from .compiler_control import normalize_compile_deadline, normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
@@ -298,6 +302,29 @@ class DynamicVJPExecutable(DynamicGradientExecutable):
         provided, bindings = _bind_runtime_seeded_forward_shapes(
             self._module,
             inputs,
+        )
+        return self.specialize(bindings)(inputs=provided, out=out)
+
+
+class DynamicJVPExecutable(DynamicGradientExecutable):
+    """Lazy runtime-seeded JVPs specialized after primal-input shape binding."""
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return jacobian_vector_product_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+    def execute(
+        self,
+        inputs: Sequence[Any] = (),
+        out: Any = None,
+    ):
+        provided, bindings = _bind_runtime_tangent_forward_shapes(
+            self._module,
+            inputs,
+            tangent_count=len(self._wrt),
         )
         return self.specialize(bindings)(inputs=provided, out=out)
 
@@ -747,6 +774,34 @@ def compile_dynamic_gradient_module(
     )
 
 
+def compile_dynamic_jvp_module(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> DynamicJVPExecutable:
+    """Prepare lazy runtime-seeded JVPs after symbolic primal specialization."""
+    return DynamicJVPExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
 def compile_dynamic_hvp_module(
     module: Module,
     compiler: str | None = None,
@@ -961,6 +1016,29 @@ def _bind_runtime_seeded_forward_shapes(
         raise ValueError(
             f"expected {forward_input_count} forward inputs plus one cotangent, "
             f"got {len(provided)} runtime inputs"
+        )
+    bindings = bind_dynamic_shapes(
+        module,
+        provided[:forward_input_count],
+    )
+    return provided, bindings
+
+
+def _bind_runtime_tangent_forward_shapes(
+    module: Module,
+    inputs: Sequence[Any],
+    *,
+    tangent_count: int,
+) -> tuple[tuple[Any, ...], dict[SymbolicDim, int]]:
+    provided = tuple(inputs)
+    forward_input_count = sum(
+        op.opcode == "input" for op in module.function.ops
+    )
+    expected = forward_input_count + tangent_count
+    if len(provided) != expected:
+        raise ValueError(
+            f"expected {forward_input_count} forward inputs plus "
+            f"{tangent_count} tangent inputs, got {len(provided)} runtime inputs"
         )
     bindings = bind_dynamic_shapes(
         module,

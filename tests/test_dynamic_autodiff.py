@@ -13,6 +13,7 @@ from tiny_tensor_compiler import (
     compile_adaptive_dynamic_vjp_module,
     compile_dynamic_gradient_module,
     compile_dynamic_hvp_module,
+    compile_dynamic_jvp_module,
     compile_dynamic_vjp_module,
     differentiate_module,
     specialize_module,
@@ -491,3 +492,90 @@ def test_adaptive_dynamic_hvp_requires_explicit_budget_and_single_wrt():
             budget=CompileBudget(max_planned_storage_bytes=1_000_000),
             wrt=(0, 1),
         )
+
+
+
+def test_dynamic_jvp_specializes_multi_symbol_multi_wrt_and_reuses_cache():
+    batch = SymbolicDim("B")
+    width = SymbolicDim("W")
+    builder = GraphBuilder("dynamic-jvp-multi-wrt")
+    x = builder.input((batch, width), DType.FLOAT64)
+    y = builder.input((batch, width), DType.FLOAT64)
+    module = builder.finish(x * y + x)
+
+    executable = compile_dynamic_jvp_module(
+        module,
+        wrt=(0, 1),
+        borrow_inputs=True,
+    )
+
+    cases = ((2, 3), (4, 1), (2, 3))
+    seen = {}
+    for batch_size, width_size in cases:
+        shape = (batch_size, width_size)
+        x_value = np.arange(batch_size * width_size, dtype=np.float64).reshape(shape) - 2.0
+        y_value = (
+            np.arange(batch_size * width_size, dtype=np.float64).reshape(shape) * 0.25
+            + 1.5
+        )
+        x_tangent = np.full(shape, 2.0, dtype=np.float64)
+        y_tangent = (
+            np.arange(batch_size * width_size, dtype=np.float64).reshape(shape) * -0.5
+            + 0.75
+        )
+
+        actual = executable(
+            inputs=(x_value, y_value, x_tangent, y_tangent)
+        )
+        expected = x_tangent * y_value + x_value * y_tangent + x_tangent
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+        key = (batch_size, width_size)
+        specialization = executable.specialize({batch: batch_size, width: width_size})
+        if key in seen:
+            assert specialization is seen[key]
+        else:
+            seen[key] = specialization
+
+    assert executable.cached_bindings == (
+        (("B", 2), ("W", 3)),
+        (("B", 4), ("W", 1)),
+    )
+
+
+def test_dynamic_jvp_specializes_alias_chain_before_forward_mode_transform():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("dynamic-jvp-alias")
+    x = builder.input((batch, 6), DType.FLOAT64)
+    output = x.reverse(1).slice(axis=1, start=1, stop=6, step=2)
+    module = builder.finish(output)
+
+    executable = compile_dynamic_jvp_module(module, wrt=(0,))
+
+    for size in (2, 5):
+        x_value = np.arange(size * 6, dtype=np.float64).reshape(size, 6)
+        tangent = x_value * 0.5 - 3.0
+        actual = executable(inputs=(x_value, tangent))
+        expected = tangent[:, ::-1][:, 1:6:2]
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+    assert executable.cached_batch_sizes == (2, 5)
+
+
+def test_dynamic_jvp_runtime_input_count_tracks_wrt_tangents_not_symbol_binding():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("dynamic-jvp-input-count")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    y = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish(x * y)
+
+    executable = compile_dynamic_jvp_module(module, wrt=(0, 1))
+    x_value = np.ones((3, 2), dtype=np.float64)
+    y_value = np.full((3, 2), 2.0, dtype=np.float64)
+    tangent = np.full((3, 2), 0.5, dtype=np.float64)
+
+    with pytest.raises(
+        ValueError,
+        match="2 forward inputs plus 2 tangent inputs",
+    ):
+        executable(inputs=(x_value, y_value, tangent))
