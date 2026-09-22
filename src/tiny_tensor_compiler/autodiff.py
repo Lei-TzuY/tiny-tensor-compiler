@@ -36,6 +36,7 @@ _SUPPORTED_BACKWARD_OPS = frozenset(
         "transpose",
         "copy_into",
         "binary_into",
+        "binary_inplace",
     }
 )
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
@@ -128,7 +129,7 @@ def _reverse_mode_module(
                 continue
             if not any(result in ancestors for result in op.results):
                 continue
-            if op.opcode in {"copy_into", "binary_into"}:
+            if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
                 _capture_prewrite_primal_tape(
                     function,
                     op,
@@ -147,7 +148,7 @@ def _reverse_mode_module(
             )
             if not include:
                 continue
-            if op.opcode in {"copy_into", "binary_into"}:
+            if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
                 _capture_prewrite_primal_tape(
                     function,
                     op,
@@ -395,6 +396,22 @@ def _propagate_adjoint(
         contribution = _scatter_slice(function, upstream, operand.type, op.attrs)
         _accumulate(function, gradients, operand, contribution)
         return
+    if op.opcode == "binary_inplace":
+        root, source = op.operands
+        if op.attrs["operator"] == "add":
+            root_contribution = upstream
+            source_contribution = upstream
+        else:
+            root_primal = primal_tape.get(root)
+            if root_primal is None:
+                raise RuntimeError(
+                    "internal autodiff error: binary_inplace mul requires taped root primal"
+                )
+            root_contribution = _multiply(function, upstream, source)
+            source_contribution = _multiply(function, upstream, root_primal)
+        _accumulate(function, gradients, root, root_contribution)
+        _accumulate(function, gradients, source, source_contribution)
+        return
     if op.opcode in {"copy_into", "binary_into"}:
         root, target, source = op.operands
         attrs = _direct_slice_write_attrs(op)
@@ -460,7 +477,7 @@ def _capture_prewrite_primal_tape(
     value_map: dict[Value, Value],
     primal_tape: dict[Value, Value],
 ) -> None:
-    root, _target, _source = op.operands
+    root = op.operands[0]
     for original, cloned in tuple(value_map.items()):
         if original not in ancestors:
             continue
