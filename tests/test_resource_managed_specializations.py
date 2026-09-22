@@ -5,10 +5,19 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tiny_tensor_compiler import CompileBudget, GraphBuilder, SymbolicDim
+from tiny_tensor_compiler import (
+    CompileBudget,
+    GraphBuilder,
+    SymbolicDim,
+    differentiate_module,
+    specialize_module,
+)
 from tiny_tensor_compiler import native as native_module
+from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.specialization_cache import (
+    compile_resource_managed_adaptive_dynamic_gradient_module,
     compile_resource_managed_adaptive_dynamic_module,
+    compile_resource_managed_dynamic_gradient_module,
     compile_resource_managed_dynamic_module,
 )
 
@@ -269,3 +278,78 @@ def test_resource_managed_retention_rejects_unsupported_or_ambiguous_policies():
             max_cached_specializations=1,
             budget=CompileBudget(max_dynamic_specializations=2),
         )
+
+
+
+def _dynamic_gradient_module():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("managed-gradient")
+    value = builder.input((batch, 4), dtype="float64")
+    weights = builder.input((batch, 4), dtype="float64")
+    return batch, builder.finish((value * weights).sum())
+
+
+def test_resource_managed_dynamic_gradient_evicts_and_releases_native_artifact():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_gradient_module()
+    executable = compile_resource_managed_dynamic_gradient_module(
+        module,
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    first = executable.specialize({batch: 2})
+    first_directories = _artifact_directories()
+    assert len(first_directories) == 1
+    second = executable.specialize({batch: 3})
+    assert second is not first
+    assert executable.cached_bindings == ((("B", 3),),)
+    assert executable.retained_bindings_lru == ((("B", 3),),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == 1
+    assert all(not path.exists() for path in first_directories)
+
+    values = np.arange(8, dtype=np.float64).reshape(2, 4) - 2.0
+    weights = np.arange(8, dtype=np.float64).reshape(2, 4) * 0.5 + 1.0
+    np.testing.assert_array_equal(first(inputs=(values, weights)), weights)
+
+
+def test_resource_managed_adaptive_gradient_releases_only_evicted_native_backend():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_gradient_module()
+
+    small_gradient = differentiate_module(
+        specialize_module(module, {batch: 1}),
+        wrt=(0,),
+    )
+    large_gradient = differentiate_module(
+        specialize_module(module, {batch: 4}),
+        wrt=(0,),
+    )
+    small_bytes = analyze_module(small_gradient).planned_owning_storage_bytes
+    large_bytes = analyze_module(large_gradient).planned_owning_storage_bytes
+    assert small_bytes < large_bytes
+
+    executable = compile_resource_managed_adaptive_dynamic_gradient_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    small = executable.specialize({batch: 1})
+    assert small.backend == "native"
+    native_directories = _artifact_directories()
+    assert len(native_directories) == 1
+
+    large = executable.specialize({batch: 4})
+    assert large.backend == "loop"
+    assert executable.cached_binding_backends == (((("B", 4),), "loop"),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == 1
+    assert all(not path.exists() for path in native_directories)
+
+    larger = executable.specialize({batch: 5})
+    assert larger.backend == "loop"
+    assert executable.eviction_count == 2
+    assert executable.released_native_artifact_count == 1
