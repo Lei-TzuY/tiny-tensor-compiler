@@ -272,7 +272,6 @@ class DynamicGradientExecutable(DynamicExecutable):
             self._specializations[key] = executable
             return executable
 
-
     def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
         return differentiate_module(
             concrete_forward,
