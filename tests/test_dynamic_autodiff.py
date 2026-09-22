@@ -11,6 +11,7 @@ from tiny_tensor_compiler import (
     compile_adaptive_dynamic_gradient_module,
     compile_adaptive_dynamic_vjp_module,
     compile_dynamic_gradient_module,
+    compile_dynamic_hvp_module,
     compile_dynamic_vjp_module,
     differentiate_module,
     specialize_module,
@@ -313,3 +314,86 @@ def test_adaptive_dynamic_vjp_requires_explicit_budget():
             module,
             budget=None,
         )
+
+
+
+def test_dynamic_hvp_specializes_multi_symbol_cubic_loss_and_reuses_cache():
+    batch = SymbolicDim("B")
+    width = SymbolicDim("W")
+    builder = GraphBuilder("dynamic-hvp-cubic")
+    x = builder.input((batch, width), DType.FLOAT64)
+    module = builder.finish((x * x * x).sum())
+
+    executable = compile_dynamic_hvp_module(
+        module,
+        wrt=(0,),
+        borrow_inputs=True,
+    )
+
+    cases = (
+        (2, 3),
+        (4, 1),
+        (2, 3),
+    )
+    for batch_size, width_size in cases:
+        x_value = (
+            np.arange(batch_size * width_size, dtype=np.float64)
+            .reshape(batch_size, width_size)
+            * 0.25
+            - 1.5
+        )
+        vector = (
+            np.arange(batch_size * width_size, dtype=np.float64)
+            .reshape(batch_size, width_size)
+            * -0.5
+            + 2.0
+        )
+        actual = executable(inputs=(x_value, vector))
+        np.testing.assert_allclose(
+            actual,
+            6.0 * x_value * vector,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    assert executable.cached_bindings == (
+        (("B", 2), ("W", 3)),
+        (("B", 4), ("W", 1)),
+    )
+
+
+def test_dynamic_hvp_composes_through_specialized_slice_scatter_gradient():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("dynamic-hvp-slice")
+    x = builder.input((batch, 6), DType.FLOAT64)
+    sliced = x.slice(axis=1, start=1, stop=6, step=2)
+    module = builder.finish((sliced * sliced).sum())
+
+    executable = compile_dynamic_hvp_module(module, wrt=(0,))
+
+    for size in (2, 5):
+        x_value = (
+            np.arange(size * 6, dtype=np.float64).reshape(size, 6) - 7.0
+        )
+        vector = (
+            np.arange(size * 6, dtype=np.float64).reshape(size, 6) * 0.125
+            + 0.5
+        )
+        expected = np.zeros_like(vector)
+        expected[:, 1:6:2] = 2.0 * vector[:, 1:6:2]
+
+        actual = executable(inputs=(x_value, vector))
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+    assert executable.cached_batch_sizes == (2, 5)
+
+
+def test_dynamic_hvp_requires_exactly_one_wrt_input():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("dynamic-hvp-single-wrt")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    y = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish((x * y * x).sum())
+
+    with pytest.raises(ValueError, match="exactly one wrt input"):
+        compile_dynamic_hvp_module(module, wrt=(0, 1))
