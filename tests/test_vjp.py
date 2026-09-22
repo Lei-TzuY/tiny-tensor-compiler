@@ -140,3 +140,26 @@ def test_runtime_seeded_vjp_tapes_prewrite_slice_primal_across_backends():
 
     for actual in _execute_all_backends(vjp, (base_value, cotangent)):
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+
+def test_runtime_seeded_vjp_tapes_each_ordered_copy_generation():
+    builder = GraphBuilder("ordered-copy-primal-tape")
+    base = builder.input((6,), DType.FLOAT64)
+    owned = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+
+    even_target = owned.slice(axis=0, start=0, stop=6, step=2)
+    even_source = even_target * even_target
+    after_even = owned.copy_into(even_target, even_source)
+
+    odd_target = after_even.slice(axis=0, start=1, stop=6, step=2)
+    odd_source = odd_target * odd_target
+    module = builder.finish(after_even.copy_into(odd_target, odd_source))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0,))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    cotangent = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+    expected = 2.0 * base_value * cotangent
+
+    for actual in _execute_all_backends(vjp, (base_value, cotangent)):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
