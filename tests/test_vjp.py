@@ -122,16 +122,21 @@ def test_runtime_seeded_vjp_rejects_non_slice_copy_target():
 
 
 
-def test_runtime_seeded_vjp_rejects_copy_source_depending_on_prewrite_root():
+def test_runtime_seeded_vjp_tapes_prewrite_slice_primal_across_backends():
     builder = GraphBuilder("copy-source-prewrite-dependency")
-    base = builder.input((4,), DType.FLOAT64)
+    base = builder.input((6,), DType.FLOAT64)
     owned = base + builder.tensor(0.0, dtype=DType.FLOAT64)
-    source = owned * builder.tensor(2.0, dtype=DType.FLOAT64)
-    target = owned.slice(axis=0, start=0, stop=4, step=1)
+    target = owned.slice(axis=0, start=1, stop=6, step=2)
+    source = target * target
     module = builder.finish(owned.copy_into(target, source))
 
-    with pytest.raises(
-        AutodiffError,
-        match="pre-write root.*isolated",
-    ):
-        vector_jacobian_product_module(module, wrt=(0,))
+    vjp = vector_jacobian_product_module(module, wrt=(0,))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    cotangent = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+    expected = np.array(cotangent, copy=True)
+    expected[1:6:2] = (
+        2.0 * base_value[1:6:2] * cotangent[1:6:2]
+    )
+
+    for actual in _execute_all_backends(vjp, (base_value, cotangent)):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
