@@ -302,6 +302,58 @@ class DynamicVJPExecutable(DynamicGradientExecutable):
         return self.specialize(bindings)(inputs=provided, out=out)
 
 
+class DynamicHVPExecutable(DynamicVJPExecutable):
+    """Lazy single-input Hessian-vector products after forward specialization."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        if isinstance(wrt, (str, bytes)):
+            raise TypeError("wrt must be a sequence of runtime input indices")
+        try:
+            frozen_wrt = tuple(wrt)
+        except TypeError as exc:
+            raise TypeError("wrt must be a sequence of runtime input indices") from exc
+        if len(frozen_wrt) != 1:
+            raise ValueError("dynamic HVP requires exactly one wrt input")
+
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=frozen_wrt,
+            borrow_inputs=borrow_inputs,
+            parallel=parallel,
+            budget=budget,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        gradient = differentiate_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+        return vector_jacobian_product_module(
+            gradient,
+            output_index=0,
+            wrt=self._wrt,
+        )
+
+
 class AdaptiveDynamicExecutable:
     """Cache per-binding native-or-loop decisions under one explicit compile budget."""
 
@@ -640,6 +692,34 @@ def compile_dynamic_gradient_module(
 ) -> DynamicGradientExecutable:
     """Prepare lazy gradients by specializing symbolic shapes before autodiff."""
     return DynamicGradientExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_dynamic_hvp_module(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> DynamicHVPExecutable:
+    """Prepare lazy single-input Hessian-vector products after specialization."""
+    return DynamicHVPExecutable(
         module,
         compiler=compiler,
         cache_dir=cache_dir,
