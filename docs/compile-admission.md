@@ -53,6 +53,8 @@ The cap counts complete bindings, not individual symbolic dimensions. Multi-symb
 
 A backend/budget decision is made once per cached binding. Repeated use of the same binding reuses the same specialization rather than retrying native compilation, changing backend opportunistically, or consuming another cardinality slot.
 
+`tiny_tensor_compiler.compiler.compile_adaptive_dynamic_gradient_module(module, budget=...)` composes the same policy with reverse-mode autodiff. Runtime symbolic bindings are solved first, the forward module is specialized and reverified, and `differentiate_module()` produces a concrete gradient module. Only that concrete gradient module is analyzed against structural budget limits and passed to `compile_adaptive_module()`. This matters because gradient materialization, accumulation, and alias-scatter effects can change storage and kernel structure relative to the forward program. Each admitted complete binding caches one adaptive gradient backend decision, and `cached_binding_backends` reports native versus Loop using canonical multi-symbol binding order. Dynamic-specialization cardinality is still checked before concrete specialization, while verifier/autodiff/native compiler failures are not swallowed as budget fallback.
+
 ## Resource-managed specialization retention
 
 Admission and retention are separate policies. The ordinary `max_dynamic_specializations` cap remains fail-closed and does not imply reclamation. Callers that require bounded retained specialization state can instead opt into:

@@ -391,6 +391,84 @@ class AdaptiveDynamicExecutable:
         return self.execute(inputs=inputs)
 
 
+class AdaptiveDynamicGradientExecutable(AdaptiveDynamicExecutable):
+    """Cache per-binding native-or-Loop gradient specializations."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        if isinstance(wrt, (str, bytes)):
+            raise TypeError("wrt must be a sequence of runtime input indices")
+        try:
+            frozen_wrt = tuple(wrt)
+        except TypeError as exc:
+            raise TypeError("wrt must be a sequence of runtime input indices") from exc
+
+        self._output_index = output_index
+        self._wrt = frozen_wrt
+        super().__init__(
+            module,
+            budget,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            borrow_inputs=borrow_inputs,
+            parallel=parallel,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> AdaptiveExecutable:
+        normalized, key = _normalize_specialization_bindings(
+            self._module,
+            self._symbols,
+            bindings,
+        )
+        with self._lock:
+            executable = self._specializations.get(key)
+            if executable is not None:
+                return executable
+            _enforce_dynamic_specialization_budget(
+                self._symbols,
+                self._specializations,
+                key,
+                self._budget,
+            )
+            concrete_forward = specialize_module(self._module, normalized)
+            concrete_gradient = differentiate_module(
+                concrete_forward,
+                output_index=self._output_index,
+                wrt=self._wrt,
+            )
+            kwargs: dict[str, Any] = {
+                "budget": self._budget,
+                "compiler": self._compiler,
+                "cache_dir": self._cache_dir,
+                "borrow_inputs": self._borrow_inputs,
+                "parallel": self._parallel,
+            }
+            if self._compiler_timeout is not None:
+                kwargs["compiler_timeout"] = self._compiler_timeout
+            if self._compile_deadline is not None:
+                kwargs["compile_deadline"] = self._compile_deadline
+            executable = compile_adaptive_module(concrete_gradient, **kwargs)
+            self._specializations[key] = executable
+            return executable
+
+
 def compile_module(
     module: Module,
     compiler: str | None = None,
@@ -524,6 +602,36 @@ def compile_dynamic_gradient_module(
         borrow_inputs=borrow_inputs,
         parallel=parallel,
         budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_adaptive_dynamic_gradient_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> AdaptiveDynamicGradientExecutable:
+    """Prepare per-binding adaptive gradient specializations."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    return AdaptiveDynamicGradientExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
         compiler_timeout=compiler_timeout,
         compile_deadline=compile_deadline,
     )
