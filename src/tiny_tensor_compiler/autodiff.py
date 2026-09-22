@@ -107,6 +107,7 @@ def _reverse_mode_module(
     suffix = "vjp" if runtime_cotangent else "grad"
     function = Function(f"{module.function.name}_{suffix}")
     value_map: dict[Value, Value] = {}
+    primal_tape: dict[Value, Value] = {}
     cloned_forward_ops: list[Operation] = []
 
     if runtime_cotangent:
@@ -126,6 +127,14 @@ def _reverse_mode_module(
                 continue
             if not any(result in ancestors for result in op.results):
                 continue
+            if op.opcode == "copy_into":
+                _capture_prewrite_primal_tape(
+                    function,
+                    op,
+                    ancestors,
+                    value_map,
+                    primal_tape,
+                )
             cloned_forward_ops.append(_clone_op(function, op, value_map))
         seed = cotangent
     else:
@@ -137,6 +146,14 @@ def _reverse_mode_module(
             )
             if not include:
                 continue
+            if op.opcode == "copy_into":
+                _capture_prewrite_primal_tape(
+                    function,
+                    op,
+                    ancestors,
+                    value_map,
+                    primal_tape,
+                )
             cloned_forward_ops.append(_clone_op(function, op, value_map))
         seed = _constant(
             function,
@@ -157,7 +174,7 @@ def _reverse_mode_module(
         upstream = gradients.get(result)
         if upstream is None:
             continue
-        _propagate_adjoint(function, op, upstream, gradients)
+        _propagate_adjoint(function, op, upstream, gradients, primal_tape)
 
     outputs: list[Value] = []
     for input_index in requested:
@@ -278,7 +295,6 @@ def _validate_backward_slice(ancestors: frozenset[Value], output_dtype: DType) -
             )
         if op.opcode == "copy_into":
             _direct_slice_copy_attrs(op)
-            _validate_copy_into_prewrite_isolation(op, ancestors)
         if len(op.results) != 1:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} multi-result operation on backward slice"
@@ -317,6 +333,7 @@ def _propagate_adjoint(
     op: Operation,
     upstream: Value,
     gradients: dict[Value, Value],
+    primal_tape: dict[Value, Value],
 ) -> None:
     if op.opcode in {"input", "const"}:
         return
@@ -331,8 +348,18 @@ def _propagate_adjoint(
         return
     if op.opcode == "mul":
         lhs, rhs = op.operands
-        lhs_contribution = _unbroadcast(function, _multiply(function, upstream, rhs), lhs.type)
-        rhs_contribution = _unbroadcast(function, _multiply(function, upstream, lhs), rhs.type)
+        lhs_primal = primal_tape.get(lhs, lhs)
+        rhs_primal = primal_tape.get(rhs, rhs)
+        lhs_contribution = _unbroadcast(
+            function,
+            _multiply(function, upstream, rhs_primal),
+            lhs.type,
+        )
+        rhs_contribution = _unbroadcast(
+            function,
+            _multiply(function, upstream, lhs_primal),
+            rhs.type,
+        )
         _accumulate(function, gradients, lhs, lhs_contribution)
         _accumulate(function, gradients, rhs, rhs_contribution)
         return
@@ -389,38 +416,46 @@ def _propagate_adjoint(
     raise RuntimeError(f"internal autodiff error: unsupported propagated opcode {op.opcode!r}")
 
 
-def _validate_copy_into_prewrite_isolation(
+def _capture_prewrite_primal_tape(
+    function: Function,
     op: Operation,
     ancestors: frozenset[Value],
+    value_map: dict[Value, Value],
+    primal_tape: dict[Value, Value],
 ) -> None:
-    root, target, _source = op.operands
-    result = op.results[0]
-    for value in ancestors:
-        if value in {root, target, result}:
+    root, _target, _source = op.operands
+    for original, cloned in tuple(value_map.items()):
+        if original not in ancestors:
             continue
-        if _value_depends_on(value, result):
+        if not _aliases_exact_root(original, root):
             continue
-        if _value_depends_on(value, root):
-            raise AutodiffError(
-                "copy_into backward currently requires the pre-write root to be "
-                "isolated from source and other ancestor paths"
-            )
+        if cloned in primal_tape:
+            continue
+        primal_tape[cloned] = _multiply(
+            function,
+            cloned,
+            _ones(function, cloned.type),
+        )
 
 
-def _value_depends_on(value: Value, ancestor: Value) -> bool:
-    stack = [value]
+def _aliases_exact_root(value: Value, root: Value) -> bool:
+    current = value
     seen: set[Value] = set()
-    while stack:
-        current = stack.pop()
-        if current is ancestor:
+    while True:
+        if current is root:
             return True
         if current in seen:
-            continue
+            return False
         seen.add(current)
         producer = current.producer
-        if producer is not None:
-            stack.extend(producer.operands)
-    return False
+        if producer is None or producer.opcode not in {
+            "view",
+            "slice",
+            "reverse",
+            "transpose",
+        }:
+            return False
+        current = producer.operands[0]
 
 
 def _direct_slice_copy_attrs(op: Operation) -> dict[str, Any]:
