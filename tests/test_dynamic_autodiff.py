@@ -9,6 +9,7 @@ from tiny_tensor_compiler import (
     GraphBuilder,
     SymbolicDim,
     compile_adaptive_dynamic_gradient_module,
+    compile_adaptive_dynamic_hvp_module,
     compile_adaptive_dynamic_vjp_module,
     compile_dynamic_gradient_module,
     compile_dynamic_hvp_module,
@@ -397,3 +398,96 @@ def test_dynamic_hvp_requires_exactly_one_wrt_input():
 
     with pytest.raises(ValueError, match="exactly one wrt input"):
         compile_dynamic_hvp_module(module, wrt=(0, 1))
+
+
+
+def test_adaptive_dynamic_hvp_uses_concrete_hvp_budget_per_binding():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("adaptive-dynamic-hvp")
+    x = builder.input((batch, 4), DType.FLOAT64)
+    module = builder.finish((x * x * x).sum())
+
+    small_gradient = differentiate_module(
+        specialize_module(module, {batch: 1}),
+        wrt=(0,),
+    )
+    small_hvp = vector_jacobian_product_module(
+        small_gradient,
+        wrt=(0,),
+    )
+    large_gradient = differentiate_module(
+        specialize_module(module, {batch: 4}),
+        wrt=(0,),
+    )
+    large_hvp = vector_jacobian_product_module(
+        large_gradient,
+        wrt=(0,),
+    )
+    small_bytes = analyze_module(small_hvp).planned_owning_storage_bytes
+    large_bytes = analyze_module(large_hvp).planned_owning_storage_bytes
+    assert small_bytes < large_bytes
+
+    executable = compile_adaptive_dynamic_hvp_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0,),
+    )
+
+    small_x = np.array([[1.0, -2.0, 3.0, -4.0]], dtype=np.float64)
+    small_vector = np.array([[2.0, 0.5, -3.0, 4.0]], dtype=np.float64)
+    np.testing.assert_allclose(
+        executable(inputs=(small_x, small_vector)),
+        6.0 * small_x * small_vector,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    large_x = np.arange(16, dtype=np.float64).reshape(4, 4) * 0.25 - 1.5
+    large_vector = (
+        np.arange(16, dtype=np.float64).reshape(4, 4) * -0.5 + 2.0
+    )
+    np.testing.assert_allclose(
+        executable(inputs=(large_x, large_vector)),
+        6.0 * large_x * large_vector,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    small_specialization = executable.specialize({batch: 1})
+    large_specialization = executable.specialize({batch: 4})
+    assert small_specialization.backend == "native"
+    assert small_specialization.budget_exceeded is None
+    assert large_specialization.backend == "loop"
+    assert large_specialization.budget_exceeded is not None
+    assert large_specialization.budget_exceeded.metric == "planned_owning_storage_bytes"
+    assert large_specialization.budget_exceeded.limit == small_bytes
+    assert large_specialization.budget_exceeded.actual == large_bytes
+    assert executable.cached_binding_backends == (
+        ((("B", 1),), "native"),
+        ((("B", 4),), "loop"),
+    )
+
+    assert executable.specialize({batch: 1}) is small_specialization
+    assert executable.specialize({batch: 4}) is large_specialization
+
+
+def test_adaptive_dynamic_hvp_requires_explicit_budget_and_single_wrt():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("adaptive-dynamic-hvp-contract")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    y = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish((x * y * x).sum())
+
+    with pytest.raises(TypeError, match="budget must be a CompileBudget"):
+        compile_adaptive_dynamic_hvp_module(  # type: ignore[arg-type]
+            module,
+            budget=None,
+            wrt=(0,),
+        )
+
+    with pytest.raises(ValueError, match="exactly one wrt input"):
+        compile_adaptive_dynamic_hvp_module(
+            module,
+            budget=CompileBudget(max_planned_storage_bytes=1_000_000),
+            wrt=(0, 1),
+        )
