@@ -54,17 +54,17 @@ def test_jvp_alias_chain_preserves_tensor_output_across_backends():
     builder = GraphBuilder("jvp-alias")
     x = builder.input((2, 3, 6), DType.FLOAT64)
     aliased = (
-        x.transpose((2, 0, 1))
+        x.view((6, 6))
+        .transpose((1, 0))
         .reverse(0)
         .slice(axis=0, start=1, stop=6, step=2)
-        .view((3, 6))
     )
     module = builder.finish((x, aliased))
 
     jvp = jacobian_vector_product_module(module, output_index=1, wrt=(0,))
     x_value = np.arange(36, dtype=np.float64).reshape(2, 3, 6) - 11.0
     tangent = np.arange(36, dtype=np.float64).reshape(2, 3, 6) * 0.125 - 2.0
-    expected = tangent.transpose((2, 0, 1))[::-1][1:6:2].reshape(3, 6)
+    expected = tangent.reshape(6, 6).T[::-1][1:6:2]
 
     for actual in _execute_all_backends(jvp, (x_value, tangent)):
         np.testing.assert_array_equal(actual, expected)
