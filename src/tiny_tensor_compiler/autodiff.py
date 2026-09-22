@@ -35,6 +35,7 @@ _SUPPORTED_BACKWARD_OPS = frozenset(
         "reverse",
         "transpose",
         "copy_into",
+        "binary_into",
     }
 )
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
@@ -127,7 +128,7 @@ def _reverse_mode_module(
                 continue
             if not any(result in ancestors for result in op.results):
                 continue
-            if op.opcode == "copy_into":
+            if op.opcode in {"copy_into", "binary_into"}:
                 _capture_prewrite_primal_tape(
                     function,
                     op,
@@ -146,7 +147,7 @@ def _reverse_mode_module(
             )
             if not include:
                 continue
-            if op.opcode == "copy_into":
+            if op.opcode in {"copy_into", "binary_into"}:
                 _capture_prewrite_primal_tape(
                     function,
                     op,
@@ -293,8 +294,8 @@ def _validate_backward_slice(ancestors: frozenset[Value], output_dtype: DType) -
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on reverse-mode backward slice"
             )
-        if op.opcode == "copy_into":
-            _direct_slice_copy_attrs(op)
+        if op.opcode in {"copy_into", "binary_into"}:
+            _direct_slice_write_attrs(op)
         if len(op.results) != 1:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} multi-result operation on backward slice"
@@ -394,22 +395,58 @@ def _propagate_adjoint(
         contribution = _scatter_slice(function, upstream, operand.type, op.attrs)
         _accumulate(function, gradients, operand, contribution)
         return
-    if op.opcode == "copy_into":
-        root, _target, source = op.operands
-        attrs = _direct_slice_copy_attrs(op)
-        root_contribution = _zero_slice_region(function, upstream, root.type, attrs)
-        source_contribution = _unbroadcast(
+    if op.opcode in {"copy_into", "binary_into"}:
+        root, target, source = op.operands
+        attrs = _direct_slice_write_attrs(op)
+        region_upstream = _slice(
             function,
-            _slice(
+            upstream,
+            axis=attrs["axis"],
+            start=attrs["start"],
+            stop=attrs["stop"],
+            step=attrs["step"],
+        )
+
+        if op.opcode == "copy_into":
+            root_contribution = _replace_slice_region(
                 function,
                 upstream,
-                axis=attrs["axis"],
-                start=attrs["start"],
-                stop=attrs["stop"],
-                step=attrs["step"],
-            ),
-            source.type,
-        )
+                root.type,
+                attrs,
+                _zeros(function, target.type),
+            )
+            source_contribution = _unbroadcast(
+                function,
+                region_upstream,
+                source.type,
+            )
+        elif op.attrs["operator"] == "add":
+            root_contribution = upstream
+            source_contribution = _unbroadcast(
+                function,
+                region_upstream,
+                source.type,
+            )
+        else:
+            target_primal = primal_tape.get(target)
+            if target_primal is None:
+                raise RuntimeError(
+                    "internal autodiff error: binary_into mul requires taped target primal"
+                )
+            root_region = _multiply(function, region_upstream, source)
+            root_contribution = _replace_slice_region(
+                function,
+                upstream,
+                root.type,
+                attrs,
+                root_region,
+            )
+            source_contribution = _unbroadcast(
+                function,
+                _multiply(function, region_upstream, target_primal),
+                source.type,
+            )
+
         _accumulate(function, gradients, root, root_contribution)
         _accumulate(function, gradients, source, source_contribution)
         return
@@ -458,9 +495,9 @@ def _aliases_exact_root(value: Value, root: Value) -> bool:
         current = producer.operands[0]
 
 
-def _direct_slice_copy_attrs(op: Operation) -> dict[str, Any]:
-    if op.opcode != "copy_into":
-        raise RuntimeError("internal autodiff error: expected copy_into operation")
+def _direct_slice_write_attrs(op: Operation) -> dict[str, Any]:
+    if op.opcode not in {"copy_into", "binary_into"}:
+        raise RuntimeError("internal autodiff error: expected partial write operation")
     root, target, _source = op.operands
     producer = target.producer
     if (
@@ -470,20 +507,21 @@ def _direct_slice_copy_attrs(op: Operation) -> dict[str, Any]:
         or producer.operands[0] is not root
     ):
         raise AutodiffError(
-            "copy_into backward currently requires a direct slice target"
+            f"{op.opcode} backward currently requires a direct slice target"
         )
     return dict(producer.attrs)
 
 
-def _zero_slice_region(
+def _replace_slice_region(
     function: Function,
     upstream: Value,
     root_type: TensorType,
     attrs: dict[str, Any],
+    replacement: Value,
 ) -> Value:
     if upstream.type != root_type:
         raise RuntimeError(
-            "internal autodiff error: copy_into output cotangent must match root type"
+            "internal autodiff error: write-effect output cotangent must match root type"
         )
     copied_root = _multiply(function, upstream, _ones(function, root_type))
     target = _slice(
@@ -494,9 +532,13 @@ def _zero_slice_region(
         stop=attrs["stop"],
         step=attrs["step"],
     )
+    if replacement.type != target.type:
+        raise RuntimeError(
+            "internal autodiff error: replacement cotangent must match write target type"
+        )
     op = function.add_op(
         "copy_into",
-        operands=(copied_root, target, _zeros(function, target.type)),
+        operands=(copied_root, target, replacement),
         result_types=(root_type,),
     )
     return op.results[0]

@@ -163,3 +163,58 @@ def test_runtime_seeded_vjp_tapes_each_ordered_copy_generation():
 
     for actual in _execute_all_backends(vjp, (base_value, cotangent)):
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+
+def test_runtime_seeded_vjp_differentiates_binary_into_add_across_backends():
+    builder = GraphBuilder("binary-into-add-vjp")
+    base = builder.input((6,), DType.FLOAT64)
+    source = builder.input((3,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    module = builder.finish(root.binary_into(target, source, operator="add"))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    source_value = np.array([7.0, -8.0, 9.0], dtype=np.float64)
+    cotangent = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+
+    expected_base = np.array(cotangent, copy=True)
+    expected_source = cotangent[1:6:2]
+
+    for actual in _execute_all_backends(
+        vjp,
+        (base_value, source_value, cotangent),
+    ):
+        assert isinstance(actual, tuple)
+        np.testing.assert_allclose(actual[0], expected_base, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actual[1], expected_source, rtol=0.0, atol=0.0)
+
+
+def test_runtime_seeded_vjp_differentiates_broadcast_binary_into_mul_across_backends():
+    builder = GraphBuilder("binary-into-mul-vjp")
+    base = builder.input((6,), DType.FLOAT64)
+    scale = builder.input((), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=0, stop=6, step=2)
+    module = builder.finish(root.binary_into(target, scale, operator="mul"))
+
+    vjp = vector_jacobian_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    scale_value = np.array(-1.5, dtype=np.float64)
+    cotangent = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+
+    expected_base = np.array(cotangent, copy=True)
+    expected_base[0:6:2] *= scale_value
+    expected_scale = np.array(
+        np.sum(cotangent[0:6:2] * base_value[0:6:2]),
+        dtype=np.float64,
+    )
+
+    for actual in _execute_all_backends(
+        vjp,
+        (base_value, scale_value, cotangent),
+    ):
+        assert isinstance(actual, tuple)
+        np.testing.assert_allclose(actual[0], expected_base, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actual[1], expected_scale, rtol=0.0, atol=0.0)
