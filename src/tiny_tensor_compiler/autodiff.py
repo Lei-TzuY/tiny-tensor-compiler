@@ -39,6 +39,20 @@ _SUPPORTED_BACKWARD_OPS = frozenset(
         "binary_inplace",
     }
 )
+_SUPPORTED_FORWARD_OPS = frozenset(
+    {
+        "input",
+        "const",
+        "add",
+        "mul",
+        "sum",
+        "reshape",
+        "view",
+        "slice",
+        "reverse",
+        "transpose",
+    }
+)
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
 
 
@@ -79,6 +93,154 @@ def vector_jacobian_product_module(
         output_index=output_index,
         wrt=wrt,
         runtime_cotangent=True,
+    )
+
+
+def jacobian_vector_product_module(
+    module: Module,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+) -> Module:
+    """Build a runtime-seeded forward-mode JVP for one static floating output.
+
+    The returned verified module preserves all original runtime inputs, appends one
+    exact-type tangent input for each requested wrt input in wrt order, and returns
+    the tangent of the selected output.
+    """
+    if not isinstance(module, Module):
+        raise TypeError("forward-mode JVP requires a Module")
+    verify(module)
+
+    return_op = _terminal_return(module)
+    selected_output = _select_output(
+        return_op,
+        output_index,
+        require_scalar=False,
+    )
+    input_ops = _input_ops_by_index(module)
+    requested = _normalize_wrt(wrt, input_ops)
+    ancestors = _collect_ancestors(selected_output)
+
+    _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
+    _validate_forward_slice(ancestors, selected_output.type.dtype)
+
+    function = Function(f"{module.function.name}_jvp")
+    value_map: dict[Value, Value] = {}
+    tangents: dict[Value, Value] = {}
+
+    for op in module.function.ops:
+        if op.opcode != "input":
+            continue
+        _clone_op(function, op, value_map)
+
+    tangent_input_index = len(input_ops)
+    for offset, input_index in enumerate(requested):
+        original_input = input_ops[input_index].results[0]
+        tangents[original_input] = function.add_op(
+            "input",
+            result_types=(original_input.type,),
+            attrs={"index": tangent_input_index + offset},
+        ).results[0]
+
+    for op in input_ops.values():
+        original_input = op.results[0]
+        if original_input not in tangents:
+            tangents[original_input] = _zeros(function, original_input.type)
+
+    for op in module.function.ops:
+        if op.opcode in {"input", "return"}:
+            continue
+        if not any(result in ancestors for result in op.results):
+            continue
+        cloned = _clone_op(function, op, value_map)
+        original_result = op.results[0]
+        tangents[original_result] = _forward_tangent(
+            function,
+            op,
+            cloned,
+            value_map,
+            tangents,
+        )
+
+    tangent_output = tangents.get(selected_output)
+    if tangent_output is None:
+        raise RuntimeError("internal autodiff error: selected JVP output has no tangent")
+    if tangent_output.type != selected_output.type:
+        raise RuntimeError("internal autodiff error: JVP output type does not match primal output")
+
+    function.add_op("return", operands=(tangent_output,))
+    transformed = Module(function)
+    verify(transformed)
+    return transformed
+
+
+def _validate_forward_slice(
+    ancestors: frozenset[Value],
+    output_dtype: DType,
+) -> None:
+    producers = {value.producer for value in ancestors if value.producer is not None}
+    for op in producers:
+        if op.opcode not in _SUPPORTED_FORWARD_OPS:
+            raise AutodiffError(
+                f"unsupported {op.opcode!r} operation on forward-mode JVP slice"
+            )
+        if len(op.results) != 1:
+            raise AutodiffError(
+                f"unsupported {op.opcode!r} multi-result operation on forward-mode JVP slice"
+            )
+        result_dtype = op.results[0].type.dtype
+        if result_dtype not in _FLOAT_DTYPES:
+            raise AutodiffError("forward-mode JVP slice must use floating tensor values")
+        if result_dtype != output_dtype:
+            raise AutodiffError(
+                "mixed-precision forward-mode JVP is not supported; "
+                "the selected forward slice must use one exact floating dtype"
+            )
+
+
+def _forward_tangent(
+    function: Function,
+    original_op: Operation,
+    cloned_op: Operation,
+    value_map: dict[Value, Value],
+    tangents: dict[Value, Value],
+) -> Value:
+    if original_op.opcode == "const":
+        return _zeros(function, original_op.results[0].type)
+
+    if original_op.opcode == "add":
+        lhs, rhs = original_op.operands
+        return _add(function, tangents[lhs], tangents[rhs])
+
+    if original_op.opcode == "mul":
+        lhs, rhs = original_op.operands
+        lhs_primal = value_map[lhs]
+        rhs_primal = value_map[rhs]
+        lhs_term = _multiply(function, tangents[lhs], rhs_primal)
+        rhs_term = _multiply(function, lhs_primal, tangents[rhs])
+        return _add(function, lhs_term, rhs_term)
+
+    if original_op.opcode in {
+        "sum",
+        "reshape",
+        "view",
+        "slice",
+        "reverse",
+        "transpose",
+    }:
+        (operand,) = original_op.operands
+        tangent = tangents[operand]
+        tangent_op = function.add_op(
+            original_op.opcode,
+            operands=(tangent,),
+            result_types=(cloned_op.results[0].type,),
+            attrs=dict(original_op.attrs),
+        )
+        return tangent_op.results[0]
+
+    raise RuntimeError(
+        f"internal autodiff error: unsupported forward tangent opcode {original_op.opcode!r}"
     )
 
 
