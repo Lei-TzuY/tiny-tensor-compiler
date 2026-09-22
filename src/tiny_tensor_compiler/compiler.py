@@ -12,7 +12,11 @@ from .admission import (
     enforce_compile_budget,
 )
 from .analysis import CompilerReport
-from .autodiff import (\n    differentiate_module,\n    jacobian_vector_product_module,\n    vector_jacobian_product_module,\n)
+from .autodiff import (
+    differentiate_module,
+    jacobian_vector_product_module,
+    vector_jacobian_product_module,
+)
 from .backends.cpu import execute_loop
 from .compiler_control import normalize_compile_deadline, normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
