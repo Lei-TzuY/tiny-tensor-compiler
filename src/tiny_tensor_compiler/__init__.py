@@ -1,5 +1,9 @@
 from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_budget
-from .autodiff import AutodiffError, differentiate_module
+from .autodiff import (
+    AutodiffError,
+    differentiate_module,
+    vector_jacobian_product_module,
+)
 from .backends.cpu import execute as execute_cpu
 from .backends.cpu import execute_loop
 from .c_abi_codegen import generate_c
@@ -328,5 +332,6 @@ __all__ = [
     "verify_transparency_consistency",
     "verify_transparency_inclusion",
     "verify_transparency_witness_evidence_publication",
+    "vector_jacobian_product_module",
     "verify_transparency_witness_quorum",
 ]
