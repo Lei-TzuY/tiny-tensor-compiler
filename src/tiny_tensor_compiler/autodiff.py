@@ -5,7 +5,15 @@ from typing import Any
 
 import numpy as np
 
-from .inference import infer_binary, infer_reshape, infer_sum, normalize_sum_axes
+from .inference import (
+    infer_binary,
+    infer_reshape,
+    infer_reverse,
+    infer_slice,
+    infer_sum,
+    infer_transpose,
+    normalize_sum_axes,
+)
 from .ir import DType, Function, Module, Operation, TensorType, Value
 from .verifier import verify
 
@@ -14,7 +22,20 @@ class AutodiffError(ValueError):
     """Raised when a module is outside the bounded reverse-mode autodiff contract."""
 
 
-_SUPPORTED_BACKWARD_OPS = frozenset({"input", "const", "add", "mul", "sum", "reshape", "view"})
+_SUPPORTED_BACKWARD_OPS = frozenset(
+    {
+        "input",
+        "const",
+        "add",
+        "mul",
+        "sum",
+        "reshape",
+        "view",
+        "slice",
+        "reverse",
+        "transpose",
+    }
+)
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
 
 
@@ -28,9 +49,9 @@ def differentiate_module(
 
     The returned verified module keeps the original runtime-input ABI and returns gradients
     in ``wrt`` order. The first phase intentionally supports only the pure differentiable
-    subset ``add``/``mul``/``sum``/``reshape``/``view`` plus input/constant leaves. Every adjoint is
-    expressed with ordinary tensor IR operations so all existing lowering/backends remain
-    unchanged.
+    subset of arithmetic plus shape/alias transforms with verifier-backed inverse or
+    scatter VJP semantics. Every adjoint is expressed with ordinary tensor IR operations
+    so all existing lowering/backends remain unchanged.
     """
     if not isinstance(module, Module):
         raise TypeError("differentiate_module requires a Module")
@@ -261,6 +282,22 @@ def _propagate_adjoint(
         contribution = _reshape(function, upstream, operand.type.shape)
         _accumulate(function, gradients, operand, contribution)
         return
+    if op.opcode == "transpose":
+        (operand,) = op.operands
+        inverse = _inverse_permutation(op.attrs["axes"])
+        contribution = _transpose(function, upstream, inverse)
+        _accumulate(function, gradients, operand, contribution)
+        return
+    if op.opcode == "reverse":
+        (operand,) = op.operands
+        contribution = _reverse(function, upstream, op.attrs["axis"])
+        _accumulate(function, gradients, operand, contribution)
+        return
+    if op.opcode == "slice":
+        (operand,) = op.operands
+        contribution = _scatter_slice(function, upstream, operand.type, op.attrs)
+        _accumulate(function, gradients, operand, contribution)
+        return
     raise RuntimeError(f"internal autodiff error: unsupported propagated opcode {op.opcode!r}")
 
 
@@ -367,4 +404,90 @@ def _sum(function: Function, value: Value, axis: int | tuple[int, ...] | None) -
 def _reshape(function: Function, value: Value, shape: tuple[int, ...]) -> Value:
     result_type = infer_reshape(value.type, shape)
     op = function.add_op("reshape", operands=(value,), result_types=(result_type,))
+    return op.results[0]
+
+
+def _inverse_permutation(axes: tuple[int, ...]) -> tuple[int, ...]:
+    inverse = [0] * len(axes)
+    for output_axis, input_axis in enumerate(axes):
+        inverse[input_axis] = output_axis
+    return tuple(inverse)
+
+
+def _transpose(function: Function, value: Value, axes: tuple[int, ...]) -> Value:
+    result_type = infer_transpose(value.type, axes)
+    op = function.add_op(
+        "transpose",
+        operands=(value,),
+        result_types=(result_type,),
+        attrs={"axes": axes},
+    )
+    return op.results[0]
+
+
+def _reverse(function: Function, value: Value, axis: int) -> Value:
+    result_type = infer_reverse(value.type, axis)
+    op = function.add_op(
+        "reverse",
+        operands=(value,),
+        result_types=(result_type,),
+        attrs={"axis": axis},
+    )
+    return op.results[0]
+
+
+def _slice(
+    function: Function,
+    value: Value,
+    *,
+    axis: int,
+    start: int,
+    stop: int,
+    step: int,
+) -> Value:
+    result_type = infer_slice(
+        value.type,
+        axis=axis,
+        start=start,
+        stop=stop,
+        step=step,
+    )
+    op = function.add_op(
+        "slice",
+        operands=(value,),
+        result_types=(result_type,),
+        attrs={"axis": axis, "start": start, "stop": stop, "step": step},
+    )
+    return op.results[0]
+
+
+def _materialized_zeros(function: Function, type_: TensorType) -> Value:
+    zero = _zeros(function, type_)
+    return _add(function, zero, zero)
+
+
+def _scatter_slice(
+    function: Function,
+    upstream: Value,
+    input_type: TensorType,
+    attrs: dict[str, Any],
+) -> Value:
+    root = _materialized_zeros(function, input_type)
+    target = _slice(
+        function,
+        root,
+        axis=attrs["axis"],
+        start=attrs["start"],
+        stop=attrs["stop"],
+        step=attrs["step"],
+    )
+    if target.type != upstream.type:
+        raise RuntimeError(
+            "internal autodiff error: slice adjoint source type does not match target"
+        )
+    op = function.add_op(
+        "copy_into",
+        operands=(root, target, upstream),
+        result_types=(input_type,),
+    )
     return op.results[0]
