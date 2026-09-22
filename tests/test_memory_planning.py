@@ -5,6 +5,7 @@ from tiny_tensor_compiler import (
     execute_cpu,
     execute_reference,
     lower_to_cpu,
+    lower_to_loops,
     plan_memory,
 )
 
@@ -61,3 +62,22 @@ def test_cpu_execution_uses_memory_plan_without_changing_results():
 
     assert plan.physical_count < len(program.allocations)
     np.testing.assert_array_equal(execute_cpu(program), execute_reference(module))
+
+
+
+def test_writable_root_does_not_reuse_runtime_input_physical_slot():
+    builder = GraphBuilder("write-root-input-slot")
+    _dead_input = builder.input((4,), dtype="float64")
+    live_input = builder.input((4,), dtype="float64")
+    patch = builder.input((2,), dtype="float64")
+    owned = live_input.relu()
+    target = owned.slice(axis=0, start=0, stop=4, step=2)
+    module = builder.finish(owned.copy_into(target, patch))
+
+    program = lower_to_cpu(module)
+    plan = plan_memory(program)
+    copy = program.copies[0]
+    input_slots = {plan.physical_for(op.output) for op in program.inputs}
+
+    assert plan.physical_for(copy.root) not in input_slots
+    lower_to_loops(program)
