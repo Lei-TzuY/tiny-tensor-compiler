@@ -450,7 +450,7 @@ def _zero_slice_region(
         raise RuntimeError(
             "internal autodiff error: copy_into output cotangent must match root type"
         )
-    copied_root = _reshape(function, upstream, root_type.shape)
+    copied_root = _multiply(function, upstream, _ones(function, root_type))
     target = _slice(
         function,
         copied_root,
