@@ -323,6 +323,7 @@ __all__ = [
     "trace_module",
     "transparency_leaf_hash",
     "transparency_node_hash",
+    "vector_jacobian_product_module",
     "verify",
     "verify_archive_attestation",
     "verify_release_checkpoint",
@@ -332,6 +333,5 @@ __all__ = [
     "verify_transparency_consistency",
     "verify_transparency_inclusion",
     "verify_transparency_witness_evidence_publication",
-    "vector_jacobian_product_module",
     "verify_transparency_witness_quorum",
 ]
