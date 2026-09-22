@@ -2,6 +2,7 @@ from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_bud
 from .autodiff import (
     AutodiffError,
     differentiate_module,
+    jacobian_vector_product_module,
     vector_jacobian_product_module,
 )
 from .backends.cpu import execute as execute_cpu
@@ -317,6 +318,7 @@ __all__ = [
     "generate_c",
     "generate_gradient_consistency_case",
     "has_symbolic_shapes",
+    "jacobian_vector_product_module",
     "load_attested_dynamic_bundle_set_registry",
     "load_dynamic_bundle_set_archive",
     "load_dynamic_bundle_set_registry",
