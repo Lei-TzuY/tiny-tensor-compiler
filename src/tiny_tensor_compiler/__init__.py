@@ -2,6 +2,7 @@ from .admission import CompileBudget, CompileBudgetExceeded, enforce_compile_bud
 from .autodiff import (
     AutodiffError,
     differentiate_module,
+    jacobian_vector_product_module,
     vector_jacobian_product_module,
 )
 from .backends.cpu import execute as execute_cpu
@@ -302,6 +303,7 @@ __all__ = [
     "create_transparency_witness_quorum",
     "dead_code_eliminate",
     "differentiate_module",
+    "jacobian_vector_product_module",
     "digest_dynamic_bundle_set_archive",
     "enforce_compile_budget",
     "execute_cpu",
