@@ -9,10 +9,12 @@ from tiny_tensor_compiler import (
     GraphBuilder,
     SymbolicDim,
     compile_adaptive_dynamic_gradient_module,
+    compile_adaptive_dynamic_vjp_module,
     compile_dynamic_gradient_module,
     compile_dynamic_vjp_module,
     differentiate_module,
     specialize_module,
+    vector_jacobian_product_module,
 )
 from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.ir import DType
@@ -235,3 +237,79 @@ def test_dynamic_vjp_requires_forward_inputs_plus_one_cotangent():
 
     with pytest.raises(ValueError, match="1 forward inputs plus one cotangent"):
         executable(inputs=(x_value, cotangent, cotangent))
+
+
+
+def test_adaptive_dynamic_vjp_uses_concrete_vjp_budget_per_binding():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("adaptive-dynamic-vjp")
+    x = builder.input((batch, 4), DType.FLOAT64)
+    module = builder.finish(x * x)
+
+    small_vjp = vector_jacobian_product_module(
+        specialize_module(module, {batch: 1}),
+        wrt=(0,),
+    )
+    large_vjp = vector_jacobian_product_module(
+        specialize_module(module, {batch: 4}),
+        wrt=(0,),
+    )
+    small_bytes = analyze_module(small_vjp).planned_owning_storage_bytes
+    large_bytes = analyze_module(large_vjp).planned_owning_storage_bytes
+    assert small_bytes < large_bytes
+
+    executable = compile_adaptive_dynamic_vjp_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0,),
+    )
+
+    small_x = np.array([[1.0, -2.0, 3.0, -4.0]], dtype=np.float64)
+    small_cotangent = np.array([[2.0, 0.5, -3.0, 4.0]], dtype=np.float64)
+    np.testing.assert_allclose(
+        executable(inputs=(small_x, small_cotangent)),
+        2.0 * small_x * small_cotangent,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    large_x = np.arange(16, dtype=np.float64).reshape(4, 4) - 5.0
+    large_cotangent = (
+        np.arange(16, dtype=np.float64).reshape(4, 4) * 0.25 + 1.0
+    )
+    np.testing.assert_allclose(
+        executable(inputs=(large_x, large_cotangent)),
+        2.0 * large_x * large_cotangent,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    small_specialization = executable.specialize({batch: 1})
+    large_specialization = executable.specialize({batch: 4})
+    assert small_specialization.backend == "native"
+    assert small_specialization.budget_exceeded is None
+    assert large_specialization.backend == "loop"
+    assert large_specialization.budget_exceeded is not None
+    assert large_specialization.budget_exceeded.metric == "planned_owning_storage_bytes"
+    assert large_specialization.budget_exceeded.limit == small_bytes
+    assert large_specialization.budget_exceeded.actual == large_bytes
+    assert executable.cached_binding_backends == (
+        ((("B", 1),), "native"),
+        ((("B", 4),), "loop"),
+    )
+
+    assert executable.specialize({batch: 1}) is small_specialization
+    assert executable.specialize({batch: 4}) is large_specialization
+
+
+def test_adaptive_dynamic_vjp_requires_explicit_budget():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("adaptive-dynamic-vjp-budget")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish(x * x)
+
+    with pytest.raises(TypeError, match="budget must be a CompileBudget"):
+        compile_adaptive_dynamic_vjp_module(  # type: ignore[arg-type]
+            module,
+            budget=None,
+        )
