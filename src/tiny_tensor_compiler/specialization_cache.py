@@ -8,8 +8,10 @@ from . import native as native_module
 from .admission import CompileBudget
 from .compiler import (
     AdaptiveDynamicExecutable,
+    AdaptiveDynamicGradientExecutable,
     AdaptiveExecutable,
     DynamicExecutable,
+    DynamicGradientExecutable,
     _display_binding,
     _normalize_specialization_bindings,
 )
@@ -196,6 +198,186 @@ class ResourceManagedAdaptiveDynamicExecutable(AdaptiveDynamicExecutable):
                 self._released_native_artifact_count += 1
 
 
+
+class ResourceManagedDynamicGradientExecutable(DynamicGradientExecutable):
+    """Dynamic gradient executable with bounded LRU native-artifact retention."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: tuple[int, ...] = (0,),
+        max_cached_specializations: int,
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        _validate_cache_limit(max_cached_specializations)
+        _validate_managed_budget(budget)
+        if parallel:
+            raise ValueError(
+                "resource-managed specialization eviction does not support parallel=True "
+                "because Windows OpenMP artifacts are process-pinned"
+            )
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            borrow_inputs=borrow_inputs,
+            parallel=False,
+            budget=budget,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+        self._max_cached_specializations = max_cached_specializations
+        self._eviction_count = 0
+        self._released_native_artifact_count = 0
+
+    @property
+    def max_cached_specializations(self) -> int:
+        return self._max_cached_specializations
+
+    @property
+    def retained_bindings_lru(self) -> tuple[BindingDisplay, ...]:
+        with self._lock:
+            return tuple(_display_binding(self._symbols, key) for key in self._specializations)
+
+    @property
+    def eviction_count(self) -> int:
+        with self._lock:
+            return self._eviction_count
+
+    @property
+    def released_native_artifact_count(self) -> int:
+        with self._lock:
+            return self._released_native_artifact_count
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> NativeExecutable:
+        _, key = _normalize_specialization_bindings(self._module, self._symbols, bindings)
+        with self._lock:
+            cached = self._specializations.pop(key, None)
+            if cached is not None:
+                self._specializations[key] = cached
+                return cached
+
+            executable = super().specialize(bindings)
+            self._specializations.pop(key)
+            self._specializations[key] = executable
+            _retain_managed_serial_artifact(self, executable)
+            self._evict_to_limit()
+            return executable
+
+    def _evict_to_limit(self) -> None:
+        while len(self._specializations) > self._max_cached_specializations:
+            oldest_key = next(iter(self._specializations))
+            executable = self._specializations.pop(oldest_key)
+            self._eviction_count += 1
+            if _release_managed_serial_artifact(self, executable):
+                self._released_native_artifact_count += 1
+
+
+class ResourceManagedAdaptiveDynamicGradientExecutable(AdaptiveDynamicGradientExecutable):
+    """Adaptive dynamic gradients with bounded LRU specialization retention."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: tuple[int, ...] = (0,),
+        max_cached_specializations: int,
+        borrow_inputs: bool = False,
+        parallel: bool = False,
+        compiler_timeout: float | None = None,
+        compile_deadline: float | None = None,
+    ) -> None:
+        _validate_cache_limit(max_cached_specializations)
+        _validate_managed_budget(budget)
+        if parallel:
+            raise ValueError(
+                "resource-managed specialization eviction does not support parallel=True "
+                "because Windows OpenMP artifacts are process-pinned"
+            )
+        super().__init__(
+            module,
+            budget,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            borrow_inputs=borrow_inputs,
+            parallel=False,
+            compiler_timeout=compiler_timeout,
+            compile_deadline=compile_deadline,
+        )
+        self._max_cached_specializations = max_cached_specializations
+        self._eviction_count = 0
+        self._released_native_artifact_count = 0
+
+    @property
+    def max_cached_specializations(self) -> int:
+        return self._max_cached_specializations
+
+    @property
+    def retained_bindings_lru(self) -> tuple[BindingDisplay, ...]:
+        with self._lock:
+            return tuple(_display_binding(self._symbols, key) for key in self._specializations)
+
+    @property
+    def eviction_count(self) -> int:
+        with self._lock:
+            return self._eviction_count
+
+    @property
+    def released_native_artifact_count(self) -> int:
+        with self._lock:
+            return self._released_native_artifact_count
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> AdaptiveExecutable:
+        _, key = _normalize_specialization_bindings(self._module, self._symbols, bindings)
+        with self._lock:
+            cached = self._specializations.pop(key, None)
+            if cached is not None:
+                self._specializations[key] = cached
+                return cached
+
+            executable = super().specialize(bindings)
+            self._specializations.pop(key)
+            self._specializations[key] = executable
+            if executable.backend == "native" and executable._native is not None:
+                _retain_managed_serial_artifact(self, executable._native)
+            self._evict_to_limit()
+            return executable
+
+    def _evict_to_limit(self) -> None:
+        while len(self._specializations) > self._max_cached_specializations:
+            oldest_key = next(iter(self._specializations))
+            executable = self._specializations.pop(oldest_key)
+            self._eviction_count += 1
+            if (
+                executable.backend == "native"
+                and executable._native is not None
+                and _release_managed_serial_artifact(self, executable._native)
+            ):
+                self._released_native_artifact_count += 1
+
+
 def compile_resource_managed_dynamic_module(
     module: Module,
     compiler: str | None = None,
@@ -240,6 +422,67 @@ def compile_resource_managed_adaptive_dynamic_module(
         budget,
         compiler=compiler,
         cache_dir=cache_dir,
+        max_cached_specializations=max_cached_specializations,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+
+def compile_resource_managed_dynamic_gradient_module(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: tuple[int, ...] = (0,),
+    max_cached_specializations: int,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> ResourceManagedDynamicGradientExecutable:
+    """Prepare serial native gradient specializations with bounded LRU retention."""
+    return ResourceManagedDynamicGradientExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        max_cached_specializations=max_cached_specializations,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
+        budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_resource_managed_adaptive_dynamic_gradient_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: tuple[int, ...] = (0,),
+    max_cached_specializations: int,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> ResourceManagedAdaptiveDynamicGradientExecutable:
+    """Prepare adaptive gradient specializations with bounded LRU retention."""
+    return ResourceManagedAdaptiveDynamicGradientExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
         max_cached_specializations=max_cached_specializations,
         borrow_inputs=borrow_inputs,
         parallel=parallel,
