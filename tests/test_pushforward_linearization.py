@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
-
 from tiny_tensor_compiler import (
-    AutodiffError,
     GraphBuilder,
     compile_pushforward_linearization,
 )
