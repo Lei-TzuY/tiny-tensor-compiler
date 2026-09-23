@@ -117,15 +117,29 @@ def test_reusable_pullback_replays_binary_into_add_generation():
     assert state.query_count == 2
 
 
-def test_reusable_pullback_keeps_binary_inplace_fail_closed():
-    builder = GraphBuilder("reusable-pullback-binary-inplace")
+def test_reusable_pullback_replays_binary_inplace_add_generation():
+    builder = GraphBuilder("reusable-pullback-binary-inplace-add")
     base = builder.input((4,), DType.FLOAT64)
     source = builder.input((4,), DType.FLOAT64)
     root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
     module = builder.finish(root.binary_inplace(source, operator="add"))
 
-    with pytest.raises(
-        AutodiffError,
-        match="reusable pullback linearization.*arithmetic write effects",
-    ):
-        compile_pullback_linearization(module, wrt=(0, 1))
+    executable = compile_pullback_linearization(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    source_value = np.array([5.0, 6.0, -7.0, 8.0], dtype=np.float64)
+    state = executable.linearize((base_value, source_value))
+
+    base_value[...] = 1000.0
+    source_value[...] = -1000.0
+
+    cotangent = np.array([0.5, -2.0, 3.0, 4.0], dtype=np.float64)
+    actual = state.pullback(cotangent)
+    assert isinstance(actual, tuple)
+    np.testing.assert_allclose(actual[0], cotangent, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(actual[1], cotangent, rtol=0.0, atol=0.0)
+
+    second = state.pullback(-cotangent)
+    assert isinstance(second, tuple)
+    np.testing.assert_allclose(second[0], -cotangent, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(second[1], -cotangent, rtol=0.0, atol=0.0)
+    assert state.query_count == 2
