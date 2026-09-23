@@ -10,12 +10,14 @@ from tiny_tensor_compiler import (
     SymbolicDim,
     compile_adaptive_dynamic_gradient_module,
     compile_adaptive_dynamic_hvp_module,
+    compile_adaptive_dynamic_jvp_module,
     compile_adaptive_dynamic_vjp_module,
     compile_dynamic_gradient_module,
     compile_dynamic_hvp_module,
     compile_dynamic_jvp_module,
     compile_dynamic_vjp_module,
     differentiate_module,
+    jacobian_vector_product_module,
     specialize_module,
     vector_jacobian_product_module,
 )
@@ -579,3 +581,96 @@ def test_dynamic_jvp_runtime_input_count_tracks_wrt_tangents_not_symbol_binding(
         match="2 forward inputs plus 2 tangent inputs",
     ):
         executable(inputs=(x_value, y_value, tangent))
+
+
+
+def test_adaptive_dynamic_jvp_uses_concrete_jvp_budget_per_binding():
+    batch = SymbolicDim("B")
+    width = SymbolicDim("W")
+    builder = GraphBuilder("adaptive-dynamic-jvp")
+    x = builder.input((batch, width), DType.FLOAT64)
+    y = builder.input((batch, width), DType.FLOAT64)
+    module = builder.finish(x * y + x)
+
+    small_binding = {batch: 1, width: 2}
+    large_binding = {batch: 4, width: 4}
+    small_jvp = jacobian_vector_product_module(
+        specialize_module(module, small_binding),
+        wrt=(0, 1),
+    )
+    large_jvp = jacobian_vector_product_module(
+        specialize_module(module, large_binding),
+        wrt=(0, 1),
+    )
+    small_bytes = analyze_module(small_jvp).planned_owning_storage_bytes
+    large_bytes = analyze_module(large_jvp).planned_owning_storage_bytes
+    assert small_bytes < large_bytes
+
+    executable = compile_adaptive_dynamic_jvp_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0, 1),
+    )
+
+    for shape in ((1, 2), (4, 4)):
+        x_value = np.arange(np.prod(shape), dtype=np.float64).reshape(shape) - 1.0
+        y_value = (
+            np.arange(np.prod(shape), dtype=np.float64).reshape(shape) * 0.25
+            + 1.5
+        )
+        x_tangent = np.full(shape, 2.0, dtype=np.float64)
+        y_tangent = (
+            np.arange(np.prod(shape), dtype=np.float64).reshape(shape) * -0.5
+            + 0.75
+        )
+        expected = x_tangent * y_value + x_value * y_tangent + x_tangent
+        np.testing.assert_allclose(
+            executable(inputs=(x_value, y_value, x_tangent, y_tangent)),
+            expected,
+            rtol=0.0,
+            atol=0.0,
+        )
+
+    small_specialization = executable.specialize(small_binding)
+    large_specialization = executable.specialize(large_binding)
+    assert small_specialization.backend == "native"
+    assert small_specialization.budget_exceeded is None
+    assert large_specialization.backend == "loop"
+    assert large_specialization.budget_exceeded is not None
+    assert large_specialization.budget_exceeded.metric == "planned_owning_storage_bytes"
+    assert large_specialization.budget_exceeded.limit == small_bytes
+    assert large_specialization.budget_exceeded.actual == large_bytes
+    assert executable.cached_binding_backends == (
+        ((("B", 1), ("W", 2)), "native"),
+        ((("B", 4), ("W", 4)), "loop"),
+    )
+    assert executable.specialize(small_binding) is small_specialization
+    assert executable.specialize(large_binding) is large_specialization
+
+
+def test_adaptive_dynamic_jvp_requires_explicit_budget_and_exact_tangent_abi():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("adaptive-dynamic-jvp-contract")
+    x = builder.input((batch, 2), DType.FLOAT64)
+    y = builder.input((batch, 2), DType.FLOAT64)
+    module = builder.finish(x * y)
+
+    with pytest.raises(TypeError, match="budget must be a CompileBudget"):
+        compile_adaptive_dynamic_jvp_module(  # type: ignore[arg-type]
+            module,
+            budget=None,
+            wrt=(0, 1),
+        )
+
+    executable = compile_adaptive_dynamic_jvp_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=1_000_000),
+        wrt=(0, 1),
+    )
+    value = np.ones((3, 2), dtype=np.float64)
+    tangent = np.full((3, 2), 0.5, dtype=np.float64)
+    with pytest.raises(
+        ValueError,
+        match="2 forward inputs plus 2 tangent inputs",
+    ):
+        executable(inputs=(value, value, tangent))
