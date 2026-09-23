@@ -28,7 +28,7 @@ linearizations = load_dynamic_linearization_bundle_set_archive(
 
 Packing still happens after compilation: neither archive packer invokes a compiler. Loading, finite dispatch, and retained-linearization queries are likewise compiler-free.
 
-The existing content-addressed registry, attestation, release-channel, threshold, and transparency loaders currently dispatch through the ordinary `dynamic-bundle-set` archive loader. Retained-linearization archive bytes therefore have the local deterministic/executable archive contract described here, but remote registry/trust integration is a separate next layer rather than an implied capability of this phase.
+The content-addressed registry now dispatches both supported archive payload kinds through one digest-pinned HTTP/staging path while retaining payload-specific archive verification. Ordinary archives load through the `dynamic-bundle-set` verifier; retained-linearization archives load through the coordinated retained-state verifier and return compiler-free linearization executables. Publisher attestation, release-channel, threshold, and transparency APIs still target the ordinary payload and remain separate later trust-layer promotions for retained linearizations.
 
 ## Transport schema
 
@@ -95,6 +95,6 @@ No compression-ratio, deployment-size, network-transfer, or runtime-performance 
 
 ## Next promotion
 
-Deterministic local single-file transport now covers both ordinary finite bundle sets and retained-linearization bundle sets under one narrow archive schema and safe extraction boundary. Further ZIP metadata/compression variants would be low-value format farming.
+Deterministic local single-file transport and unsigned content-addressed registry delivery now cover both ordinary finite bundle sets and retained-linearization bundle sets under one narrow archive schema, safe extraction boundary, and shared digest-pinned transfer path. Further ZIP metadata/compression variants or a second retained-specific HTTP protocol would be low-value format/transport farming.
 
-The next deployment milestone is content-addressed registry integration for the retained-linearization payload kind: keep the existing digest-addressed download/staging rules, but dispatch the verified archive through the retained-linearization loader and return its coordinated linearization executable. Publisher authorization, release-channel rollback/freshness, threshold policy, and transparency should remain later layers until this unsigned digest-pinned integration is executable and fail-closed.
+The next retained-linearization deployment milestone is publisher authorization parity: reuse the existing Ed25519 digest attestation and pinned trust policy while staging and loading through the retained archive verifier. Release-channel rollback/freshness, threshold policy, and transparency should remain later layers until this publisher-authenticated retained path is executable and fail-closed.
