@@ -492,6 +492,58 @@ def _pullback_linearization_modules(
     return primal_module, pullback_module, len(tape_values)
 
 
+def _shared_linearization_modules(
+    module: Module,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+) -> tuple[Module, Module, Module, int]:
+    """Build one shared primal/tape layout with reusable pushforward and pullback programs."""
+    if not isinstance(module, Module):
+        raise TypeError("reusable shared linearization requires a Module")
+    verify(module)
+
+    return_op = _terminal_return(module)
+    selected_output = _select_output(
+        return_op,
+        output_index,
+        require_scalar=False,
+    )
+    input_ops = _input_ops_by_index(module)
+    requested = _normalize_wrt(wrt, input_ops)
+    ancestors = _collect_ancestors(selected_output)
+    _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
+    _validate_reusable_linearization_slice(
+        ancestors,
+        selected_output.type.dtype,
+        context="shared",
+    )
+
+    primal_module, pushforward_module, tape_value_count = (
+        _pushforward_linearization_modules(
+            module,
+            output_index=output_index,
+            wrt=wrt,
+        )
+    )
+    pullback_primal, pullback_module, pullback_tape_count = (
+        _pullback_linearization_modules(
+            module,
+            output_index=output_index,
+            wrt=wrt,
+        )
+    )
+    if tape_value_count != pullback_tape_count:
+        raise RuntimeError(
+            "internal autodiff error: pushforward/pullback tape layouts disagree"
+        )
+    if primal_module.dump() != pullback_primal.dump():
+        raise RuntimeError(
+            "internal autodiff error: pushforward/pullback primal tape modules disagree"
+        )
+    return primal_module, pushforward_module, pullback_module, tape_value_count
+
+
 def _propagate_reusable_pullback_adjoint(
     function: Function,
     op: Operation,
