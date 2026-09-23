@@ -19,6 +19,8 @@ from .compiler import (
     DynamicHVPExecutable,
     DynamicJVPExecutable,
     DynamicVJPExecutable,
+    PullbackLinearizationExecutable,
+    PullbackLinearizationState,
     PushforwardLinearizationExecutable,
     PushforwardLinearizationState,
     compile_adaptive_dynamic_gradient_module,
@@ -31,6 +33,7 @@ from .compiler import (
     compile_dynamic_module,
     compile_dynamic_vjp_module,
     compile_module,
+    compile_pullback_linearization,
     compile_pushforward_linearization,
 )
 from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
@@ -270,6 +273,8 @@ __all__ = [
     "NativeCompilationTimeout",
     "NativeExecutable",
     "PublisherTrustPolicy",
+    "PullbackLinearizationExecutable",
+    "PullbackLinearizationState",
     "PushforwardLinearizationExecutable",
     "PushforwardLinearizationState",
     "ReleaseChannelRegistryExecutable",
@@ -316,6 +321,7 @@ __all__ = [
     "compile_dynamic_vjp_module",
     "compile_module",
     "compile_native",
+    "compile_pullback_linearization",
     "compile_pushforward_linearization",
     "compile_resource_managed_module",
     "constant_fold",
