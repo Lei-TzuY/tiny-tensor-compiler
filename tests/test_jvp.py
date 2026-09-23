@@ -101,22 +101,10 @@ def test_jvp_returns_exact_zero_when_requested_input_does_not_reach_output():
         np.testing.assert_array_equal(actual, np.zeros_like(x_value))
 
 
-@pytest.mark.parametrize(
-    "build",
-    [
-        lambda x: x.relu(),
-        lambda x: x + 0.0,
-    ],
-)
-def test_jvp_rejects_unsupported_ops_and_write_effects_fail_closed(build):
+def test_jvp_rejects_unsupported_pure_op_fail_closed():
     builder = GraphBuilder("jvp-unsupported")
     x = builder.input((4,), DType.FLOAT64)
-    value = build(x)
-    if value.value.producer is not None and value.value.producer.opcode == "add":
-        target = value.slice(axis=0, start=0, stop=2, step=1)
-        patch = builder.input((2,), DType.FLOAT64)
-        value = value.copy_into(target, patch)
-    module = builder.finish(value)
+    module = builder.finish(x.relu())
 
     with pytest.raises(AutodiffError, match="unsupported.*forward-mode"):
         jacobian_vector_product_module(module, wrt=(0,))
@@ -138,3 +126,59 @@ def test_jvp_rejects_symbolic_and_mixed_precision_contracts():
     module = builder.finish(x * y)
     with pytest.raises(AutodiffError, match="mixed-precision"):
         jacobian_vector_product_module(module, wrt=(0,))
+
+
+
+def test_jvp_differentiates_direct_slice_copy_into_across_backends():
+    builder = GraphBuilder("jvp-copy-into")
+    base = builder.input((6,), DType.FLOAT64)
+    patch = builder.input((3,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    module = builder.finish(root.copy_into(target, patch))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    patch_value = np.array([7.0, 8.0, 9.0], dtype=np.float64)
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0, 2.5, -3.0], dtype=np.float64)
+    patch_tangent = np.array([4.0, -5.0, 6.0], dtype=np.float64)
+    expected = np.array(base_tangent, copy=True)
+    expected[1:6:2] = patch_tangent
+
+    for actual in _execute_all_backends(
+        jvp,
+        (base_value, patch_value, base_tangent, patch_tangent),
+    ):
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_jvp_preserves_prewrite_source_tangent_through_copy_into():
+    builder = GraphBuilder("jvp-copy-prewrite-source")
+    base = builder.input((6,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    source = target * builder.tensor(2.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.copy_into(target, source))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0,))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    tangent = np.array([0.5, -1.0, 1.5, -2.0, 2.5, -3.0], dtype=np.float64)
+    expected = np.array(tangent, copy=True)
+    expected[1:6:2] *= 2.0
+
+    for actual in _execute_all_backends(jvp, (base_value, tangent)):
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_jvp_rejects_non_direct_copy_target():
+    builder = GraphBuilder("jvp-nondirect-copy")
+    base = builder.input((4,), DType.FLOAT64)
+    patch = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.copy_into(root.reverse(0), patch))
+
+    with pytest.raises(
+        AutodiffError,
+        match="copy_into forward-mode JVP currently requires a direct slice target",
+    ):
+        jacobian_vector_product_module(module, wrt=(0, 1))
