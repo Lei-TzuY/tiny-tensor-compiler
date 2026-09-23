@@ -55,6 +55,12 @@ A backend/budget decision is made once per cached binding. Repeated use of the s
 
 `tiny_tensor_compiler.compiler.compile_adaptive_dynamic_gradient_module(module, budget=...)` composes the same policy with reverse-mode autodiff. Runtime symbolic bindings are solved first, the forward module is specialized and reverified, and `differentiate_module()` produces a concrete gradient module. Only that concrete gradient module is analyzed against structural budget limits and passed to `compile_adaptive_module()`. This matters because gradient materialization, accumulation, and alias-scatter effects can change storage and kernel structure relative to the forward program. Each admitted complete binding caches one adaptive gradient backend decision, and `cached_binding_backends` reports native versus Loop using canonical multi-symbol binding order. Dynamic-specialization cardinality is still checked before concrete specialization, while verifier/autodiff/native compiler failures are not swallowed as budget fallback.
 
+### Adaptive retained-state bundles
+
+`compile_adaptive_dynamic_linearization(module, budget=...)` applies dynamic specialization and structural admission to one concrete retained-state bundle per complete primal-input binding. Symbolic bindings are solved only from the original primal inputs. After specialization, the shared linearization contract constructs three concrete modules: the primal/tape producer, reusable pushforward, and reusable pullback. Each component is checked against the same structural `CompileBudget`, but the selected backend is bundle-wide rather than component-local.
+
+If all three components are admitted, the specialization owns three native executables. If any component exceeds the structural budget, the entire bundle uses the verified Loop path so one `LinearizationState` never mixes native and Loop derivative components. The executable records the first over-budget component as `budget_exceeded_component`, preserves the original `CompileBudgetExceeded` evidence, and caches that coherent backend decision per complete symbolic binding. Repeated tangent/cotangent queries reuse the retained state and do not participate in shape solving or consume another dynamic specialization slot.
+
 ## Resource-managed specialization retention
 
 Admission and retention are separate policies. The ordinary `max_dynamic_specializations` cap remains fail-closed and does not imply reclamation. Callers that require bounded retained specialization state can instead opt into:
