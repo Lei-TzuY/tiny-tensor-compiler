@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
-
 from tiny_tensor_compiler import (
     GraphBuilder,
     compile_linearization,
