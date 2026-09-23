@@ -11,6 +11,7 @@ from .c_abi_codegen import generate_c
 from .compiler import (
     AdaptiveDynamicGradientExecutable,
     AdaptiveDynamicHVPExecutable,
+    AdaptiveDynamicJVPExecutable,
     AdaptiveDynamicVJPExecutable,
     DynamicExecutable,
     DynamicGradientExecutable,
@@ -19,6 +20,7 @@ from .compiler import (
     DynamicVJPExecutable,
     compile_adaptive_dynamic_gradient_module,
     compile_adaptive_dynamic_hvp_module,
+    compile_adaptive_dynamic_jvp_module,
     compile_adaptive_dynamic_vjp_module,
     compile_dynamic_gradient_module,
     compile_dynamic_hvp_module,
@@ -195,6 +197,7 @@ from .verifier import VerificationError, verify
 __all__ = [
     "AdaptiveDynamicGradientExecutable",
     "AdaptiveDynamicHVPExecutable",
+    "AdaptiveDynamicJVPExecutable",
     "AdaptiveDynamicVJPExecutable",
     "AffineDim",
     "AttestedNativeBundleRegistryExecutable",
@@ -288,6 +291,7 @@ __all__ = [
     "common_subexpression_eliminate",
     "compile_adaptive_dynamic_gradient_module",
     "compile_adaptive_dynamic_hvp_module",
+    "compile_adaptive_dynamic_jvp_module",
     "compile_adaptive_dynamic_vjp_module",
     "compile_dynamic_gradient_module",
     "compile_dynamic_hvp_module",
