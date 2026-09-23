@@ -452,6 +452,8 @@ def _validate_relative_name(name: str) -> None:
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise NativeBundleArchiveError("native bundle archive entry escapes its payload root")
+    if path.as_posix() != name:
+        raise NativeBundleArchiveError("native bundle archive entry name is not canonical")
 
 
 def _archive_manifest_bytes(payload_kind: str) -> bytes:
