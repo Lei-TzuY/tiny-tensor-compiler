@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+
 from tiny_tensor_compiler import (
     GraphBuilder,
     compile_pushforward_linearization,
