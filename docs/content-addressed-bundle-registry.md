@@ -8,7 +8,7 @@ Its identity is the exact archive bytes:
 sha256:<64 lowercase hex digits>
 ```
 
-The caller pins that digest before a remote object is trusted. The downloaded bytes must match the pin and must independently pass the existing archive, bundle-set, child library, target, and ABI verification before execution.
+The caller pins that digest before a remote object is trusted. The downloaded bytes must match the pin and must independently pass the selected archive payload verifier: ordinary bundle-set/child/target/ABI verification for `dynamic-bundle-set`, or coordinated primal/tape + pushforward + pullback retained-state ABI verification for `retained-linearization-bundle-set`.
 
 ## API
 
@@ -47,6 +47,43 @@ finally:
     executable.close()
 ```
 
+Retained-linearization archives use the same immutable object namespace and transport controls, but select the retained payload verifier:
+
+```python
+from tiny_tensor_compiler import (
+    digest_dynamic_linearization_bundle_set_archive,
+    fetch_dynamic_linearization_bundle_set_archive,
+    load_dynamic_linearization_bundle_set_registry,
+    publish_dynamic_linearization_bundle_set_archive,
+)
+
+expected = digest_dynamic_linearization_bundle_set_archive("linearizations.ttcla")
+publish_dynamic_linearization_bundle_set_archive(
+    "linearizations.ttcla",
+    "https://registry.example",
+    token="registry-token",
+)
+
+fetch_dynamic_linearization_bundle_set_archive(
+    "https://registry.example",
+    expected,
+    "downloaded-linearizations.ttcla",
+    token="registry-token",
+)
+
+linearizations = load_dynamic_linearization_bundle_set_registry(
+    "https://registry.example",
+    expected,
+    token="registry-token",
+)
+try:
+    state = linearizations.linearize([runtime_input])
+    tangent_result = state.pushforward([runtime_tangent])
+    cotangent_result = state.pullback(runtime_cotangent)
+finally:
+    linearizations.close()
+```
+
 The canonical object URL is:
 
 ```text
@@ -55,7 +92,7 @@ The canonical object URL is:
 
 ## Publication contract
 
-`publish_dynamic_bundle_set_archive()` validates the local archive with the existing archive loader before uploading it. The upload is addressed by the local SHA-256 digest and uses `If-None-Match: *` so the protocol is naturally immutable rather than a mutable tag endpoint.
+`publish_dynamic_bundle_set_archive()` and `publish_dynamic_linearization_bundle_set_archive()` first validate the local archive with their payload-specific archive loader. Both then use the same immutable upload path, address the exact bytes by local SHA-256, and send `If-None-Match: *`; the retained payload does not introduce a second registry protocol.
 
 A successful HTTP response is not accepted as proof of publication. After PUT, the client GETs the content-addressed object back, verifies the exact SHA-256 bytes, and runs the existing full archive verification over those remote bytes. An HTTP 409/412 is accepted only as a possible idempotent pre-existing object and receives the same read-back verification.
 
@@ -63,7 +100,7 @@ Therefore a registry that acknowledges an upload but stores different bytes does
 
 ## Fetch contract
 
-`fetch_dynamic_bundle_set_archive()` requires an expected canonical digest from the caller. It:
+`fetch_dynamic_bundle_set_archive()` and `fetch_dynamic_linearization_bundle_set_archive()` require an expected canonical digest from the caller. Their shared transport path:
 
 1. streams the object into a private sibling temporary file;
 2. enforces a configurable maximum byte count while reading;
@@ -74,7 +111,7 @@ Therefore a registry that acknowledges an upload but stores different bytes does
 
 A failed transfer or verification removes the temporary artifact and never replaces an existing destination.
 
-`load_dynamic_bundle_set_registry()` applies the same download and verification boundary, then owns the private downloaded archive and extracted archive payload for the lifetime of the returned executable. `close()` closes the underlying archive/bundle executables before removing the private download tree.
+`load_dynamic_bundle_set_registry()` and `load_dynamic_linearization_bundle_set_registry()` apply the same download/digest boundary, then dispatch through the matching archive loader. Each registry wrapper owns the private downloaded archive plus extracted payload for its lifetime. Closing an ordinary registry executable closes loaded child bundles; closing a retained registry executable closes loaded primal/pushforward/pullback components before removing the private download tree.
 
 ## Redirect and credential boundary
 
@@ -102,7 +139,8 @@ The client rejects or fails publication/fetch on:
 - truncated transport responses;
 - any downloaded byte sequence whose SHA-256 differs from the caller pin;
 - a remotely substituted object after a nominally successful PUT;
-- any archive, child bundle, native library, target, or ABI inconsistency detected by the existing archive verifier;
+- any archive, child bundle, native library, target, ABI, retained-component role/hash, or cross-component retained-state inconsistency detected by the selected archive verifier;
+- a payload-kind mismatch, including attempting to load an ordinary bundle archive through the retained-linearization registry API;
 - an existing local fetch destination.
 
 The registry transport does not weaken the archive loader's path, ZIP-entry, child-library, manifest, target, or ABI checks.
@@ -113,7 +151,7 @@ Content addressing answers one narrow question: *did the client receive the exac
 
 The unsigned registry APIs still do **not** answer who created or approved those bytes. A malicious party that can convince the caller to trust a different SHA-256 digest can direct the unsigned loader to another internally coherent archive.
 
-An optional, separate Ed25519 publisher-authorization layer is now available through `publish_attested_dynamic_bundle_set_archive()`, `fetch_attested_dynamic_bundle_set_archive()`, and `load_attested_dynamic_bundle_set_registry()`. It requires a caller-pinned `PublisherTrustPolicy` and verifies a detached signature over the exact archive digest before publishing or loading the fetched artifact. See `bundle-publisher-attestations.md` for the key, revocation, signature, fail-closed staging, and threat boundaries.
+An optional, separate Ed25519 publisher-authorization layer is available for ordinary dynamic bundle archives through `publish_attested_dynamic_bundle_set_archive()`, `fetch_attested_dynamic_bundle_set_archive()`, and `load_attested_dynamic_bundle_set_registry()`. It requires a caller-pinned `PublisherTrustPolicy` and verifies a detached signature over the exact archive digest before publishing or loading the fetched artifact. The unsigned retained-linearization registry now has byte-integrity parity, but publisher-attested retained-linearization APIs are the next trust-layer promotion rather than an implied capability of this slice. See `bundle-publisher-attestations.md` for the key, revocation, signature, fail-closed staging, and threat boundaries.
 
 That optional layer does not retroactively turn SHA-256 into an authenticity primitive. Callers choosing the historical unsigned APIs receive the same integrity-only contract as before.
 
@@ -121,7 +159,7 @@ Neither layer by itself provides trusted release names/tags, freshness or rollba
 
 ## Evidence scope
 
-Regression coverage uses a real loopback `ThreadingHTTPServer`, not mocked `urlopen()` calls. It exercises PUT/GET, Bearer credentials, immutable 412 publication, post-upload read-back, digest substitution, transfer limits, redirect refusal without credential forwarding, 401/404 errors, truncated responses, compiler-free remote load, finite symbolic dispatch, and preallocated multi-output native execution.
+Regression coverage uses a real loopback `ThreadingHTTPServer`, not mocked `urlopen()` calls. It exercises PUT/GET, Bearer credentials, immutable 412 publication, post-upload read-back, digest substitution, transfer limits, redirect refusal without credential forwarding, 401/404 errors, truncated responses, compiler-free ordinary remote load, finite symbolic dispatch, preallocated multi-output native execution, compiler-free retained primal/pushforward/pullback execution, and wrong-payload-kind rejection.
 
 The same suite runs on Ubuntu and Windows so the remotely loaded archive still reaches the existing GCC-style/MSVC child native execution paths.
 
@@ -129,6 +167,6 @@ No network throughput, registry scalability, CDN behavior, TLS hardening, or run
 
 ## Next promotion
 
-The content-addressed transport remains the completed byte-integrity layer; publisher authorization is a separate optional layer documented in `bundle-publisher-attestations.md`. Adding more HTTP verbs, mutable tags, alternate checksum spellings, or pretending that signatures provide freshness would be protocol farming.
+The content-addressed transport now provides one completed byte-integrity layer for both ordinary finite bundle sets and retained-linearization bundle sets, with payload-specific verification behind one digest-pinned HTTP/staging implementation. Adding more HTTP verbs, mutable tags, alternate checksum spellings, or payload-specific transport forks would be protocol farming.
 
-Further deployment-security work should add a separately verifiable trust property such as standardized freshness/rollback metadata or transparency evidence. Otherwise the project should promote on another independent compiler/runtime frontier.
+The next retained-linearization deployment step is publisher-attestation parity: compose the existing Ed25519 digest authorization and pinned trust policy with the retained archive fetch/load path. Release-channel freshness/rollback, threshold policy, and transparency remain later, separately verifiable properties.
