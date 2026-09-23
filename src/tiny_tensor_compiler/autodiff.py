@@ -51,6 +51,7 @@ _SUPPORTED_FORWARD_OPS = frozenset(
         "slice",
         "reverse",
         "transpose",
+        "copy_into",
     }
 )
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
@@ -185,6 +186,8 @@ def _validate_forward_slice(
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on forward-mode JVP slice"
             )
+        if op.opcode == "copy_into":
+            _direct_slice_write_attrs(op, context="forward-mode JVP")
         if len(op.results) != 1:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} multi-result operation on forward-mode JVP slice"
@@ -236,6 +239,15 @@ def _forward_tangent(
             operands=(tangent,),
             result_types=(cloned_op.results[0].type,),
             attrs=dict(original_op.attrs),
+        )
+        return tangent_op.results[0]
+
+    if original_op.opcode == "copy_into":
+        root, target, source = original_op.operands
+        tangent_op = function.add_op(
+            "copy_into",
+            operands=(tangents[root], tangents[target], tangents[source]),
+            result_types=(cloned_op.results[0].type,),
         )
         return tangent_op.results[0]
 
@@ -674,7 +686,11 @@ def _aliases_exact_root(value: Value, root: Value) -> bool:
         current = producer.operands[0]
 
 
-def _direct_slice_write_attrs(op: Operation) -> dict[str, Any]:
+def _direct_slice_write_attrs(
+    op: Operation,
+    *,
+    context: str = "backward",
+) -> dict[str, Any]:
     if op.opcode not in {"copy_into", "binary_into"}:
         raise RuntimeError("internal autodiff error: expected partial write operation")
     root, target, _source = op.operands
@@ -686,7 +702,7 @@ def _direct_slice_write_attrs(op: Operation) -> dict[str, Any]:
         or producer.operands[0] is not root
     ):
         raise AutodiffError(
-            f"{op.opcode} backward currently requires a direct slice target"
+            f"{op.opcode} {context} currently requires a direct slice target"
         )
     return dict(producer.attrs)
 
