@@ -52,6 +52,7 @@ _SUPPORTED_FORWARD_OPS = frozenset(
         "reverse",
         "transpose",
         "copy_into",
+        "binary_into",
     }
 )
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
@@ -129,6 +130,7 @@ def jacobian_vector_product_module(
     function = Function(f"{module.function.name}_jvp")
     value_map: dict[Value, Value] = {}
     tangents: dict[Value, Value] = {}
+    forward_primal_tape: dict[Value, Value] = {}
 
     for op in module.function.ops:
         if op.opcode != "input":
@@ -154,6 +156,13 @@ def jacobian_vector_product_module(
             continue
         if not any(result in ancestors for result in op.results):
             continue
+        if op.opcode == "binary_into" and op.attrs["operator"] == "mul":
+            _capture_forward_prewrite_target(
+                function,
+                op,
+                value_map,
+                forward_primal_tape,
+            )
         cloned = _clone_op(function, op, value_map)
         original_result = op.results[0]
         tangents[original_result] = _forward_tangent(
@@ -162,6 +171,7 @@ def jacobian_vector_product_module(
             cloned,
             value_map,
             tangents,
+            forward_primal_tape,
         )
 
     tangent_output = tangents.get(selected_output)
@@ -176,6 +186,30 @@ def jacobian_vector_product_module(
     return transformed
 
 
+def _capture_forward_prewrite_target(
+    function: Function,
+    op: Operation,
+    value_map: dict[Value, Value],
+    forward_primal_tape: dict[Value, Value],
+) -> None:
+    if op.opcode != "binary_into" or op.attrs.get("operator") != "mul":
+        raise RuntimeError(
+            "internal autodiff error: expected binary_into mul for forward primal tape"
+        )
+    _root, target, _source = op.operands
+    try:
+        cloned_target = value_map[target]
+    except KeyError as exc:
+        raise RuntimeError(
+            "internal autodiff error: binary_into target primal was not cloned"
+        ) from exc
+    forward_primal_tape[target] = _multiply(
+        function,
+        cloned_target,
+        _ones(function, cloned_target.type),
+    )
+
+
 def _validate_forward_slice(
     ancestors: frozenset[Value],
     output_dtype: DType,
@@ -186,7 +220,7 @@ def _validate_forward_slice(
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on forward-mode JVP slice"
             )
-        if op.opcode == "copy_into":
+        if op.opcode in {"copy_into", "binary_into"}:
             _direct_slice_write_attrs(op, context="forward-mode JVP")
         if len(op.results) != 1:
             raise AutodiffError(
@@ -208,6 +242,7 @@ def _forward_tangent(
     cloned_op: Operation,
     value_map: dict[Value, Value],
     tangents: dict[Value, Value],
+    forward_primal_tape: dict[Value, Value],
 ) -> Value:
     if original_op.opcode == "const":
         return _zeros(function, original_op.results[0].type)
@@ -247,6 +282,34 @@ def _forward_tangent(
         tangent_op = function.add_op(
             "copy_into",
             operands=(tangents[root], tangents[target], tangents[source]),
+            result_types=(cloned_op.results[0].type,),
+        )
+        return tangent_op.results[0]
+
+    if original_op.opcode == "binary_into":
+        root, target, source = original_op.operands
+        if original_op.attrs["operator"] == "add":
+            tangent_op = function.add_op(
+                "binary_into",
+                operands=(tangents[root], tangents[target], tangents[source]),
+                result_types=(cloned_op.results[0].type,),
+                attrs={"operator": "add"},
+            )
+            return tangent_op.results[0]
+
+        target_primal = forward_primal_tape.get(target)
+        if target_primal is None:
+            raise RuntimeError(
+                "internal autodiff error: binary_into mul requires taped target primal"
+            )
+        replacement = _add(
+            function,
+            _multiply(function, tangents[target], value_map[source]),
+            _multiply(function, target_primal, tangents[source]),
+        )
+        tangent_op = function.add_op(
+            "copy_into",
+            operands=(tangents[root], tangents[target], replacement),
             result_types=(cloned_op.results[0].type,),
         )
         return tangent_op.results[0]
