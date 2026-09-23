@@ -107,8 +107,11 @@ from .native_api import (
 from .native_bundle_archive import (
     NativeBundleArchiveError,
     NativeBundleSetArchiveExecutable,
+    NativeLinearizationBundleSetArchiveExecutable,
     load_dynamic_bundle_set_archive,
+    load_dynamic_linearization_bundle_set_archive,
     pack_dynamic_bundle_set_archive,
+    pack_dynamic_linearization_bundle_set_archive,
 )
 from .native_bundle_attestation import (
     NativeBundleTrustError,
@@ -279,6 +282,7 @@ __all__ = [
     "NativeBundleReleaseError",
     "NativeBundleRollbackError",
     "NativeBundleSetArchiveExecutable",
+    "NativeLinearizationBundleSetArchiveExecutable",
     "NativeBundleThresholdError",
     "NativeBundleThresholdRollbackError",
     "NativeBundleTransparencyError",
@@ -378,6 +382,7 @@ __all__ = [
     "jacobian_vector_product_module",
     "load_attested_dynamic_bundle_set_registry",
     "load_dynamic_bundle_set_archive",
+    "load_dynamic_linearization_bundle_set_archive",
     "load_dynamic_bundle_set_registry",
     "load_dynamic_linearization_bundle_set",
     "load_release_channel_registry",
@@ -387,6 +392,7 @@ __all__ = [
     "lower_to_loops",
     "manage_native_executable",
     "pack_dynamic_bundle_set_archive",
+    "pack_dynamic_linearization_bundle_set_archive",
     "plan_memory",
     "publish_attested_dynamic_bundle_set_archive",
     "publish_dynamic_bundle_set_archive",
