@@ -138,6 +138,227 @@ def value_and_jacobian_vector_product_module(
     )
 
 
+def _pushforward_linearization_modules(
+    module: Module,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+) -> tuple[Module, Module, int]:
+    """Split one static pure JVP into a one-shot primal tape and reusable pushforward."""
+    if not isinstance(module, Module):
+        raise TypeError("reusable pushforward linearization requires a Module")
+    verify(module)
+
+    return_op = _terminal_return(module)
+    selected_output = _select_output(
+        return_op,
+        output_index,
+        require_scalar=False,
+    )
+    input_ops = _input_ops_by_index(module)
+    requested = _normalize_wrt(wrt, input_ops)
+    ancestors = _collect_ancestors(selected_output)
+
+    _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
+    _validate_reusable_pushforward_slice(ancestors, selected_output.type.dtype)
+
+    tape_values = _collect_reusable_pushforward_tape_values(module, ancestors)
+
+    primal_function = Function(f"{module.function.name}_linearize_primal")
+    primal_map: dict[Value, Value] = {}
+    for op in module.function.ops:
+        if op.opcode == "return":
+            continue
+        include = op.opcode == "input" or any(
+            result in ancestors for result in op.results
+        )
+        if include:
+            _clone_op(primal_function, op, primal_map)
+
+    primal_output = primal_map.get(selected_output)
+    if primal_output is None:
+        raise RuntimeError(
+            "internal autodiff error: reusable linearization output was not cloned"
+        )
+    primal_tape_outputs = [primal_output]
+    for value in tape_values:
+        try:
+            primal_tape_outputs.append(primal_map[value])
+        except KeyError as exc:
+            raise RuntimeError(
+                "internal autodiff error: reusable linearization tape value was not cloned"
+            ) from exc
+    primal_function.add_op("return", operands=primal_tape_outputs)
+    primal_module = Module(primal_function)
+    verify(primal_module)
+
+    push_function = Function(f"{module.function.name}_pushforward")
+    primal_values: dict[Value, Value] = {}
+    tangents: dict[Value, Value] = {}
+
+    ordered_inputs = tuple(input_ops[index] for index in sorted(input_ops))
+    for op in ordered_inputs:
+        original = op.results[0]
+        index = op.attrs["index"]
+        primal_values[original] = push_function.add_op(
+            "input",
+            result_types=(original.type,),
+            attrs={"index": index},
+        ).results[0]
+
+    next_input_index = len(ordered_inputs)
+    for offset, value in enumerate(tape_values):
+        primal_values[value] = push_function.add_op(
+            "input",
+            result_types=(value.type,),
+            attrs={"index": next_input_index + offset},
+        ).results[0]
+
+    tangent_input_index = next_input_index + len(tape_values)
+    for offset, input_index in enumerate(requested):
+        original_input = input_ops[input_index].results[0]
+        tangents[original_input] = push_function.add_op(
+            "input",
+            result_types=(original_input.type,),
+            attrs={"index": tangent_input_index + offset},
+        ).results[0]
+
+    for op in ordered_inputs:
+        original_input = op.results[0]
+        if original_input not in tangents:
+            tangents[original_input] = _zeros(push_function, original_input.type)
+
+    for op in module.function.ops:
+        if op.opcode in {"input", "return"}:
+            continue
+        if not any(result in ancestors for result in op.results):
+            continue
+        result = op.results[0]
+        if op.opcode == "const":
+            _clone_op(push_function, op, primal_values)
+            tangents[result] = _zeros(push_function, result.type)
+            continue
+
+        if op.opcode == "add":
+            lhs, rhs = op.operands
+            tangents[result] = _add(
+                push_function,
+                tangents[lhs],
+                tangents[rhs],
+            )
+            continue
+
+        if op.opcode == "mul":
+            lhs, rhs = op.operands
+            try:
+                lhs_primal = primal_values[lhs]
+                rhs_primal = primal_values[rhs]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal autodiff error: reusable pushforward is missing a primal tape value"
+                ) from exc
+            tangents[result] = _add(
+                push_function,
+                _multiply(push_function, tangents[lhs], rhs_primal),
+                _multiply(push_function, lhs_primal, tangents[rhs]),
+            )
+            continue
+
+        if op.opcode in {
+            "sum",
+            "reshape",
+            "view",
+            "slice",
+            "reverse",
+            "transpose",
+        }:
+            (operand,) = op.operands
+            tangents[result] = push_function.add_op(
+                op.opcode,
+                operands=(tangents[operand],),
+                result_types=(result.type,),
+                attrs=dict(op.attrs),
+            ).results[0]
+            continue
+
+        raise RuntimeError(
+            f"internal autodiff error: unsupported reusable pushforward opcode {op.opcode!r}"
+        )
+
+    tangent_output = tangents.get(selected_output)
+    if tangent_output is None:
+        raise RuntimeError(
+            "internal autodiff error: reusable pushforward output has no tangent"
+        )
+    push_function.add_op("return", operands=(tangent_output,))
+    pushforward_module = Module(push_function)
+    verify(pushforward_module)
+    return primal_module, pushforward_module, len(tape_values)
+
+
+def _validate_reusable_pushforward_slice(
+    ancestors: frozenset[Value],
+    output_dtype: DType,
+) -> None:
+    producers = {value.producer for value in ancestors if value.producer is not None}
+    for op in producers:
+        if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
+            raise AutodiffError(
+                "reusable pushforward linearization does not yet support write effects"
+            )
+        if op.opcode not in {
+            "input",
+            "const",
+            "add",
+            "mul",
+            "sum",
+            "reshape",
+            "view",
+            "slice",
+            "reverse",
+            "transpose",
+        }:
+            raise AutodiffError(
+                f"unsupported {op.opcode!r} operation on reusable pushforward slice"
+            )
+        if len(op.results) != 1:
+            raise AutodiffError(
+                f"unsupported {op.opcode!r} multi-result operation on reusable pushforward slice"
+            )
+        result_dtype = op.results[0].type.dtype
+        if result_dtype not in _FLOAT_DTYPES:
+            raise AutodiffError(
+                "reusable pushforward linearization must use floating tensor values"
+            )
+        if result_dtype != output_dtype:
+            raise AutodiffError(
+                "mixed-precision reusable pushforward linearization is not supported"
+            )
+
+
+def _collect_reusable_pushforward_tape_values(
+    module: Module,
+    ancestors: frozenset[Value],
+) -> tuple[Value, ...]:
+    needed: set[Value] = set()
+    producers = {value.producer for value in ancestors if value.producer is not None}
+    for op in module.function.ops:
+        if op not in producers or op.opcode != "mul":
+            continue
+        for operand in op.operands:
+            producer = operand.producer
+            if producer is None or producer.opcode in {"input", "const"}:
+                continue
+            needed.add(operand)
+
+    ordered: list[Value] = []
+    for op in module.function.ops:
+        for result in op.results:
+            if result in needed:
+                ordered.append(result)
+    return tuple(ordered)
+
+
 def _forward_mode_module(
     module: Module,
     *,
