@@ -254,3 +254,38 @@ def test_dynamic_bundle_archive_destination_must_not_exist(tmp_path: Path) -> No
     archive.write_bytes(b"existing")
     with pytest.raises(FileExistsError):
         pack_dynamic_bundle_set_archive(bundle, archive)
+
+
+
+@pytest.mark.parametrize(
+    "entry_name",
+    (
+        "bundle/./manifest.json",
+        "bundle//manifest.json",
+    ),
+)
+def test_dynamic_bundle_archive_rejects_noncanonical_equivalent_entry_names(
+    tmp_path: Path,
+    entry_name: str,
+) -> None:
+    from tiny_tensor_compiler.native_bundle_archive import (
+        NativeBundleArchiveError,
+        load_dynamic_bundle_set_archive,
+    )
+
+    archive = tmp_path / "noncanonical.ttca"
+    descriptor = json.dumps(
+        {
+            "kind": "dynamic-bundle-set",
+            "root": "bundle",
+            "schema": "native-bundle-archive-v1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as packed:
+        packed.writestr("archive.json", descriptor)
+        packed.writestr(entry_name, b"{}")
+
+    with pytest.raises(NativeBundleArchiveError, match="not canonical"):
+        load_dynamic_bundle_set_archive(archive)
