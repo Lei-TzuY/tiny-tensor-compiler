@@ -19,6 +19,8 @@ from .compiler import (
     DynamicHVPExecutable,
     DynamicJVPExecutable,
     DynamicVJPExecutable,
+    PushforwardLinearizationExecutable,
+    PushforwardLinearizationState,
     compile_adaptive_dynamic_gradient_module,
     compile_adaptive_dynamic_hvp_module,
     compile_adaptive_dynamic_jvp_module,
@@ -29,6 +31,7 @@ from .compiler import (
     compile_dynamic_module,
     compile_dynamic_vjp_module,
     compile_module,
+    compile_pushforward_linearization,
 )
 from .compiler_trace import CompilerTrace, CompilerTracePhase, trace_module
 from .frontend import GraphBuilder, Tensor
@@ -231,6 +234,8 @@ __all__ = [
     "DynamicHVPExecutable",
     "DynamicJVPExecutable",
     "DynamicVJPExecutable",
+    "PushforwardLinearizationExecutable",
+    "PushforwardLinearizationState",
     "GradientConsistencyCampaignResult",
     "GradientConsistencyFailure",
     "GraphBuilder",
@@ -310,6 +315,7 @@ __all__ = [
     "compile_dynamic_module",
     "compile_dynamic_vjp_module",
     "compile_module",
+    "compile_pushforward_linearization",
     "compile_native",
     "compile_resource_managed_module",
     "constant_fold",
