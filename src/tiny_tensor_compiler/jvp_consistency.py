@@ -10,9 +10,9 @@ from .autodiff import jacobian_vector_product_module, vector_jacobian_product_mo
 from .differential import _CANDIDATE_FAILURE_EXCEPTIONS, _require_seed, _SplitMix64
 from .gradient_consistency import (
     _FLOAT_VALUES,
-    _GradientCaseSpec,
     _freeze_array,
     _generate_spec,
+    _GradientCaseSpec,
     _materialize_tensor,
     _require_non_negative_real,
     _require_positive_real,
