@@ -135,6 +135,6 @@ def test_linearization_bundle_set_rejects_component_role_substitution(
 
     with pytest.raises(
         NativeLinearizationBundleSetError,
-        match="component ABI contract",
+        match="component path is not canonical",
     ):
         load_dynamic_linearization_bundle_set(bundle)
