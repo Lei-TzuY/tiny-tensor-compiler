@@ -624,6 +624,85 @@ class DynamicExecutable:
         return self.execute(inputs=inputs, out=out)
 
 
+class DynamicLinearizationExecutable(DynamicExecutable):
+    """Cache concrete shared linearizations by complete primal-input bindings."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+    ) -> None:
+        if isinstance(wrt, (str, bytes)):
+            raise TypeError("wrt must be a sequence of runtime input indices")
+        try:
+            frozen_wrt = tuple(wrt)
+        except TypeError as exc:
+            raise TypeError("wrt must be a sequence of runtime input indices") from exc
+
+        self._output_index = output_index
+        self._wrt = frozen_wrt
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            borrow_inputs=False,
+            parallel=parallel,
+            budget=budget,
+        )
+        self._specializations: dict[
+            tuple[int, ...], LinearizationExecutable
+        ] = {}
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> LinearizationExecutable:
+        normalized, key = _normalize_specialization_bindings(
+            self._module,
+            self._symbols,
+            bindings,
+        )
+        with self._lock:
+            executable = self._specializations.get(key)
+            if executable is not None:
+                return executable
+            _enforce_dynamic_specialization_budget(
+                self._symbols,
+                self._specializations,
+                key,
+                self._budget,
+            )
+            concrete = specialize_module(self._module, normalized)
+            executable = compile_linearization(
+                concrete,
+                compiler=self._compiler,
+                cache_dir=self._cache_dir,
+                output_index=self._output_index,
+                wrt=self._wrt,
+                parallel=self._parallel,
+                budget=self._budget,
+            )
+            self._specializations[key] = executable
+            return executable
+
+    def linearize(self, inputs: Sequence[Any]) -> LinearizationState:
+        provided = tuple(inputs)
+        bindings = bind_dynamic_shapes(self._module, provided)
+        return self.specialize(bindings).linearize(provided)
+
+    def execute(self, inputs: Sequence[Any] = ()) -> LinearizationState:
+        return self.linearize(inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()) -> LinearizationState:
+        return self.linearize(inputs)
+
+
 class DynamicGradientExecutable(DynamicExecutable):
     """Lazy native gradients specialized only after runtime symbolic binding."""
 
@@ -1250,6 +1329,28 @@ def compile_dynamic_module(
         budget=budget,
         compiler_timeout=compiler_timeout,
         compile_deadline=compile_deadline,
+    )
+
+
+def compile_dynamic_linearization(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+) -> DynamicLinearizationExecutable:
+    """Prepare cached concrete shared linearizations after primal shape binding."""
+    return DynamicLinearizationExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        parallel=parallel,
+        budget=budget,
     )
 
 
