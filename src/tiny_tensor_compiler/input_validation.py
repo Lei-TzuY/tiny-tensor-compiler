@@ -59,6 +59,8 @@ def prepare_runtime_inputs(
                 )
             prepared.append(array)
         else:
-            prepared.append(np.ascontiguousarray(array))
+            prepared.append(
+                array if array.flags.c_contiguous else np.ascontiguousarray(array)
+            )
 
     return tuple(prepared)

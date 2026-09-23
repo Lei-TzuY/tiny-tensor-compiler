@@ -217,13 +217,78 @@ def test_shared_linearization_retains_prewrite_copy_primal_generation():
     assert state.pullback_query_count == 2
 
 
-def test_shared_linearization_keeps_arithmetic_writes_fail_closed():
-    builder = GraphBuilder("shared-linearization-binary-write")
+def test_shared_linearization_retains_binary_into_mul_primals():
+    builder = GraphBuilder("shared-linearization-binary-mul")
     base = builder.input((6,), DType.FLOAT64)
-    patch = builder.input((3,), DType.FLOAT64)
+    factor = builder.input((), DType.FLOAT64)
     root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
-    target = root.slice(axis=0, start=1, stop=6, step=2)
-    module = builder.finish(root.binary_into(target, patch, operator="add"))
+    target = root.slice(axis=0, start=0, stop=6, step=2)
+    source = factor * factor
+    module = builder.finish(root.binary_into(target, source, operator="mul"))
+
+    executable = compile_linearization(module, wrt=(0, 1))
+    assert executable.tape_value_count == 2
+
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    factor_value = np.array(-1.5, dtype=np.float64)
+    frozen_base = np.array(base_value, copy=True)
+    frozen_factor = np.array(factor_value, copy=True)
+    frozen_source = frozen_factor * frozen_factor
+    expected_primal = np.array(frozen_base, copy=True)
+    expected_primal[0:6:2] *= frozen_source
+
+    state = executable.linearize((base_value, factor_value))
+    np.testing.assert_allclose(state.primal, expected_primal, rtol=0.0, atol=0.0)
+
+    base_value[...] = 1000.0
+    factor_value[...] = 1000.0
+
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0, 2.5, -3.0], dtype=np.float64)
+    factor_tangent = np.array(0.25, dtype=np.float64)
+    expected_pushforward = np.array(base_tangent, copy=True)
+    expected_pushforward[0:6:2] = (
+        base_tangent[0:6:2] * frozen_source
+        + frozen_base[0:6:2] * (2.0 * frozen_factor * factor_tangent)
+    )
+    np.testing.assert_allclose(
+        state.pushforward((base_tangent, factor_tangent)),
+        expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    cotangent = np.array([0.5, -2.0, 3.0, 4.0, -1.5, 6.0], dtype=np.float64)
+    expected_base = np.array(cotangent, copy=True)
+    expected_base[0:6:2] *= frozen_source
+    expected_factor = np.array(
+        np.sum(cotangent[0:6:2] * frozen_base[0:6:2] * (2.0 * frozen_factor)),
+        dtype=np.float64,
+    )
+    actual_pullback = state.pullback(cotangent)
+    assert isinstance(actual_pullback, tuple)
+    np.testing.assert_allclose(actual_pullback[0], expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(actual_pullback[1], expected_factor, rtol=0.0, atol=0.0)
+
+    np.testing.assert_allclose(
+        state.pushforward((-base_tangent, -factor_tangent)),
+        -expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+    second_pullback = state.pullback(-cotangent)
+    assert isinstance(second_pullback, tuple)
+    np.testing.assert_allclose(second_pullback[0], -expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(second_pullback[1], -expected_factor, rtol=0.0, atol=0.0)
+    assert state.pushforward_query_count == 2
+    assert state.pullback_query_count == 2
+
+
+def test_shared_linearization_keeps_binary_inplace_fail_closed():
+    builder = GraphBuilder("shared-linearization-binary-inplace")
+    base = builder.input((4,), DType.FLOAT64)
+    source = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.binary_inplace(source, operator="add"))
 
     with pytest.raises(
         AutodiffError,
