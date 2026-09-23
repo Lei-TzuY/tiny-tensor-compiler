@@ -10,6 +10,7 @@ from tiny_tensor_compiler import (
     GraphBuilder,
     SymbolicDim,
     differentiate_module,
+    jacobian_vector_product_module,
     specialize_module,
     vector_jacobian_product_module,
 )
@@ -18,10 +19,12 @@ from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.specialization_cache import (
     compile_resource_managed_adaptive_dynamic_gradient_module,
     compile_resource_managed_adaptive_dynamic_hvp_module,
+    compile_resource_managed_adaptive_dynamic_jvp_module,
     compile_resource_managed_adaptive_dynamic_module,
     compile_resource_managed_adaptive_dynamic_vjp_module,
     compile_resource_managed_dynamic_gradient_module,
     compile_resource_managed_dynamic_hvp_module,
+    compile_resource_managed_dynamic_jvp_module,
     compile_resource_managed_dynamic_module,
     compile_resource_managed_dynamic_vjp_module,
 )
@@ -505,6 +508,87 @@ def test_resource_managed_adaptive_dynamic_hvp_releases_only_evicted_native_back
     assert small_bytes < large_bytes
 
     executable = compile_resource_managed_adaptive_dynamic_hvp_module(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    small = executable.specialize({batch: 1})
+    assert small.backend == "native"
+    native_directories = _artifact_directories()
+    assert len(native_directories) == 1
+
+    large = executable.specialize({batch: 4})
+    assert large.backend == "loop"
+    assert executable.cached_binding_backends == (((("B", 4),), "loop"),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == 1
+    assert all(not path.exists() for path in native_directories)
+
+    larger = executable.specialize({batch: 5})
+    assert larger.backend == "loop"
+    assert executable.cached_binding_backends == (((("B", 5),), "loop"),)
+    assert executable.eviction_count == 2
+    assert executable.released_native_artifact_count == 1
+
+
+
+def _dynamic_jvp_module():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("managed-jvp")
+    value = builder.input((batch, 4), dtype="float64")
+    return batch, builder.finish(value * value)
+
+
+def test_resource_managed_dynamic_jvp_evicts_releases_and_reacquires_native_artifact():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_jvp_module()
+    executable = compile_resource_managed_dynamic_jvp_module(
+        module,
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    first = executable.specialize({batch: 2})
+    first_directories = _artifact_directories()
+    assert len(first_directories) == 1
+
+    second = executable.specialize({batch: 3})
+    assert second is not first
+    assert executable.cached_bindings == ((("B", 3),),)
+    assert executable.retained_bindings_lru == ((("B", 3),),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == 1
+    assert all(not path.exists() for path in first_directories)
+
+    values = np.arange(8, dtype=np.float64).reshape(2, 4) - 3.0
+    tangent = np.arange(8, dtype=np.float64).reshape(2, 4) * 0.25 + 1.0
+    np.testing.assert_allclose(
+        first(inputs=(values, tangent)),
+        2.0 * values * tangent,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_resource_managed_adaptive_dynamic_jvp_releases_only_evicted_native_backend():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_jvp_module()
+
+    small_jvp = jacobian_vector_product_module(
+        specialize_module(module, {batch: 1}),
+        wrt=(0,),
+    )
+    large_jvp = jacobian_vector_product_module(
+        specialize_module(module, {batch: 4}),
+        wrt=(0,),
+    )
+    small_bytes = analyze_module(small_jvp).planned_owning_storage_bytes
+    large_bytes = analyze_module(large_jvp).planned_owning_storage_bytes
+    assert small_bytes < large_bytes
+
+    executable = compile_resource_managed_adaptive_dynamic_jvp_module(
         module,
         budget=CompileBudget(max_planned_storage_bytes=small_bytes),
         wrt=(0,),
