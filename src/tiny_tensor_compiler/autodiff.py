@@ -499,6 +499,26 @@ def _shared_linearization_modules(
     wrt: Sequence[int] = (0,),
 ) -> tuple[Module, Module, Module, int]:
     """Build one shared primal/tape layout with reusable pushforward and pullback programs."""
+    if not isinstance(module, Module):
+        raise TypeError("reusable shared linearization requires a Module")
+    verify(module)
+
+    return_op = _terminal_return(module)
+    selected_output = _select_output(
+        return_op,
+        output_index,
+        require_scalar=False,
+    )
+    input_ops = _input_ops_by_index(module)
+    requested = _normalize_wrt(wrt, input_ops)
+    ancestors = _collect_ancestors(selected_output)
+    _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
+    _validate_reusable_linearization_slice(
+        ancestors,
+        selected_output.type.dtype,
+        context="shared",
+    )
+
     primal_module, pushforward_module, tape_value_count = (
         _pushforward_linearization_modules(
             module,
