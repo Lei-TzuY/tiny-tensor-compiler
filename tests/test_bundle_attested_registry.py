@@ -116,6 +116,31 @@ def _archive(tmp_path: Path) -> Path:
     return archive
 
 
+def _linearization_archive(tmp_path: Path) -> Path:
+    from tiny_tensor_compiler.native_bundle_archive import (
+        pack_dynamic_linearization_bundle_set_archive,
+    )
+    from tiny_tensor_compiler.native_linearization_bundle_set import (
+        compile_dynamic_linearization_bundle_set,
+    )
+
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("attested-registry-linearization")
+    x = builder.input((batch, 3), dtype="float64")
+    squared = x * x
+    module = builder.finish((squared * squared).sum())
+    bundle = tmp_path / "linearizations.ttclin"
+    archive = tmp_path / "linearizations.ttcla"
+    compile_dynamic_linearization_bundle_set(
+        module,
+        ({batch: 2}, {batch: 5}),
+        bundle,
+        wrt=(0,),
+    )
+    pack_dynamic_linearization_bundle_set_archive(bundle, archive)
+    return archive
+
+
 def _input(batch: int) -> np.ndarray:
     return np.arange(batch * 3, dtype=np.float32).reshape(batch, 3) - np.float32(2)
 
@@ -255,3 +280,175 @@ def test_revoked_publisher_is_rejected_before_network_access(tmp_path: Path) -> 
                 allow_insecure_http=True,
             )
         assert len(state.requests) == before
+
+
+
+def test_attested_retained_linearization_publish_fetch_and_compiler_free_load(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tiny_tensor_compiler import (
+        PublisherTrustPolicy,
+        fetch_attested_dynamic_linearization_bundle_set_archive,
+        load_attested_dynamic_linearization_bundle_set_registry,
+        native_bundle,
+        publish_attested_dynamic_linearization_bundle_set_archive,
+        publisher_public_key_from_private_key,
+    )
+
+    archive = _linearization_archive(tmp_path)
+    secret = _key(23)
+    public = publisher_public_key_from_private_key(secret)
+    policy = PublisherTrustPolicy((public,))
+
+    with _server("secret") as (registry, state):
+        digest, publisher = publish_attested_dynamic_linearization_bundle_set_archive(
+            archive,
+            registry,
+            secret,
+            token="secret",
+            allow_insecure_http=True,
+        )
+        assert publish_attested_dynamic_linearization_bundle_set_archive(
+            archive,
+            registry,
+            secret,
+            token="secret",
+            allow_insecure_http=True,
+        ) == (digest, publisher)
+
+        fetched = tmp_path / "trusted-linearizations.ttcla"
+        fetch_attested_dynamic_linearization_bundle_set_archive(
+            registry,
+            digest,
+            publisher,
+            fetched,
+            policy,
+            token="secret",
+            allow_insecure_http=True,
+        )
+        assert fetched.read_bytes() == archive.read_bytes()
+
+        monkeypatch.setattr(
+            native_bundle,
+            "_compiler_command",
+            lambda *_args, **_kwargs: (
+                _ for _ in ()
+            ).throw(AssertionError("compiler lookup")),
+        )
+        executable = load_attested_dynamic_linearization_bundle_set_registry(
+            registry,
+            digest,
+            publisher,
+            policy,
+            token="secret",
+            allow_insecure_http=True,
+        )
+        try:
+            assert executable.digest == digest
+            assert executable.publisher_id == publisher
+            assert executable.available_bindings == ((("B", 2),), (("B", 5),))
+
+            values = np.arange(6, dtype=np.float64).reshape(2, 3) * 0.25 - 1.5
+            frozen = values.copy()
+            state2 = executable.linearize((values,))
+            values[:] = 999.0
+            tangent = np.arange(6, dtype=np.float64).reshape(2, 3) * -0.5 + 2.0
+            cotangent = np.array(0.75, dtype=np.float64)
+
+            np.testing.assert_allclose(
+                state2.primal,
+                np.array(np.sum(frozen**4), dtype=np.float64),
+                rtol=0.0,
+                atol=0.0,
+            )
+            np.testing.assert_allclose(
+                state2.pushforward((tangent,)),
+                np.array(np.sum(4.0 * frozen**3 * tangent), dtype=np.float64),
+                rtol=0.0,
+                atol=0.0,
+            )
+            np.testing.assert_allclose(
+                state2.pullback(cotangent),
+                4.0 * frozen**3 * cotangent,
+                rtol=0.0,
+                atol=0.0,
+            )
+        finally:
+            executable.close()
+
+        assert executable.closed
+        assert all(auth == "Bearer secret" for _method, _path, auth in state.requests)
+
+
+def test_attested_retained_fetch_rejects_replaced_attestation_before_publish(
+    tmp_path: Path,
+) -> None:
+    from tiny_tensor_compiler import (
+        NativeBundleTrustError,
+        PublisherTrustPolicy,
+        create_archive_attestation,
+        fetch_attested_dynamic_linearization_bundle_set_archive,
+        publish_attested_dynamic_linearization_bundle_set_archive,
+        publisher_public_key_from_private_key,
+    )
+
+    archive = _linearization_archive(tmp_path)
+    secret = _key(31)
+    policy = PublisherTrustPolicy((publisher_public_key_from_private_key(secret),))
+
+    with _server() as (registry, state):
+        digest, publisher = publish_attested_dynamic_linearization_bundle_set_archive(
+            archive,
+            registry,
+            secret,
+            allow_insecure_http=True,
+        )
+        state.attestation_substitute = create_archive_attestation(_key(71), digest)
+        destination = tmp_path / "rejected-linearizations.ttcla"
+        with pytest.raises(NativeBundleTrustError, match="identity mismatch"):
+            fetch_attested_dynamic_linearization_bundle_set_archive(
+                registry,
+                digest,
+                publisher,
+                destination,
+                policy,
+                allow_insecure_http=True,
+            )
+        assert not destination.exists()
+        assert not tuple(tmp_path.glob(".rejected-linearizations.ttcla.attested-*"))
+
+
+def test_attested_retained_loader_rejects_ordinary_bundle_payload_kind(
+    tmp_path: Path,
+) -> None:
+    from tiny_tensor_compiler import (
+        PublisherTrustPolicy,
+        load_attested_dynamic_linearization_bundle_set_registry,
+        publish_attested_dynamic_bundle_set_archive,
+        publisher_public_key_from_private_key,
+    )
+    from tiny_tensor_compiler.native_bundle_archive import NativeBundleArchiveError
+
+    archive = _archive(tmp_path)
+    secret = _key(41)
+    policy = PublisherTrustPolicy((publisher_public_key_from_private_key(secret),))
+
+    with _server() as (registry, _state):
+        digest, publisher = publish_attested_dynamic_bundle_set_archive(
+            archive,
+            registry,
+            secret,
+            allow_insecure_http=True,
+        )
+        with pytest.raises(
+            NativeBundleArchiveError,
+            match="retained-linearization archive payload kind is invalid",
+        ):
+            load_attested_dynamic_linearization_bundle_set_registry(
+                registry,
+                digest,
+                publisher,
+                policy,
+                allow_insecure_http=True,
+            )
