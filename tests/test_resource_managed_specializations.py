@@ -19,9 +19,9 @@ from tiny_tensor_compiler.analysis import analyze_module
 from tiny_tensor_compiler.compiler import _shared_linearization_modules
 from tiny_tensor_compiler.specialization_cache import (
     compile_resource_managed_adaptive_dynamic_gradient_module,
-    compile_resource_managed_adaptive_dynamic_linearization,
     compile_resource_managed_adaptive_dynamic_hvp_module,
     compile_resource_managed_adaptive_dynamic_jvp_module,
+    compile_resource_managed_adaptive_dynamic_linearization,
     compile_resource_managed_adaptive_dynamic_module,
     compile_resource_managed_adaptive_dynamic_vjp_module,
     compile_resource_managed_dynamic_gradient_module,
