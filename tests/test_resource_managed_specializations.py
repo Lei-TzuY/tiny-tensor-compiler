@@ -16,8 +16,10 @@ from tiny_tensor_compiler import (
 )
 from tiny_tensor_compiler import native as native_module
 from tiny_tensor_compiler.analysis import analyze_module
+from tiny_tensor_compiler.compiler import _shared_linearization_modules
 from tiny_tensor_compiler.specialization_cache import (
     compile_resource_managed_adaptive_dynamic_gradient_module,
+    compile_resource_managed_adaptive_dynamic_linearization,
     compile_resource_managed_adaptive_dynamic_hvp_module,
     compile_resource_managed_adaptive_dynamic_jvp_module,
     compile_resource_managed_adaptive_dynamic_module,
@@ -25,6 +27,7 @@ from tiny_tensor_compiler.specialization_cache import (
     compile_resource_managed_dynamic_gradient_module,
     compile_resource_managed_dynamic_hvp_module,
     compile_resource_managed_dynamic_jvp_module,
+    compile_resource_managed_dynamic_linearization,
     compile_resource_managed_dynamic_module,
     compile_resource_managed_dynamic_vjp_module,
 )
@@ -612,3 +615,129 @@ def test_resource_managed_adaptive_dynamic_jvp_releases_only_evicted_native_back
     assert executable.cached_binding_backends == (((("B", 5),), "loop"),)
     assert executable.eviction_count == 2
     assert executable.released_native_artifact_count == 1
+
+
+
+def _dynamic_linearization_module():
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("managed-linearization")
+    value = builder.input((batch, 4), dtype="float64")
+    return batch, builder.finish(value * value)
+
+
+def _linearization_peak_storage_bytes(module, bindings):
+    concrete = specialize_module(module, bindings)
+    primal, pushforward, pullback, _ = _shared_linearization_modules(
+        concrete,
+        wrt=(0,),
+    )
+    return max(
+        analyze_module(component).planned_owning_storage_bytes
+        for component in (primal, pushforward, pullback)
+    )
+
+
+def test_resource_managed_dynamic_linearization_evicts_bundle_and_reacquires_components():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_linearization_module()
+    executable = compile_resource_managed_dynamic_linearization(
+        module,
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    first = executable.specialize({batch: 2})
+    first_directories = _artifact_directories()
+    assert len(first_directories) >= 2
+
+    second = executable.specialize({batch: 3})
+    assert second is not first
+    assert executable.cached_bindings == ((("B", 3),),)
+    assert executable.retained_bindings_lru == ((("B", 3),),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == len(first_directories)
+    assert all(not path.exists() for path in first_directories)
+
+    values = np.arange(8, dtype=np.float64).reshape(2, 4) * 0.25 - 1.5
+    tangent = np.arange(8, dtype=np.float64).reshape(2, 4) * -0.5 + 2.0
+    cotangent = np.arange(8, dtype=np.float64).reshape(2, 4) * 0.125 + 0.75
+    state = first.linearize((values,))
+    np.testing.assert_allclose(state.primal, values * values, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        state.pushforward((tangent,)),
+        2.0 * values * tangent,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        state.pullback(cotangent),
+        2.0 * values * cotangent,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_resource_managed_adaptive_dynamic_linearization_releases_native_bundle_only():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_linearization_module()
+    small_bytes = _linearization_peak_storage_bytes(module, {batch: 1})
+    large_bytes = _linearization_peak_storage_bytes(module, {batch: 8})
+    assert small_bytes < large_bytes
+
+    executable = compile_resource_managed_adaptive_dynamic_linearization(
+        module,
+        budget=CompileBudget(max_planned_storage_bytes=small_bytes),
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    small = executable.specialize({batch: 1})
+    assert small.backend == "native"
+    native_directories = _artifact_directories()
+    assert len(native_directories) >= 2
+
+    large = executable.specialize({batch: 8})
+    assert large.backend == "loop"
+    assert executable.cached_binding_backends == (((("B", 8),), "loop"),)
+    assert executable.eviction_count == 1
+    assert executable.released_native_artifact_count == len(native_directories)
+    assert all(not path.exists() for path in native_directories)
+
+    larger = executable.specialize({batch: 9})
+    assert larger.backend == "loop"
+    assert executable.cached_binding_backends == (((("B", 9),), "loop"),)
+    assert executable.eviction_count == 2
+    assert executable.released_native_artifact_count == len(native_directories)
+
+
+def test_resource_managed_linearization_bundle_unloads_only_after_final_handle_owner():
+    native_module.clear_native_cache()
+    batch, module = _dynamic_linearization_module()
+    left = compile_resource_managed_dynamic_linearization(
+        module,
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+    right = compile_resource_managed_dynamic_linearization(
+        module,
+        wrt=(0,),
+        max_cached_specializations=1,
+    )
+
+    left.specialize({batch: 2})
+    shared_directories = _artifact_directories()
+    assert len(shared_directories) >= 2
+
+    right.specialize({batch: 2})
+    assert _artifact_directories() == shared_directories
+
+    left.specialize({batch: 3})
+    assert left.eviction_count == 1
+    assert left.released_native_artifact_count == 0
+    assert shared_directories <= _artifact_directories()
+    assert all(path.exists() for path in shared_directories)
+
+    right.specialize({batch: 4})
+    assert right.eviction_count == 1
+    assert right.released_native_artifact_count == len(shared_directories)
+    assert all(not path.exists() for path in shared_directories)
