@@ -204,7 +204,7 @@ class PushforwardLinearizationExecutable:
         if budget is not None:
             compile_kwargs["budget"] = budget
 
-        self._input_types = input_types
+        self._input_types = tuple(op.results[0].type for op in input_ops)
         self._tape_value_count = tape_value_count
         self._tangent_count = tangent_count
         self._primal_tape = compile_module(primal_module, **compile_kwargs)
@@ -515,7 +515,7 @@ class LinearizationExecutable:
         if budget is not None:
             compile_kwargs["budget"] = budget
 
-        self._input_types = tuple(op.results[0].type for op in input_ops)
+        self._input_types = input_types
         self._tape_value_count = tape_value_count
         self._tangent_count = tangent_count
         self._primal_tape = compile_module(primal_module, **compile_kwargs)
