@@ -104,6 +104,13 @@ from .native_api import (
     compile_native,
     execute_native,
 )
+from .native_linearization_bundle_set import (
+    NativeLinearizationBundleExecutable,
+    NativeLinearizationBundleSetError,
+    NativeLinearizationBundleSetExecutable,
+    compile_dynamic_linearization_bundle_set,
+    load_dynamic_linearization_bundle_set,
+)
 from .native_bundle_archive import (
     NativeBundleArchiveError,
     NativeBundleSetArchiveExecutable,
@@ -266,6 +273,9 @@ __all__ = [
     "LoopView",
     "MemoryPlan",
     "NativeBundleArchiveError",
+    "NativeLinearizationBundleExecutable",
+    "NativeLinearizationBundleSetError",
+    "NativeLinearizationBundleSetExecutable",
     "NativeBundlePolicyRotationError",
     "NativeBundleRegistryError",
     "NativeBundleRegistryExecutable",
@@ -330,6 +340,7 @@ __all__ = [
     "compile_dynamic_hvp_module",
     "compile_dynamic_jvp_module",
     "compile_dynamic_linearization",
+    "compile_dynamic_linearization_bundle_set",
     "compile_dynamic_module",
     "compile_dynamic_vjp_module",
     "compile_linearization",
@@ -368,6 +379,7 @@ __all__ = [
     "load_attested_dynamic_bundle_set_registry",
     "load_dynamic_bundle_set_archive",
     "load_dynamic_bundle_set_registry",
+    "load_dynamic_linearization_bundle_set",
     "load_release_channel_registry",
     "load_threshold_release_channel_registry",
     "log_id_from_public_key",
