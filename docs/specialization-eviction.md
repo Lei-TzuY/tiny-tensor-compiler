@@ -8,11 +8,13 @@ The resource-managed dynamic facades add a separate `max_cached_specializations`
 
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_gradient_module(...)`
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_linearization(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_vjp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_hvp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_jvp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_gradient_module(...)`
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_linearization(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_vjp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_hvp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_jvp_module(...)`
@@ -80,6 +82,7 @@ Regression coverage proves the lifecycle instead of inferring it from cache leng
 - a persistent-cache-backed executable reloads after final-owner eviction without another compiler invocation;
 - adaptive Loop eviction does not register or release native ownership;
 - native and adaptive dynamic VJP specializations obey the same LRU, final-owner unload, external-handle reacquisition, and truthful Loop-eviction accounting as ordinary and gradient specializations;
+- native retained-linearization bindings account for every primal/pushforward/pullback artifact identity under one logical LRU specialization, unload each identity only on final managed ownership, and keep adaptive Loop bundles at zero native ownership;
 - a resource-managed concrete handle unloads its serial artifact on final `close()` and fails closed afterward;
 - two concrete owners share one artifact and only final close unloads it;
 - concrete and dynamic managed owners coordinate on one shared artifact identity;
@@ -92,6 +95,6 @@ The production exact heads are verified on Ubuntu and Windows with Python 3.11 a
 
 ## Phase boundary
 
-This closes the explicit managed serial-native ownership phase across ordinary, gradient, and runtime-seeded VJP dynamic specialization retention as well as concrete native leases. Raising retention counts, adding `close()` aliases, exposing the registry as another cache-control surface, or adding replacement-policy variants would be lifecycle-policy farming rather than a new architecture milestone.
+This closes explicit managed serial-native ownership across ordinary dynamic execution, gradient/VJP/HVP/JVP transforms, concrete native leases, and retained-linearization specializations whose one logical binding may own multiple native artifact identities. `released_native_artifact_count` continues to count actual process-cache removals/unloads rather than logical binding evictions; therefore one retained bundle eviction can release several identities, none when those identities are still shared, or zero for an adaptive Loop bundle.
 
-The remaining qualitatively different lifecycle frontier is safe reclaim of process-pinned OpenMP artifacts, which requires evidence that OpenMP worker/runtime references can no longer execute generated code before unload. Without such evidence, the project should promote to another subsystem frontier rather than weakening the process-pinned safety boundary.
+Raising retention counts, adding `close()` aliases, exposing the registry as another cache-control surface, or adding replacement-policy variants would be lifecycle-policy farming rather than a new architecture milestone. Safe reclaim of process-pinned OpenMP artifacts still requires evidence that worker/runtime references can no longer execute generated code before unload. The promoted compiler frontier is instead portable retained-linearization packaging, where one symbolic binding must carry a coordinated multi-artifact derivative bundle through the existing compiler-free archive and verification boundary.

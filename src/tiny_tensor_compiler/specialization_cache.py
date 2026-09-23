@@ -11,13 +11,16 @@ from .compiler import (
     AdaptiveDynamicGradientExecutable,
     AdaptiveDynamicHVPExecutable,
     AdaptiveDynamicJVPExecutable,
+    AdaptiveDynamicLinearizationExecutable,
     AdaptiveDynamicVJPExecutable,
     AdaptiveExecutable,
     DynamicExecutable,
     DynamicGradientExecutable,
     DynamicHVPExecutable,
     DynamicJVPExecutable,
+    DynamicLinearizationExecutable,
     DynamicVJPExecutable,
+    LinearizationExecutable,
     _display_binding,
     _normalize_specialization_bindings,
 )
@@ -86,8 +89,7 @@ class _ResourceManagedRetentionMixin:
             executable = super().specialize(bindings)
             self._specializations.pop(key)
             self._specializations[key] = executable
-            native = _managed_native_executable(executable)
-            if native is not None:
+            for native in _managed_native_executables(executable):
                 _retain_managed_serial_artifact(self, native)
             self._evict_to_limit()
             return executable
@@ -97,9 +99,9 @@ class _ResourceManagedRetentionMixin:
             oldest_key = next(iter(self._specializations))
             executable = self._specializations.pop(oldest_key)
             self._eviction_count += 1
-            native = _managed_native_executable(executable)
-            if native is not None and _release_managed_serial_artifact(self, native):
-                self._released_native_artifact_count += 1
+            for native in _managed_native_executables(executable):
+                if _release_managed_serial_artifact(self, native):
+                    self._released_native_artifact_count += 1
 
 
 class ResourceManagedDynamicExecutable(_ResourceManagedRetentionMixin, DynamicExecutable):
@@ -288,6 +290,74 @@ class ResourceManagedDynamicJVPExecutable(
             budget=budget,
             compiler_timeout=compiler_timeout,
             compile_deadline=compile_deadline,
+        )
+
+
+class ResourceManagedDynamicLinearizationExecutable(
+    _ResourceManagedRetentionMixin,
+    DynamicLinearizationExecutable,
+):
+    """Dynamic retained linearizations with bounded multi-artifact LRU retention."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        max_cached_specializations: int,
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+    ) -> None:
+        self._configure_managed_retention(
+            max_cached_specializations=max_cached_specializations,
+            budget=budget,
+            parallel=parallel,
+        )
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            parallel=False,
+            budget=budget,
+        )
+
+
+class ResourceManagedAdaptiveDynamicLinearizationExecutable(
+    _ResourceManagedRetentionMixin,
+    AdaptiveDynamicLinearizationExecutable,
+):
+    """Adaptive retained linearizations with bounded multi-artifact LRU retention."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        max_cached_specializations: int,
+        parallel: bool = False,
+    ) -> None:
+        self._configure_managed_retention(
+            max_cached_specializations=max_cached_specializations,
+            budget=budget,
+            parallel=parallel,
+        )
+        super().__init__(
+            module,
+            budget,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            parallel=False,
         )
 
 
@@ -663,6 +733,54 @@ def compile_resource_managed_adaptive_dynamic_hvp_module(
     )
 
 
+def compile_resource_managed_dynamic_linearization(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    max_cached_specializations: int,
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+) -> ResourceManagedDynamicLinearizationExecutable:
+    """Prepare retained linearization bundles with bounded LRU retention."""
+    return ResourceManagedDynamicLinearizationExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        max_cached_specializations=max_cached_specializations,
+        parallel=parallel,
+        budget=budget,
+    )
+
+
+def compile_resource_managed_adaptive_dynamic_linearization(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    max_cached_specializations: int,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    parallel: bool = False,
+) -> ResourceManagedAdaptiveDynamicLinearizationExecutable:
+    """Prepare adaptive retained bundles with bounded LRU retention."""
+    return ResourceManagedAdaptiveDynamicLinearizationExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        max_cached_specializations=max_cached_specializations,
+        parallel=parallel,
+    )
+
+
 def compile_resource_managed_dynamic_vjp_module(
     module: Module,
     compiler: str | None = None,
@@ -783,14 +901,22 @@ def compile_resource_managed_adaptive_dynamic_gradient_module(
     )
 
 
-def _managed_native_executable(
-    executable: NativeExecutable | AdaptiveExecutable,
-) -> NativeExecutable | None:
+def _managed_native_executables(executable: object) -> tuple[NativeExecutable, ...]:
     if isinstance(executable, NativeExecutable):
-        return executable
-    if executable.backend == "native":
-        return executable._native
-    return None
+        return (executable,)
+    if isinstance(executable, LinearizationExecutable):
+        return tuple(
+            component
+            for component in (
+                executable._primal_tape,
+                executable._pushforward,
+                executable._pullback,
+            )
+            if isinstance(component, NativeExecutable)
+        )
+    if isinstance(executable, AdaptiveExecutable) and executable.backend == "native":
+        return (executable._native,)
+    return ()
 
 
 def _artifact_identity(executable: NativeExecutable) -> ArtifactIdentity:
