@@ -657,7 +657,7 @@ def _registry_opener() -> urllib.request.OpenerDirector:
 
 
 def _close_registry_executable(
-    executable: NativeBundleSetArchiveExecutable,
+    executable: NativeBundleSetArchiveExecutable | NativeLinearizationBundleSetArchiveExecutable,
     download_root: Path,
 ) -> None:
     try:
