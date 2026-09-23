@@ -247,7 +247,9 @@ def _failure_signature(
         type_ = type(exc)
         return f"jvp:exception:{type_.__module__}.{type_.__qualname__}"
 
-    actual_array = _single_array(actual, "jvp")
+    if isinstance(actual, tuple):
+        return "jvp:mismatch:output-count"
+    actual_array = np.asarray(actual)
     structural = _array_mismatch(actual_array, expected)
     if structural is not None:
         return f"jvp:mismatch:{structural}"
@@ -270,7 +272,9 @@ def _failure_signature(
         type_ = type(exc)
         return f"vjp:exception:{type_.__module__}.{type_.__qualname__}"
 
-    transposed_array = _single_array(transposed, "vjp")
+    if isinstance(transposed, tuple):
+        return "vjp:mismatch:output-count"
+    transposed_array = np.asarray(transposed)
     structural = _array_mismatch(transposed_array, spec.tangent)
     if structural is not None:
         return f"vjp:mismatch:{structural}"
@@ -290,12 +294,6 @@ def _failure_signature(
     if not np.isclose(lhs, rhs, rtol=rtol, atol=atol, equal_nan=False):
         return "duality:mismatch:value"
     return None
-
-
-def _single_array(value: Any, context: str) -> np.ndarray:
-    if isinstance(value, tuple):
-        raise TypeError(f"{context} runner unexpectedly returned multiple outputs")
-    return np.asarray(value)
 
 
 def _array_mismatch(actual: np.ndarray, expected: np.ndarray) -> str | None:
