@@ -41,6 +41,13 @@ from .gradient_consistency import (
 from .inference import TypeInferenceError
 from .input_binding import BorrowedInput, BorrowedLoopProgram, borrow_inputs
 from .ir import AffineDim, LinearDim, SymbolicDim
+from .jvp_consistency import (
+    JVPConsistencyCampaignResult,
+    JVPConsistencyCase,
+    JVPConsistencyFailure,
+    generate_jvp_consistency_case,
+    run_jvp_consistency_campaign,
+)
 from .layout import StorageLayout
 from .loop_ir import (
     IndexMap,
@@ -227,6 +234,9 @@ __all__ = [
     "GradientConsistencyFailure",
     "GraphBuilder",
     "IndexMap",
+    "JVPConsistencyCampaignResult",
+    "JVPConsistencyCase",
+    "JVPConsistencyFailure",
     "LinearDim",
     "LoopAlloc",
     "LoopBinaryInto",
@@ -325,6 +335,7 @@ __all__ = [
     "fuse_elementwise",
     "generate_c",
     "generate_gradient_consistency_case",
+    "generate_jvp_consistency_case",
     "has_symbolic_shapes",
     "jacobian_vector_product_module",
     "load_attested_dynamic_bundle_set_registry",
@@ -345,6 +356,7 @@ __all__ = [
     "publisher_id_from_public_key",
     "publisher_public_key_from_private_key",
     "run_gradient_consistency_campaign",
+    "run_jvp_consistency_campaign",
     "specialize_module",
     "trace_module",
     "transparency_leaf_hash",
