@@ -18,10 +18,18 @@ from .native_bundle_set import (
     NativeBundleSetExecutable,
     load_dynamic_bundle_set,
 )
+from .native_linearization_bundle_set import (
+    NativeLinearizationBundleExecutable,
+    NativeLinearizationBundleSetError,
+    NativeLinearizationBundleSetExecutable,
+    load_dynamic_linearization_bundle_set,
+)
 
 _ARCHIVE_SCHEMA = "native-bundle-archive-v1"
 _ARCHIVE_MANIFEST = "archive.json"
 _PAYLOAD_ROOT = "bundle"
+_DYNAMIC_BUNDLE_SET_KIND = "dynamic-bundle-set"
+_LINEARIZATION_BUNDLE_SET_KIND = "retained-linearization-bundle-set"
 _FIXED_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _REGULAR_FILE_MODE = (stat.S_IFREG | 0o644) << 16
 
@@ -89,92 +97,112 @@ class NativeBundleSetArchiveExecutable:
         return self.execute(inputs=inputs, out=out)
 
 
+class NativeLinearizationBundleSetArchiveExecutable:
+    """Compiler-free retained linearizations backed by one extracted archive."""
+
+    def __init__(
+        self,
+        executable: NativeLinearizationBundleSetExecutable,
+        extraction_root: Path,
+    ) -> None:
+        self._executable = executable
+        self._extraction_root = extraction_root
+        self._finalizer = weakref.finalize(
+            self,
+            _close_archive_executable,
+            executable,
+            extraction_root,
+        )
+
+    @property
+    def symbolic_dims(self) -> tuple[str, ...]:
+        return self._executable.symbolic_dims
+
+    @property
+    def available_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        return self._executable.available_bindings
+
+    @property
+    def loaded_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        return self._executable.loaded_bindings
+
+    @property
+    def closed(self) -> bool:
+        return not self._finalizer.alive
+
+    def close(self) -> None:
+        """Close loaded components and remove the private extracted payload."""
+        if self._finalizer.alive:
+            self._finalizer()
+
+    def specialize(
+        self,
+        bindings: Mapping[SymbolicDim | str, int],
+    ) -> NativeLinearizationBundleExecutable:
+        if self.closed:
+            raise RuntimeError("native linearization archive executable is closed")
+        return self._executable.specialize(bindings)
+
+    def linearize(self, inputs: Sequence[Any]):
+        if self.closed:
+            raise RuntimeError("native linearization archive executable is closed")
+        return self._executable.linearize(inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()):
+        return self.linearize(inputs)
+
+
 def pack_dynamic_bundle_set_archive(
     bundle: str | os.PathLike[str],
     destination: str | os.PathLike[str],
 ) -> Path:
     """Validate and deterministically pack one finite native bundle set."""
-    bundle_path = Path(bundle).expanduser().resolve()
-    if not bundle_path.is_dir():
-        raise FileNotFoundError(f"dynamic bundle set does not exist: {bundle_path}")
-
-    archive_path = Path(destination).expanduser().resolve()
-    if archive_path.exists():
-        raise FileExistsError(f"native bundle archive destination already exists: {archive_path}")
-    if archive_path.is_relative_to(bundle_path):
-        raise ValueError("native bundle archive destination must be outside the source bundle")
-
+    bundle_path = _prepare_archive_source(
+        bundle,
+        label="dynamic bundle set",
+    )
     _fully_validate_bundle_set_tree(
         bundle_path,
         error_message="source bundle set failed verification",
     )
-
-    files = _collect_payload_files(bundle_path)
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{archive_path.name}.build-",
-        suffix=".tmp",
-        dir=archive_path.parent,
+    return _pack_archive_payload(
+        bundle_path,
+        destination,
+        payload_kind=_DYNAMIC_BUNDLE_SET_KIND,
+        verify_archive=load_dynamic_bundle_set_archive,
     )
-    os.close(descriptor)
-    temporary_path = Path(temporary_name)
-    published = False
-    try:
-        with zipfile.ZipFile(temporary_path, mode="w", compression=zipfile.ZIP_STORED) as archive:
-            _write_entry(archive, _ARCHIVE_MANIFEST, _archive_manifest_bytes())
-            for relative_path, source in files:
-                _write_entry(
-                    archive,
-                    f"{_PAYLOAD_ROOT}/{relative_path}",
-                    source.read_bytes(),
-                )
 
-        # Validate the exact bytes that are about to be published. Besides reusing the
-        # full bundle/ABI checks, this closes the source-validation/read TOCTOU window:
-        # any mutation while the archive is being assembled produces a rejected temp
-        # artifact rather than a published archive that only fails later at load time.
-        verified = load_dynamic_bundle_set_archive(temporary_path)
-        verified.close()
 
-        if archive_path.exists():
-            raise FileExistsError(
-                f"native bundle archive destination already exists: {archive_path}"
-            )
-        os.replace(temporary_path, archive_path)
-        published = True
-        return archive_path
-    finally:
-        if not published:
-            temporary_path.unlink(missing_ok=True)
+def pack_dynamic_linearization_bundle_set_archive(
+    bundle: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+) -> Path:
+    """Validate and deterministically pack retained linearization bundles."""
+    bundle_path = _prepare_archive_source(
+        bundle,
+        label="linearization bundle set",
+    )
+    _fully_validate_linearization_bundle_set_tree(
+        bundle_path,
+        error_message="source linearization bundle set failed verification",
+    )
+    return _pack_archive_payload(
+        bundle_path,
+        destination,
+        payload_kind=_LINEARIZATION_BUNDLE_SET_KIND,
+        verify_archive=load_dynamic_linearization_bundle_set_archive,
+    )
 
 
 def load_dynamic_bundle_set_archive(
     archive: str | os.PathLike[str],
 ) -> NativeBundleSetArchiveExecutable:
     """Safely extract and load one compiler-free finite native bundle-set archive."""
-    archive_path = Path(archive).expanduser().resolve()
-    if not archive_path.is_file():
-        raise FileNotFoundError(f"native bundle archive does not exist: {archive_path}")
-
-    extraction_root = Path(tempfile.mkdtemp(prefix="ttc-bundle-archive-"))
+    extraction_root = _extract_archive_payload(
+        archive,
+        expected_kind=_DYNAMIC_BUNDLE_SET_KIND,
+    )
     try:
-        with zipfile.ZipFile(archive_path, mode="r") as packed:
-            entries = _validate_archive_entries(packed)
-            manifest = _decode_archive_manifest(packed.read(_ARCHIVE_MANIFEST))
-            payload_root = manifest["root"]
-            for entry in entries:
-                if entry.filename == _ARCHIVE_MANIFEST:
-                    continue
-                relative = PurePosixPath(entry.filename).relative_to(payload_root)
-                destination = extraction_root.joinpath(*relative.parts)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with packed.open(entry, mode="r") as source, destination.open("wb") as target:
-                    shutil.copyfileobj(source, target)
-
-        # The ordinary bundle-set loader intentionally validates child libraries lazily.
-        # A transport boundary must be fail-closed before it is handed to the caller, so
-        # force-load every packaged child once, close those validation handles, then
-        # construct a fresh dispatcher whose normal execution remains lazy.
         _fully_validate_bundle_set_tree(
             extraction_root,
             error_message="archive payload failed bundle verification",
@@ -182,8 +210,40 @@ def load_dynamic_bundle_set_archive(
         try:
             executable = load_dynamic_bundle_set(extraction_root)
         except (NativeBundleError, NativeBundleSetError) as exc:
-            raise NativeBundleArchiveError("archive payload failed bundle verification") from exc
+            raise NativeBundleArchiveError(
+                "archive payload failed bundle verification"
+            ) from exc
         return NativeBundleSetArchiveExecutable(executable, extraction_root)
+    except Exception:
+        shutil.rmtree(extraction_root, ignore_errors=True)
+        raise
+
+
+def load_dynamic_linearization_bundle_set_archive(
+    archive: str | os.PathLike[str],
+) -> NativeLinearizationBundleSetArchiveExecutable:
+    """Safely extract and load compiler-free retained linearization bundles."""
+    extraction_root = _extract_archive_payload(
+        archive,
+        expected_kind=_LINEARIZATION_BUNDLE_SET_KIND,
+    )
+    try:
+        _fully_validate_linearization_bundle_set_tree(
+            extraction_root,
+            error_message=(
+                "archive payload failed linearization bundle verification"
+            ),
+        )
+        try:
+            executable = load_dynamic_linearization_bundle_set(extraction_root)
+        except (NativeBundleError, NativeLinearizationBundleSetError) as exc:
+            raise NativeBundleArchiveError(
+                "archive payload failed linearization bundle verification"
+            ) from exc
+        return NativeLinearizationBundleSetArchiveExecutable(
+            executable,
+            extraction_root,
+        )
     except Exception:
         shutil.rmtree(extraction_root, ignore_errors=True)
         raise
@@ -204,6 +264,135 @@ def _fully_validate_bundle_set_tree(
     finally:
         if executable is not None:
             executable.close()
+
+
+def _fully_validate_linearization_bundle_set_tree(
+    bundle_path: Path,
+    *,
+    error_message: str,
+) -> None:
+    executable: NativeLinearizationBundleSetExecutable | None = None
+    try:
+        executable = load_dynamic_linearization_bundle_set(bundle_path)
+        for binding in executable.available_bindings:
+            executable.specialize(dict(binding))
+    except (
+        NativeBundleError,
+        NativeLinearizationBundleSetError,
+        OSError,
+    ) as exc:
+        raise NativeBundleArchiveError(error_message) from exc
+    finally:
+        if executable is not None:
+            executable.close()
+
+
+def _prepare_archive_source(
+    bundle: str | os.PathLike[str],
+    *,
+    label: str,
+) -> Path:
+    bundle_path = Path(bundle).expanduser().resolve()
+    if not bundle_path.is_dir():
+        raise FileNotFoundError(f"{label} does not exist: {bundle_path}")
+    return bundle_path
+
+
+def _pack_archive_payload(
+    bundle_path: Path,
+    destination: str | os.PathLike[str],
+    *,
+    payload_kind: str,
+    verify_archive: Any,
+) -> Path:
+    archive_path = Path(destination).expanduser().resolve()
+    if archive_path.exists():
+        raise FileExistsError(
+            f"native bundle archive destination already exists: {archive_path}"
+        )
+    if archive_path.is_relative_to(bundle_path):
+        raise ValueError(
+            "native bundle archive destination must be outside the source bundle"
+        )
+
+    files = _collect_payload_files(bundle_path)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{archive_path.name}.build-",
+        suffix=".tmp",
+        dir=archive_path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    published = False
+    try:
+        with zipfile.ZipFile(
+            temporary_path,
+            mode="w",
+            compression=zipfile.ZIP_STORED,
+        ) as archive:
+            _write_entry(
+                archive,
+                _ARCHIVE_MANIFEST,
+                _archive_manifest_bytes(payload_kind),
+            )
+            for relative_path, source in files:
+                _write_entry(
+                    archive,
+                    f"{_PAYLOAD_ROOT}/{relative_path}",
+                    source.read_bytes(),
+                )
+
+        verified = verify_archive(temporary_path)
+        verified.close()
+
+        if archive_path.exists():
+            raise FileExistsError(
+                f"native bundle archive destination already exists: {archive_path}"
+            )
+        os.replace(temporary_path, archive_path)
+        published = True
+        return archive_path
+    finally:
+        if not published:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _extract_archive_payload(
+    archive: str | os.PathLike[str],
+    *,
+    expected_kind: str,
+) -> Path:
+    archive_path = Path(archive).expanduser().resolve()
+    if not archive_path.is_file():
+        raise FileNotFoundError(
+            f"native bundle archive does not exist: {archive_path}"
+        )
+
+    extraction_root = Path(tempfile.mkdtemp(prefix="ttc-bundle-archive-"))
+    try:
+        with zipfile.ZipFile(archive_path, mode="r") as packed:
+            entries = _validate_archive_entries(packed)
+            manifest = _decode_archive_manifest(
+                packed.read(_ARCHIVE_MANIFEST),
+                expected_kind=expected_kind,
+            )
+            payload_root = manifest["root"]
+            for entry in entries:
+                if entry.filename == _ARCHIVE_MANIFEST:
+                    continue
+                relative = PurePosixPath(entry.filename).relative_to(payload_root)
+                destination = extraction_root.joinpath(*relative.parts)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with (
+                    packed.open(entry, mode="r") as source,
+                    destination.open("wb") as target,
+                ):
+                    shutil.copyfileobj(source, target)
+        return extraction_root
+    except Exception:
+        shutil.rmtree(extraction_root, ignore_errors=True)
+        raise
 
 
 def _collect_payload_files(bundle_path: Path) -> tuple[tuple[str, Path], ...]:
@@ -263,18 +452,24 @@ def _validate_relative_name(name: str) -> None:
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise NativeBundleArchiveError("native bundle archive entry escapes its payload root")
+    if path.as_posix() != name:
+        raise NativeBundleArchiveError("native bundle archive entry name is not canonical")
 
 
-def _archive_manifest_bytes() -> bytes:
+def _archive_manifest_bytes(payload_kind: str) -> bytes:
     manifest = {
-        "kind": "dynamic-bundle-set",
+        "kind": payload_kind,
         "root": _PAYLOAD_ROOT,
         "schema": _ARCHIVE_SCHEMA,
     }
     return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def _decode_archive_manifest(data: bytes) -> dict[str, str]:
+def _decode_archive_manifest(
+    data: bytes,
+    *,
+    expected_kind: str,
+) -> dict[str, str]:
     try:
         decoded = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -283,8 +478,10 @@ def _decode_archive_manifest(data: bytes) -> dict[str, str]:
         raise NativeBundleArchiveError("native bundle archive manifest fields are invalid")
     if decoded.get("schema") != _ARCHIVE_SCHEMA:
         raise NativeBundleArchiveError("unsupported native bundle archive schema")
-    if decoded.get("kind") != "dynamic-bundle-set":
-        raise NativeBundleArchiveError("unsupported native bundle archive payload kind")
+    if decoded.get("kind") != expected_kind:
+        raise NativeBundleArchiveError(
+            "unsupported native bundle archive payload kind"
+        )
     if decoded.get("root") != _PAYLOAD_ROOT:
         raise NativeBundleArchiveError("native bundle archive payload root is invalid")
     return decoded
@@ -300,7 +497,7 @@ def _write_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
 
 
 def _close_archive_executable(
-    executable: NativeBundleSetExecutable,
+    executable: NativeBundleSetExecutable | NativeLinearizationBundleSetExecutable,
     extraction_root: Path,
 ) -> None:
     try:
