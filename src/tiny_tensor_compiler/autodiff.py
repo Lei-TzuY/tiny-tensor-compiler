@@ -178,7 +178,7 @@ def _pushforward_linearization_modules(
             result in ancestors for result in op.results
         )
         if include:
-            if op.opcode == "copy_into":
+            if op.opcode in {"copy_into", "binary_into"}:
                 _capture_reusable_prewrite_tape_values(
                     primal_function,
                     op,
@@ -303,6 +303,37 @@ def _pushforward_linearization_modules(
             ).results[0]
             continue
 
+        if op.opcode == "binary_into":
+            root, target, source = op.operands
+            if op.attrs["operator"] == "add":
+                tangents[result] = push_function.add_op(
+                    "binary_into",
+                    operands=(tangents[root], tangents[target], tangents[source]),
+                    result_types=(result.type,),
+                    attrs={"operator": "add"},
+                ).results[0]
+                continue
+
+            try:
+                target_primal = primal_values[target]
+                source_primal = primal_values[source]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal autodiff error: reusable pushforward is missing "
+                    "a binary_into primal tape value"
+                ) from exc
+            replacement = _add(
+                push_function,
+                _multiply(push_function, tangents[target], source_primal),
+                _multiply(push_function, target_primal, tangents[source]),
+            )
+            tangents[result] = push_function.add_op(
+                "copy_into",
+                operands=(tangents[root], tangents[target], replacement),
+                result_types=(result.type,),
+            ).results[0]
+            continue
+
         raise RuntimeError(
             f"internal autodiff error: unsupported reusable pushforward opcode {op.opcode!r}"
         )
@@ -326,11 +357,11 @@ def _validate_reusable_linearization_slice(
 ) -> None:
     producers = {value.producer for value in ancestors if value.producer is not None}
     for op in producers:
-        if op.opcode in {"binary_into", "binary_inplace"}:
+        if op.opcode == "binary_inplace":
             raise AutodiffError(
-                f"reusable {context} linearization does not yet support arithmetic write effects"
+                f"reusable {context} linearization does not yet support full-root arithmetic write effects"
             )
-        if op.opcode == "copy_into":
+        if op.opcode in {"copy_into", "binary_into"}:
             _direct_slice_write_attrs(
                 op,
                 context=f"reusable {context} linearization",
@@ -347,6 +378,7 @@ def _validate_reusable_linearization_slice(
             "reverse",
             "transpose",
             "copy_into",
+            "binary_into",
         }:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on reusable {context} slice"
@@ -373,9 +405,9 @@ def _capture_reusable_prewrite_tape_values(
     tape_values: tuple[Value, ...],
     retained_tape: dict[Value, Value],
 ) -> None:
-    if op.opcode != "copy_into":
+    if op.opcode not in {"copy_into", "binary_into"}:
         raise RuntimeError(
-            "internal autodiff error: expected copy_into for reusable tape snapshot"
+            "internal autodiff error: expected partial write for reusable tape snapshot"
         )
     root = op.operands[0]
     for value in tape_values:
@@ -398,9 +430,16 @@ def _collect_reusable_linearization_tape_values(
     needed: set[Value] = set()
     producers = {value.producer for value in ancestors if value.producer is not None}
     for op in module.function.ops:
-        if op not in producers or op.opcode != "mul":
+        if op not in producers:
             continue
-        for operand in op.operands:
+        if op.opcode == "mul":
+            candidates = op.operands
+        elif op.opcode == "binary_into" and op.attrs["operator"] == "mul":
+            _root, target, source = op.operands
+            candidates = (target, source)
+        else:
+            continue
+        for operand in candidates:
             producer = operand.producer
             if producer is None or producer.opcode in {"input", "const"}:
                 continue
@@ -453,7 +492,7 @@ def _pullback_linearization_modules(
             result in ancestors for result in op.results
         )
         if include:
-            if op.opcode == "copy_into":
+            if op.opcode in {"copy_into", "binary_into"}:
                 _capture_reusable_prewrite_tape_values(
                     primal_function,
                     op,
@@ -726,6 +765,53 @@ def _propagate_reusable_pullback_adjoint(
             region_upstream,
             source.type,
         )
+        _accumulate(function, gradients, root, root_contribution)
+        _accumulate(function, gradients, source, source_contribution)
+        return
+
+    if op.opcode == "binary_into":
+        root, target, source = op.operands
+        attrs = _direct_slice_write_attrs(
+            op,
+            context="reusable pullback linearization",
+        )
+        region_upstream = _slice(
+            function,
+            upstream,
+            axis=attrs["axis"],
+            start=attrs["start"],
+            stop=attrs["stop"],
+            step=attrs["step"],
+        )
+        if op.attrs["operator"] == "add":
+            root_contribution = upstream
+            source_contribution = _unbroadcast(
+                function,
+                region_upstream,
+                source.type,
+            )
+        else:
+            try:
+                target_primal = primal_values[target]
+                source_primal = primal_values[source]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal autodiff error: reusable pullback is missing "
+                    "a binary_into primal tape value"
+                ) from exc
+            root_region = _multiply(function, region_upstream, source_primal)
+            root_contribution = _replace_slice_region(
+                function,
+                upstream,
+                root.type,
+                attrs,
+                root_region,
+            )
+            source_contribution = _unbroadcast(
+                function,
+                _multiply(function, region_upstream, target_primal),
+                source.type,
+            )
         _accumulate(function, gradients, root, root_contribution)
         _accumulate(function, gradients, source, source_contribution)
         return
