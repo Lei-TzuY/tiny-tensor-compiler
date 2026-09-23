@@ -3,6 +3,7 @@ from .autodiff import (
     AutodiffError,
     differentiate_module,
     jacobian_vector_product_module,
+    value_and_jacobian_vector_product_module,
     vector_jacobian_product_module,
 )
 from .backends.cpu import execute as execute_cpu
@@ -361,6 +362,7 @@ __all__ = [
     "trace_module",
     "transparency_leaf_hash",
     "transparency_node_hash",
+    "value_and_jacobian_vector_product_module",
     "vector_jacobian_product_module",
     "verify",
     "verify_archive_attestation",
