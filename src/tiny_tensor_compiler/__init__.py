@@ -104,13 +104,6 @@ from .native_api import (
     compile_native,
     execute_native,
 )
-from .native_linearization_bundle_set import (
-    NativeLinearizationBundleExecutable,
-    NativeLinearizationBundleSetError,
-    NativeLinearizationBundleSetExecutable,
-    compile_dynamic_linearization_bundle_set,
-    load_dynamic_linearization_bundle_set,
-)
 from .native_bundle_archive import (
     NativeBundleArchiveError,
     NativeBundleSetArchiveExecutable,
@@ -205,6 +198,13 @@ from .native_bundle_trust import (
     load_attested_dynamic_bundle_set_registry,
     publish_attested_dynamic_bundle_set_archive,
 )
+from .native_linearization_bundle_set import (
+    NativeLinearizationBundleExecutable,
+    NativeLinearizationBundleSetError,
+    NativeLinearizationBundleSetExecutable,
+    compile_dynamic_linearization_bundle_set,
+    load_dynamic_linearization_bundle_set,
+)
 from .passes import (
     algebraic_simplify,
     canonicalize,
@@ -273,9 +273,6 @@ __all__ = [
     "LoopView",
     "MemoryPlan",
     "NativeBundleArchiveError",
-    "NativeLinearizationBundleExecutable",
-    "NativeLinearizationBundleSetError",
-    "NativeLinearizationBundleSetExecutable",
     "NativeBundlePolicyRotationError",
     "NativeBundleRegistryError",
     "NativeBundleRegistryExecutable",
@@ -293,6 +290,9 @@ __all__ = [
     "NativeCompilationError",
     "NativeCompilationTimeout",
     "NativeExecutable",
+    "NativeLinearizationBundleExecutable",
+    "NativeLinearizationBundleSetError",
+    "NativeLinearizationBundleSetExecutable",
     "PublisherTrustPolicy",
     "PullbackLinearizationExecutable",
     "PullbackLinearizationState",
