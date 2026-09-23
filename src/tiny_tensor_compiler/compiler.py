@@ -15,6 +15,7 @@ from .admission import (
 )
 from .analysis import CompilerReport
 from .autodiff import (
+    _pullback_linearization_modules,
     _pushforward_linearization_modules,
     differentiate_module,
     jacobian_vector_product_module,
@@ -232,6 +233,125 @@ class PushforwardLinearizationExecutable:
             tape_values=tuple(np.asarray(value) for value in tape_values),
             pushforward=self._pushforward,
             tangent_count=self._tangent_count,
+        )
+
+
+class PullbackLinearizationState:
+    """Frozen primal/tape state that can service repeated cotangent queries."""
+
+    def __init__(
+        self,
+        *,
+        primal: np.ndarray,
+        retained_inputs: tuple[np.ndarray, ...],
+        tape_values: tuple[np.ndarray, ...],
+        pullback: NativeExecutable,
+    ) -> None:
+        self._primal = np.array(primal, copy=True)
+        self._retained_inputs = tuple(
+            np.array(value, copy=True, order="C") for value in retained_inputs
+        )
+        self._tape_values = tuple(
+            np.array(value, copy=True, order="C") for value in tape_values
+        )
+        self._pullback = pullback
+        self._query_count = 0
+
+    @property
+    def primal(self) -> np.ndarray:
+        return np.array(self._primal, copy=True)
+
+    @property
+    def query_count(self) -> int:
+        return self._query_count
+
+    def pullback(self, cotangent: Any):
+        result = self._pullback(
+            inputs=self._retained_inputs + self._tape_values + (cotangent,),
+        )
+        self._query_count += 1
+        return result
+
+
+class PullbackLinearizationExecutable:
+    """Compile one primal tape and one reusable pure pullback program."""
+
+    def __init__(
+        self,
+        module: Module,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        parallel: bool = False,
+        budget: CompileBudget | None = None,
+    ) -> None:
+        if has_symbolic_shapes(module):
+            raise ValueError(
+                "reusable pullback linearization currently requires concrete tensor shapes"
+            )
+        primal_module, pullback_module, tape_value_count = (
+            _pullback_linearization_modules(
+                module,
+                output_index=output_index,
+                wrt=wrt,
+            )
+        )
+
+        input_ops = sorted(
+            (op for op in module.function.ops if op.opcode == "input"),
+            key=lambda op: op.attrs["index"],
+        )
+        compile_kwargs: dict[str, Any] = {
+            "compiler": compiler,
+            "cache_dir": cache_dir,
+            "parallel": parallel,
+        }
+        if budget is not None:
+            compile_kwargs["budget"] = budget
+
+        self._input_types = tuple(op.results[0].type for op in input_ops)
+        self._tape_value_count = tape_value_count
+        self._primal_tape = compile_module(primal_module, **compile_kwargs)
+        self._pullback = compile_module(pullback_module, **compile_kwargs)
+
+    @property
+    def tape_value_count(self) -> int:
+        return self._tape_value_count
+
+    def linearize(self, inputs: Sequence[Any]) -> PullbackLinearizationState:
+        prepared = prepare_runtime_inputs(self._input_types, inputs)
+        frozen_inputs = tuple(
+            np.array(value, copy=True, order="C") for value in prepared
+        )
+        result = self._primal_tape(inputs=frozen_inputs)
+
+        if self._tape_value_count:
+            if not isinstance(result, tuple):
+                raise RuntimeError(
+                    "internal compiler error: primal tape returned one value unexpectedly"
+                )
+            expected = self._tape_value_count + 1
+            if len(result) != expected:
+                raise RuntimeError(
+                    "internal compiler error: primal tape returned the wrong number of values"
+                )
+            primal = result[0]
+            tape_values = tuple(result[1:])
+        else:
+            if isinstance(result, tuple):
+                raise RuntimeError(
+                    "internal compiler error: primal tape returned unexpected extra values"
+                )
+            primal = result
+            tape_values = ()
+
+        return PullbackLinearizationState(
+            primal=np.asarray(primal),
+            retained_inputs=frozen_inputs,
+            tape_values=tuple(np.asarray(value) for value in tape_values),
+            pullback=self._pullback,
         )
 
 
@@ -796,6 +916,28 @@ class AdaptiveDynamicHVPExecutable(AdaptiveDynamicVJPExecutable):
             output_index=self._output_index,
             wrt=self._wrt,
         )
+
+
+def compile_pullback_linearization(
+    module: Module,
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    parallel: bool = False,
+    budget: CompileBudget | None = None,
+) -> PullbackLinearizationExecutable:
+    """Compile a one-shot primal tape with a reusable pure pullback."""
+    return PullbackLinearizationExecutable(
+        module,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        parallel=parallel,
+        budget=budget,
+    )
 
 
 def compile_pushforward_linearization(
