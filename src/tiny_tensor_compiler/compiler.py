@@ -46,6 +46,19 @@ AdaptiveBackend = Literal["native", "loop"]
 LoopExecutionProgram = LoopProgram | BorrowedLoopProgram
 
 
+class _LoopModuleExecutable:
+    """One verified Loop program with the NativeExecutable call shape."""
+
+    def __init__(self, program: LoopExecutionProgram) -> None:
+        self._program = program
+
+    def execute(self, inputs: Sequence[Any] = ()):
+        return execute_loop(self._program, inputs=inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()):
+        return self.execute(inputs=inputs)
+
+
 class AdaptiveExecutable:
     """Execute one concrete module through native code or verified Loop CPU fallback."""
 
@@ -414,6 +427,55 @@ class LinearizationState:
         return result
 
 
+def _shared_linearization_runtime_contract(
+    module: Module,
+    *,
+    output_index: int,
+    wrt: Sequence[int],
+) -> tuple[
+    Module,
+    Module,
+    Module,
+    int,
+    tuple[Any, ...],
+    int,
+]:
+    (
+        primal_module,
+        pushforward_module,
+        pullback_module,
+        tape_value_count,
+    ) = _shared_linearization_modules(
+        module,
+        output_index=output_index,
+        wrt=wrt,
+    )
+
+    input_ops = sorted(
+        (op for op in module.function.ops if op.opcode == "input"),
+        key=lambda op: op.attrs["index"],
+    )
+    pushforward_input_count = sum(
+        op.opcode == "input" for op in pushforward_module.function.ops
+    )
+    tangent_count = (
+        pushforward_input_count - len(input_ops) - tape_value_count
+    )
+    if tangent_count < 1:
+        raise RuntimeError(
+            "internal compiler error: shared linearization has no tangent inputs"
+        )
+
+    return (
+        primal_module,
+        pushforward_module,
+        pullback_module,
+        tape_value_count,
+        tuple(op.results[0].type for op in input_ops),
+        tangent_count,
+    )
+
+
 class LinearizationExecutable:
     """Compile one primal tape with reusable pushforward and pullback programs."""
 
@@ -437,26 +499,13 @@ class LinearizationExecutable:
             pushforward_module,
             pullback_module,
             tape_value_count,
-        ) = _shared_linearization_modules(
+            input_types,
+            tangent_count,
+        ) = _shared_linearization_runtime_contract(
             module,
             output_index=output_index,
             wrt=wrt,
         )
-
-        input_ops = sorted(
-            (op for op in module.function.ops if op.opcode == "input"),
-            key=lambda op: op.attrs["index"],
-        )
-        pushforward_input_count = sum(
-            op.opcode == "input" for op in pushforward_module.function.ops
-        )
-        tangent_count = (
-            pushforward_input_count - len(input_ops) - tape_value_count
-        )
-        if tangent_count < 1:
-            raise RuntimeError(
-                "internal compiler error: shared linearization has no tangent inputs"
-            )
 
         compile_kwargs: dict[str, Any] = {
             "compiler": compiler,
@@ -466,7 +515,7 @@ class LinearizationExecutable:
         if budget is not None:
             compile_kwargs["budget"] = budget
 
-        self._input_types = tuple(op.results[0].type for op in input_ops)
+        self._input_types = input_types
         self._tape_value_count = tape_value_count
         self._tangent_count = tangent_count
         self._primal_tape = compile_module(primal_module, **compile_kwargs)
@@ -512,6 +561,99 @@ class LinearizationExecutable:
             pullback=self._pullback,
             tangent_count=self._tangent_count,
         )
+
+
+class _AdaptiveLinearizationExecutable(LinearizationExecutable):
+    """One concrete retained-state bundle with one coherent backend decision."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        parallel: bool = False,
+    ) -> None:
+        if has_symbolic_shapes(module):
+            raise ValueError(
+                "adaptive reusable linearization currently requires concrete tensor shapes"
+            )
+        if not isinstance(budget, CompileBudget):
+            raise TypeError("budget must be a CompileBudget")
+
+        (
+            primal_module,
+            pushforward_module,
+            pullback_module,
+            tape_value_count,
+            input_types,
+            tangent_count,
+        ) = _shared_linearization_runtime_contract(
+            module,
+            output_index=output_index,
+            wrt=wrt,
+        )
+        components = (
+            ("primal_tape", primal_module),
+            ("pushforward", pushforward_module),
+            ("pullback", pullback_module),
+        )
+
+        first_failure: tuple[str, CompileBudgetExceeded] | None = None
+        for name, component in components:
+            try:
+                enforce_compile_budget(component, budget)
+            except CompileBudgetExceeded as exc:
+                if first_failure is None:
+                    first_failure = (name, exc)
+
+        self._backend: AdaptiveBackend = (
+            "loop" if first_failure is not None else "native"
+        )
+        self._budget_exceeded_component = (
+            first_failure[0] if first_failure is not None else None
+        )
+        self._budget_exceeded = (
+            first_failure[1] if first_failure is not None else None
+        )
+        self._input_types = input_types
+        self._tape_value_count = tape_value_count
+        self._tangent_count = tangent_count
+
+        if self._backend == "native":
+            kwargs: dict[str, Any] = {
+                "compiler": compiler,
+                "cache_dir": cache_dir,
+                "parallel": parallel,
+            }
+            self._primal_tape = compile_module(primal_module, **kwargs)
+            self._pushforward = compile_module(pushforward_module, **kwargs)
+            self._pullback = compile_module(pullback_module, **kwargs)
+        else:
+            self._primal_tape = _LoopModuleExecutable(
+                _lower_concrete_module(primal_module, borrow_inputs=False)
+            )
+            self._pushforward = _LoopModuleExecutable(
+                _lower_concrete_module(pushforward_module, borrow_inputs=False)
+            )
+            self._pullback = _LoopModuleExecutable(
+                _lower_concrete_module(pullback_module, borrow_inputs=False)
+            )
+
+    @property
+    def backend(self) -> AdaptiveBackend:
+        return self._backend
+
+    @property
+    def budget_exceeded(self) -> CompileBudgetExceeded | None:
+        return self._budget_exceeded
+
+    @property
+    def budget_exceeded_component(self) -> str | None:
+        return self._budget_exceeded_component
 
 
 class DynamicExecutable:
@@ -701,6 +843,87 @@ class DynamicLinearizationExecutable(DynamicExecutable):
 
     def __call__(self, inputs: Sequence[Any] = ()) -> LinearizationState:
         return self.linearize(inputs)
+
+
+class AdaptiveDynamicLinearizationExecutable(
+    DynamicLinearizationExecutable
+):
+    """Cache coherent native-or-Loop retained-state bundles per primal binding."""
+
+    def __init__(
+        self,
+        module: Module,
+        budget: CompileBudget,
+        compiler: str | None = None,
+        cache_dir: str | os.PathLike[str] | None = None,
+        *,
+        output_index: int = 0,
+        wrt: Sequence[int] = (0,),
+        parallel: bool = False,
+    ) -> None:
+        if not isinstance(budget, CompileBudget):
+            raise TypeError("budget must be a CompileBudget")
+        super().__init__(
+            module,
+            compiler=compiler,
+            cache_dir=cache_dir,
+            output_index=output_index,
+            wrt=wrt,
+            parallel=parallel,
+            budget=budget,
+        )
+        self._specializations: dict[
+            tuple[int, ...], _AdaptiveLinearizationExecutable
+        ] = {}
+
+    @property
+    def cached_binding_backends(
+        self,
+    ) -> tuple[tuple[tuple[tuple[str, int], ...], AdaptiveBackend], ...]:
+        with self._lock:
+            return tuple(
+                (
+                    _display_binding(self._symbols, key),
+                    self._specializations[key].backend,
+                )
+                for key in sorted(self._specializations)
+            )
+
+    def specialize(
+        self,
+        bindings: int | Mapping[SymbolicDim | str, int],
+    ) -> _AdaptiveLinearizationExecutable:
+        normalized, key = _normalize_specialization_bindings(
+            self._module,
+            self._symbols,
+            bindings,
+        )
+        with self._lock:
+            executable = self._specializations.get(key)
+            if executable is not None:
+                return executable
+            _enforce_dynamic_specialization_budget(
+                self._symbols,
+                self._specializations,
+                key,
+                self._budget,
+            )
+            concrete = specialize_module(self._module, normalized)
+            if self._budget is None:  # pragma: no cover - constructor invariant
+                raise RuntimeError(
+                    "internal compiler error: adaptive linearization lost its budget"
+                )
+            executable = _AdaptiveLinearizationExecutable(
+                concrete,
+                self._budget,
+                compiler=self._compiler,
+                cache_dir=self._cache_dir,
+                output_index=self._output_index,
+                wrt=self._wrt,
+                parallel=self._parallel,
+            )
+            self._specializations[key] = executable
+            return executable
 
 
 class DynamicGradientExecutable(DynamicExecutable):
@@ -1351,6 +1574,30 @@ def compile_dynamic_linearization(
         wrt=wrt,
         parallel=parallel,
         budget=budget,
+    )
+
+
+def compile_adaptive_dynamic_linearization(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    parallel: bool = False,
+) -> AdaptiveDynamicLinearizationExecutable:
+    """Prepare coherent native-or-Loop retained-state bundles per binding."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    return AdaptiveDynamicLinearizationExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        parallel=parallel,
     )
 
 
