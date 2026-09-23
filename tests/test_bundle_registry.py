@@ -150,6 +150,32 @@ def _compile_archive(tmp_path: Path) -> Path:
     return archive
 
 
+def _compile_linearization_archive(tmp_path: Path) -> Path:
+    from tiny_tensor_compiler.native_bundle_archive import (
+        pack_dynamic_linearization_bundle_set_archive,
+    )
+    from tiny_tensor_compiler.native_linearization_bundle_set import (
+        compile_dynamic_linearization_bundle_set,
+    )
+
+    batch = SymbolicDim("B")
+    builder = GraphBuilder("registry-linearization")
+    x = builder.input((batch, 3), dtype="float64")
+    squared = x * x
+    module = builder.finish((squared * squared).sum())
+
+    bundle = tmp_path / "linearizations.ttclin"
+    archive = tmp_path / "linearizations.ttcla"
+    compile_dynamic_linearization_bundle_set(
+        module,
+        ({batch: 2}, {batch: 5}),
+        bundle,
+        wrt=(0,),
+    )
+    pack_dynamic_linearization_bundle_set_archive(bundle, archive)
+    return archive
+
+
 def test_registry_publish_fetch_and_load_are_content_addressed_and_compiler_free(
     tmp_path: Path,
     monkeypatch,
@@ -413,3 +439,118 @@ def test_registry_validates_canonical_digest_and_destination_collision(tmp_path:
             "sha256:" + "0" * 64,
             destination,
         )
+
+
+
+def test_retained_linearization_registry_publish_fetch_and_load_are_compiler_free(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tiny_tensor_compiler import native_bundle
+    from tiny_tensor_compiler.native_bundle_registry import (
+        digest_dynamic_linearization_bundle_set_archive,
+        fetch_dynamic_linearization_bundle_set_archive,
+        load_dynamic_linearization_bundle_set_registry,
+        publish_dynamic_linearization_bundle_set_archive,
+    )
+
+    archive = _compile_linearization_archive(tmp_path)
+    with _registry_server(token="secret") as (registry, state):
+        digest = publish_dynamic_linearization_bundle_set_archive(
+            archive,
+            registry,
+            token="secret",
+            allow_insecure_http=True,
+        )
+        assert digest == digest_dynamic_linearization_bundle_set_archive(archive)
+        assert state.objects[digest.removeprefix("sha256:")] == archive.read_bytes()
+
+        fetched = tmp_path / "downloaded-linearizations.ttcla"
+        fetch_dynamic_linearization_bundle_set_archive(
+            registry,
+            digest,
+            fetched,
+            token="secret",
+            allow_insecure_http=True,
+        )
+        assert fetched.read_bytes() == archive.read_bytes()
+
+        monkeypatch.setattr(
+            native_bundle,
+            "_compiler_command",
+            lambda *_args, **_kwargs: (
+                _ for _ in ()
+            ).throw(AssertionError("compiler lookup")),
+        )
+        executable = load_dynamic_linearization_bundle_set_registry(
+            registry,
+            digest,
+            token="secret",
+            allow_insecure_http=True,
+        )
+        try:
+            assert executable.digest == digest
+            assert executable.available_bindings == ((("B", 2),), (("B", 5),))
+            assert executable.loaded_bindings == ()
+
+            values = (
+                np.arange(6, dtype=np.float64).reshape(2, 3) * 0.25 - 1.5
+            )
+            frozen = values.copy()
+            state2 = executable.linearize((values,))
+            values[:] = 999.0
+            tangent = np.arange(6, dtype=np.float64).reshape(2, 3) * -0.5 + 2.0
+            cotangent = np.array(0.75, dtype=np.float64)
+
+            np.testing.assert_allclose(
+                state2.primal,
+                np.array(np.sum(frozen**4), dtype=np.float64),
+                rtol=0.0,
+                atol=0.0,
+            )
+            np.testing.assert_allclose(
+                state2.pushforward((tangent,)),
+                np.array(np.sum(4.0 * frozen**3 * tangent), dtype=np.float64),
+                rtol=0.0,
+                atol=0.0,
+            )
+            np.testing.assert_allclose(
+                state2.pullback(cotangent),
+                4.0 * frozen**3 * cotangent,
+                rtol=0.0,
+                atol=0.0,
+            )
+            assert executable.loaded_bindings == ((("B", 2),),)
+        finally:
+            executable.close()
+
+        assert executable.closed
+        assert all(
+            auth == "Bearer secret"
+            for _method, _path, auth in state.requests
+        )
+
+
+def test_retained_linearization_registry_rejects_dynamic_bundle_payload_kind(
+    tmp_path: Path,
+) -> None:
+    from tiny_tensor_compiler.native_bundle_archive import NativeBundleArchiveError
+    from tiny_tensor_compiler.native_bundle_registry import (
+        load_dynamic_linearization_bundle_set_registry,
+    )
+
+    archive = _compile_archive(tmp_path)
+    digest_hex = hashlib.sha256(archive.read_bytes()).hexdigest()
+    digest = f"sha256:{digest_hex}"
+
+    with _registry_server() as (registry, state):
+        state.objects[digest_hex] = archive.read_bytes()
+        with pytest.raises(
+            NativeBundleArchiveError,
+            match="unsupported native bundle archive payload kind",
+        ):
+            load_dynamic_linearization_bundle_set_registry(
+                registry,
+                digest,
+                allow_insecure_http=True,
+            )
