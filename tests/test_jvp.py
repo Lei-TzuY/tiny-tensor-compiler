@@ -182,3 +182,87 @@ def test_jvp_rejects_non_direct_copy_target():
         match="copy_into forward-mode JVP currently requires a direct slice target",
     ):
         jacobian_vector_product_module(module, wrt=(0, 1))
+
+
+
+def test_jvp_differentiates_direct_slice_binary_into_add_across_backends():
+    builder = GraphBuilder("jvp-binary-into-add")
+    base = builder.input((6,), DType.FLOAT64)
+    source = builder.input((3,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    module = builder.finish(root.binary_into(target, source, operator="add"))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    source_value = np.array([7.0, -8.0, 9.0], dtype=np.float64)
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0, 2.5, -3.0], dtype=np.float64)
+    source_tangent = np.array([4.0, -5.0, 6.0], dtype=np.float64)
+    expected = np.array(base_tangent, copy=True)
+    expected[1:6:2] += source_tangent
+
+    for actual in _execute_all_backends(
+        jvp,
+        (base_value, source_value, base_tangent, source_tangent),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_jvp_differentiates_broadcast_binary_into_mul_across_backends():
+    builder = GraphBuilder("jvp-binary-into-mul")
+    base = builder.input((6,), DType.FLOAT64)
+    scale = builder.input((), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=0, stop=6, step=2)
+    module = builder.finish(root.binary_into(target, scale, operator="mul"))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    scale_value = np.array(-1.5, dtype=np.float64)
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0, 2.5, -3.0], dtype=np.float64)
+    scale_tangent = np.array(0.25, dtype=np.float64)
+    expected = np.array(base_tangent, copy=True)
+    expected[0:6:2] = (
+        base_tangent[0:6:2] * scale_value
+        + base_value[0:6:2] * scale_tangent
+    )
+
+    for actual in _execute_all_backends(
+        jvp,
+        (base_value, scale_value, base_tangent, scale_tangent),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_jvp_preserves_prewrite_source_tangent_through_binary_into():
+    builder = GraphBuilder("jvp-binary-into-prewrite-source")
+    base = builder.input((6,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    source = target * builder.tensor(2.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.binary_into(target, source, operator="add"))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0,))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    tangent = np.array([0.5, -1.0, 1.5, -2.0, 2.5, -3.0], dtype=np.float64)
+    expected = np.array(tangent, copy=True)
+    expected[1:6:2] *= 3.0
+
+    for actual in _execute_all_backends(jvp, (base_value, tangent)):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_jvp_rejects_non_direct_binary_into_target():
+    builder = GraphBuilder("jvp-binary-into-nondirect")
+    base = builder.input((4,), DType.FLOAT64)
+    source = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(
+        root.binary_into(root.reverse(0), source, operator="add")
+    )
+
+    with pytest.raises(
+        AutodiffError,
+        match="binary_into forward-mode JVP currently requires a direct slice target",
+    ):
+        jacobian_vector_product_module(module, wrt=(0, 1))
