@@ -160,9 +160,13 @@ def _pushforward_linearization_modules(
     ancestors = _collect_ancestors(selected_output)
 
     _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
-    _validate_reusable_pushforward_slice(ancestors, selected_output.type.dtype)
+    _validate_reusable_linearization_slice(
+        ancestors,
+        selected_output.type.dtype,
+        context="pushforward",
+    )
 
-    tape_values = _collect_reusable_pushforward_tape_values(module, ancestors)
+    tape_values = _collect_reusable_linearization_tape_values(module, ancestors)
 
     primal_function = Function(f"{module.function.name}_linearize_primal")
     primal_map: dict[Value, Value] = {}
@@ -296,15 +300,17 @@ def _pushforward_linearization_modules(
     return primal_module, pushforward_module, len(tape_values)
 
 
-def _validate_reusable_pushforward_slice(
+def _validate_reusable_linearization_slice(
     ancestors: frozenset[Value],
     output_dtype: DType,
+    *,
+    context: str,
 ) -> None:
     producers = {value.producer for value in ancestors if value.producer is not None}
     for op in producers:
         if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
             raise AutodiffError(
-                "reusable pushforward linearization does not yet support write effects"
+                f"reusable {context} linearization does not yet support write effects"
             )
         if op.opcode not in {
             "input",
@@ -319,24 +325,24 @@ def _validate_reusable_pushforward_slice(
             "transpose",
         }:
             raise AutodiffError(
-                f"unsupported {op.opcode!r} operation on reusable pushforward slice"
+                f"unsupported {op.opcode!r} operation on reusable {context} slice"
             )
         if len(op.results) != 1:
             raise AutodiffError(
-                f"unsupported {op.opcode!r} multi-result operation on reusable pushforward slice"
+                f"unsupported {op.opcode!r} multi-result operation on reusable {context} slice"
             )
         result_dtype = op.results[0].type.dtype
         if result_dtype not in _FLOAT_DTYPES:
             raise AutodiffError(
-                "reusable pushforward linearization must use floating tensor values"
+                f"reusable {context} linearization must use floating tensor values"
             )
         if result_dtype != output_dtype:
             raise AutodiffError(
-                "mixed-precision reusable pushforward linearization is not supported"
+                f"mixed-precision reusable {context} linearization is not supported"
             )
 
 
-def _collect_reusable_pushforward_tape_values(
+def _collect_reusable_linearization_tape_values(
     module: Module,
     ancestors: frozenset[Value],
 ) -> tuple[Value, ...]:
@@ -357,6 +363,236 @@ def _collect_reusable_pushforward_tape_values(
             if result in needed:
                 ordered.append(result)
     return tuple(ordered)
+
+
+def _pullback_linearization_modules(
+    module: Module,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+) -> tuple[Module, Module, int]:
+    """Split one static pure VJP into a one-shot primal tape and reusable pullback."""
+    if not isinstance(module, Module):
+        raise TypeError("reusable pullback linearization requires a Module")
+    verify(module)
+
+    return_op = _terminal_return(module)
+    selected_output = _select_output(
+        return_op,
+        output_index,
+        require_scalar=False,
+    )
+    input_ops = _input_ops_by_index(module)
+    requested = _normalize_wrt(wrt, input_ops)
+    ancestors = _collect_ancestors(selected_output)
+
+    _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
+    _validate_reusable_linearization_slice(
+        ancestors,
+        selected_output.type.dtype,
+        context="pullback",
+    )
+    tape_values = _collect_reusable_linearization_tape_values(module, ancestors)
+
+    primal_function = Function(f"{module.function.name}_linearize_primal")
+    primal_map: dict[Value, Value] = {}
+    for op in module.function.ops:
+        if op.opcode == "return":
+            continue
+        include = op.opcode == "input" or any(
+            result in ancestors for result in op.results
+        )
+        if include:
+            _clone_op(primal_function, op, primal_map)
+
+    primal_output = primal_map.get(selected_output)
+    if primal_output is None:
+        raise RuntimeError(
+            "internal autodiff error: reusable pullback output was not cloned"
+        )
+    primal_tape_outputs = [primal_output]
+    for value in tape_values:
+        try:
+            primal_tape_outputs.append(primal_map[value])
+        except KeyError as exc:
+            raise RuntimeError(
+                "internal autodiff error: reusable pullback tape value was not cloned"
+            ) from exc
+    primal_function.add_op("return", operands=primal_tape_outputs)
+    primal_module = Module(primal_function)
+    verify(primal_module)
+
+    pull_function = Function(f"{module.function.name}_pullback")
+    primal_values: dict[Value, Value] = {}
+
+    ordered_inputs = tuple(input_ops[index] for index in sorted(input_ops))
+    for op in ordered_inputs:
+        original = op.results[0]
+        index = op.attrs["index"]
+        primal_values[original] = pull_function.add_op(
+            "input",
+            result_types=(original.type,),
+            attrs={"index": index},
+        ).results[0]
+
+    next_input_index = len(ordered_inputs)
+    for offset, value in enumerate(tape_values):
+        primal_values[value] = pull_function.add_op(
+            "input",
+            result_types=(value.type,),
+            attrs={"index": next_input_index + offset},
+        ).results[0]
+
+    for op in module.function.ops:
+        if op.opcode != "const":
+            continue
+        if not any(result in ancestors for result in op.results):
+            continue
+        _clone_op(pull_function, op, primal_values)
+
+    cotangent = pull_function.add_op(
+        "input",
+        result_types=(selected_output.type,),
+        attrs={"index": next_input_index + len(tape_values)},
+    ).results[0]
+
+    gradients: dict[Value, Value] = {selected_output: cotangent}
+    for op in reversed(module.function.ops):
+        if op.opcode == "return" or not op.results:
+            continue
+        result = op.results[0]
+        if result not in ancestors:
+            continue
+        upstream = gradients.get(result)
+        if upstream is None:
+            continue
+        _propagate_reusable_pullback_adjoint(
+            pull_function,
+            op,
+            upstream,
+            gradients,
+            primal_values,
+        )
+
+    outputs: list[Value] = []
+    for input_index in requested:
+        original_input = input_ops[input_index].results[0]
+        gradient = gradients.get(original_input)
+        if gradient is None:
+            gradient = _zeros(pull_function, original_input.type)
+        if gradient.type != original_input.type:
+            raise RuntimeError(
+                "internal autodiff error: reusable pullback gradient type does not match input type"
+            )
+        outputs.append(gradient)
+
+    pull_function.add_op("return", operands=outputs)
+    pullback_module = Module(pull_function)
+    verify(pullback_module)
+    return primal_module, pullback_module, len(tape_values)
+
+
+def _propagate_reusable_pullback_adjoint(
+    function: Function,
+    op: Operation,
+    upstream: Value,
+    gradients: dict[Value, Value],
+    primal_values: dict[Value, Value],
+) -> None:
+    if op.opcode in {"input", "const"}:
+        return
+    if op.opcode == "add":
+        for operand in op.operands:
+            _accumulate(
+                function,
+                gradients,
+                operand,
+                _unbroadcast(function, upstream, operand.type),
+            )
+        return
+    if op.opcode == "mul":
+        lhs, rhs = op.operands
+        try:
+            lhs_primal = primal_values[lhs]
+            rhs_primal = primal_values[rhs]
+        except KeyError as exc:
+            raise RuntimeError(
+                "internal autodiff error: reusable pullback is missing a primal tape value"
+            ) from exc
+        _accumulate(
+            function,
+            gradients,
+            lhs,
+            _unbroadcast(
+                function,
+                _multiply(function, upstream, rhs_primal),
+                lhs.type,
+            ),
+        )
+        _accumulate(
+            function,
+            gradients,
+            rhs,
+            _unbroadcast(
+                function,
+                _multiply(function, upstream, lhs_primal),
+                rhs.type,
+            ),
+        )
+        return
+    if op.opcode == "sum":
+        (operand,) = op.operands
+        _accumulate(
+            function,
+            gradients,
+            operand,
+            _expand_sum_adjoint(
+                function,
+                upstream,
+                operand.type,
+                op.attrs.get("axis"),
+            ),
+        )
+        return
+    if op.opcode in {"reshape", "view"}:
+        (operand,) = op.operands
+        _accumulate(
+            function,
+            gradients,
+            operand,
+            _reshape(function, upstream, operand.type.shape),
+        )
+        return
+    if op.opcode == "transpose":
+        (operand,) = op.operands
+        _accumulate(
+            function,
+            gradients,
+            operand,
+            _transpose(function, upstream, _inverse_permutation(op.attrs["axes"])),
+        )
+        return
+    if op.opcode == "reverse":
+        (operand,) = op.operands
+        _accumulate(
+            function,
+            gradients,
+            operand,
+            _reverse(function, upstream, op.attrs["axis"]),
+        )
+        return
+    if op.opcode == "slice":
+        (operand,) = op.operands
+        _accumulate(
+            function,
+            gradients,
+            operand,
+            _scatter_slice(function, upstream, operand.type, op.attrs),
+        )
+        return
+    raise RuntimeError(
+        f"internal autodiff error: unsupported reusable pullback opcode {op.opcode!r}"
+    )
 
 
 def _forward_mode_module(
