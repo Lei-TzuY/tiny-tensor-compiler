@@ -202,9 +202,13 @@ from .native_bundle_transparency_witness_evidence_publication import (
 )
 from .native_bundle_trust import (
     AttestedNativeBundleRegistryExecutable,
+    AttestedNativeLinearizationBundleRegistryExecutable,
     fetch_attested_dynamic_bundle_set_archive,
+    fetch_attested_dynamic_linearization_bundle_set_archive,
     load_attested_dynamic_bundle_set_registry,
+    load_attested_dynamic_linearization_bundle_set_registry,
     publish_attested_dynamic_bundle_set_archive,
+    publish_attested_dynamic_linearization_bundle_set_archive,
 )
 from .native_linearization_bundle_set import (
     NativeLinearizationBundleExecutable,
@@ -238,6 +242,7 @@ __all__ = [
     "AdaptiveDynamicVJPExecutable",
     "AffineDim",
     "AttestedNativeBundleRegistryExecutable",
+    "AttestedNativeLinearizationBundleRegistryExecutable",
     "AutodiffError",
     "BorrowedInput",
     "BorrowedLoopProgram",
@@ -377,6 +382,7 @@ __all__ = [
     "execute_native",
     "execute_reference",
     "fetch_attested_dynamic_bundle_set_archive",
+    "fetch_attested_dynamic_linearization_bundle_set_archive",
     "fetch_dynamic_bundle_set_archive",
     "fetch_dynamic_linearization_bundle_set_archive",
     "fetch_release_channel_archive",
@@ -389,6 +395,7 @@ __all__ = [
     "has_symbolic_shapes",
     "jacobian_vector_product_module",
     "load_attested_dynamic_bundle_set_registry",
+    "load_attested_dynamic_linearization_bundle_set_registry",
     "load_dynamic_bundle_set_archive",
     "load_dynamic_bundle_set_registry",
     "load_dynamic_linearization_bundle_set",
@@ -404,6 +411,7 @@ __all__ = [
     "pack_dynamic_linearization_bundle_set_archive",
     "plan_memory",
     "publish_attested_dynamic_bundle_set_archive",
+    "publish_attested_dynamic_linearization_bundle_set_archive",
     "publish_dynamic_bundle_set_archive",
     "publish_dynamic_linearization_bundle_set_archive",
     "publish_release_channel",

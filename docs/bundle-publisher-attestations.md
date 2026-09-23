@@ -1,6 +1,6 @@
 # Ed25519 bundle publisher attestations
 
-The optional publisher-attestation layer authenticates one exact content-addressed native bundle archive to a caller-pinned Ed25519 publisher key. It composes with the existing archive and registry verifiers instead of replacing them.
+The optional publisher-attestation layer authenticates one exact content-addressed native bundle archive—including retained-linearization payloads—to a caller-pinned Ed25519 publisher key. It composes with the existing payload-specific archive and registry verifiers instead of replacing them.
 
 The trust chain is deliberately split into two independent questions:
 
@@ -44,7 +44,30 @@ finally:
     executable.close()
 ```
 
-The unsigned `publish_dynamic_bundle_set_archive()`, `fetch_dynamic_bundle_set_archive()`, and `load_dynamic_bundle_set_registry()` APIs are unchanged. Publisher authentication is an explicit opt-in rather than a silent change to the historical content-addressed transport contract.
+Retained-linearization archives use the same detached attestation and trust policy with payload-specific fetch/load verification:
+
+```python
+digest, publisher_id = publish_attested_dynamic_linearization_bundle_set_archive(
+    "linearizations.ttcla",
+    "https://registry.example",
+    private_seed,
+    token="registry-token",
+)
+
+linearizations = load_attested_dynamic_linearization_bundle_set_registry(
+    "https://registry.example",
+    digest,
+    publisher_id,
+    policy,
+    token="registry-token",
+)
+try:
+    state = linearizations.linearize([runtime_input])
+finally:
+    linearizations.close()
+```
+
+The unsigned ordinary and retained registry APIs are unchanged. Publisher authentication is an explicit opt-in rather than a silent change to the historical content-addressed transport contract.
 
 ## Key and publisher identity
 
@@ -137,7 +160,7 @@ Those are separate supply-chain/trust problems and must not be inferred from a v
 
 ## Evidence scope
 
-Regression coverage exercises deterministic canonical attestations, modified-signature and wrong-digest refusal, untrusted and revoked publisher rejection, invalid key/envelope handling, immutable attestation publication, post-PUT read-back verification, Bearer-authenticated real loopback HTTP transport, destination-not-published failure behavior, and compiler-free execution of a signed finite symbolic bundle family.
+Regression coverage exercises deterministic canonical attestations, modified-signature and wrong-digest refusal, untrusted and revoked publisher rejection, invalid key/envelope handling, immutable attestation publication, post-PUT read-back verification, Bearer-authenticated real loopback HTTP transport, destination-not-published failure behavior, compiler-free execution of a signed finite symbolic ordinary bundle family, compiler-free retained primal/pushforward/pullback execution, and fail-closed wrong-payload-kind handling.
 
 The full suite runs on Ubuntu and Windows with Python 3.11 and 3.13. The production candidate CI also installs and executes the standard `cryptography` Ed25519 implementation on each platform.
 
@@ -145,6 +168,6 @@ No cryptographic-strength proof, key-management certification, network-security 
 
 ## Phase boundary
 
-This closes the first caller-pinned publisher-authorization layer. Adding alternate encodings, signature algorithms, or key spellings without a new trust property would be format farming.
+This closes caller-pinned publisher authorization for both ordinary finite bundle archives and retained-linearization archives under one detached Ed25519 digest authorization protocol. Adding alternate encodings, signature algorithms, key spellings, or payload-specific trust transports without a new trust property would be format farming.
 
-Further deployment-security work should only proceed when it adds a separately testable trust property such as standardized freshness/rollback metadata or externally verifiable transparency. Otherwise the project should promote on an independent compiler/runtime frontier rather than accumulating home-grown supply-chain protocol surface.
+The next retained-linearization trust layer is signed release-channel freshness/rollback parity using the existing `ReleaseStateStore`, with rollback rejection before archive/attestation download. Threshold authorization and externally verifiable transparency remain later, separately testable properties.

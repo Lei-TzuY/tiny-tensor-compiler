@@ -14,7 +14,9 @@ from .ir import SymbolicDim
 from .native_bundle import NativeBundleExecutable
 from .native_bundle_archive import (
     NativeBundleSetArchiveExecutable,
+    NativeLinearizationBundleSetArchiveExecutable,
     load_dynamic_bundle_set_archive,
+    load_dynamic_linearization_bundle_set_archive,
 )
 from .native_bundle_attestation import (
     PublisherTrustPolicy,
@@ -32,8 +34,11 @@ from .native_bundle_registry import (
     _validate_timeout,
     _validate_token,
     fetch_dynamic_bundle_set_archive,
+    fetch_dynamic_linearization_bundle_set_archive,
     publish_dynamic_bundle_set_archive,
+    publish_dynamic_linearization_bundle_set_archive,
 )
+from .native_linearization_bundle_set import NativeLinearizationBundleExecutable
 
 _ATTESTATION_PATH = "v1/attestations/ed25519"
 _ATTESTATION_MEDIA_TYPE = "application/vnd.tiny-tensor-compiler.bundle-attestation+json"
@@ -115,6 +120,76 @@ class AttestedNativeBundleRegistryExecutable:
         return self.execute(inputs=inputs, out=out)
 
 
+class AttestedNativeLinearizationBundleRegistryExecutable:
+    """Compiler-free retained linearizations whose archive has verified publisher trust."""
+
+    def __init__(
+        self,
+        executable: NativeLinearizationBundleSetArchiveExecutable,
+        download_root: Path,
+        digest: str,
+        publisher_id: str,
+    ) -> None:
+        self._executable = executable
+        self._download_root = download_root
+        self._digest = digest
+        self._publisher_id = publisher_id
+        self._finalizer = weakref.finalize(
+            self,
+            _close_attested_registry_executable,
+            executable,
+            download_root,
+        )
+
+    @property
+    def digest(self) -> str:
+        return self._digest
+
+    @property
+    def publisher_id(self) -> str:
+        return self._publisher_id
+
+    @property
+    def symbolic_dims(self) -> tuple[str, ...]:
+        return self._executable.symbolic_dims
+
+    @property
+    def available_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        return self._executable.available_bindings
+
+    @property
+    def loaded_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        return self._executable.loaded_bindings
+
+    @property
+    def closed(self) -> bool:
+        return not self._finalizer.alive
+
+    def close(self) -> None:
+        if self._finalizer.alive:
+            self._finalizer()
+
+    def specialize(
+        self,
+        bindings: Mapping[SymbolicDim | str, int],
+    ) -> NativeLinearizationBundleExecutable:
+        if self.closed:
+            raise RuntimeError(
+                "attested native linearization registry executable is closed"
+            )
+        return self._executable.specialize(bindings)
+
+    def linearize(self, inputs: Sequence[Any]):
+        if self.closed:
+            raise RuntimeError(
+                "attested native linearization registry executable is closed"
+            )
+        return self._executable.linearize(inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()):
+        return self.linearize(inputs)
+
+
 def publish_attested_dynamic_bundle_set_archive(
     archive: str | os.PathLike[str],
     registry_url: str,
@@ -134,36 +209,43 @@ def publish_attested_dynamic_bundle_set_archive(
         timeout=timeout,
         max_bytes=max_bytes,
     )
-    public_key = publisher_public_key_from_private_key(private_key)
-    publisher_id = publisher_id_from_public_key(public_key)
-    attestation = create_archive_attestation(private_key, digest)
-    base_url = _normalize_registry_url(
+    return _publish_attestation_for_digest(
+        digest,
         registry_url,
-        allow_insecure_http=allow_insecure_http,
-    )
-    token = _validate_token(token)
-    timeout = _validate_timeout(timeout)
-    object_url = _attestation_url(base_url, publisher_id, digest)
-    _publish_immutable_attestation(
-        object_url,
-        attestation,
+        private_key,
         token=token,
+        allow_insecure_http=allow_insecure_http,
         timeout=timeout,
     )
-    remote = _download_attestation(object_url, token=token, timeout=timeout)
-    policy = PublisherTrustPolicy((public_key,))
-    try:
-        verify_archive_attestation(
-            remote,
-            digest,
-            policy,
-            expected_publisher=publisher_id,
-        )
-    except Exception as exc:
-        raise NativeBundleRegistryError(
-            "registry publisher attestation failed post-publication verification"
-        ) from exc
-    return digest, publisher_id
+
+
+def publish_attested_dynamic_linearization_bundle_set_archive(
+    archive: str | os.PathLike[str],
+    registry_url: str,
+    private_key: bytes,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = 512 * 1024 * 1024,
+) -> tuple[str, str]:
+    """Publish retained-linearization bytes plus immutable publisher authorization."""
+    digest = publish_dynamic_linearization_bundle_set_archive(
+        archive,
+        registry_url,
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+    return _publish_attestation_for_digest(
+        digest,
+        registry_url,
+        private_key,
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+    )
 
 
 def fetch_attested_dynamic_bundle_set_archive(
@@ -179,59 +261,47 @@ def fetch_attested_dynamic_bundle_set_archive(
     max_bytes: int = 512 * 1024 * 1024,
 ) -> Path:
     """Fetch an archive and publish it locally only after pinned publisher verification."""
-    normalized_publisher = normalize_publisher_id(publisher_id)
-    if not isinstance(trust_policy, PublisherTrustPolicy):
-        raise TypeError("trust_policy must be a PublisherTrustPolicy")
-    # Fail before network access when the requested publisher is unknown or revoked.
-    trust_policy.public_key_for(normalized_publisher)
-    base_url = _normalize_registry_url(
+    return _fetch_attested_archive(
         registry_url,
+        digest,
+        publisher_id,
+        destination,
+        trust_policy,
+        fetch_archive=fetch_dynamic_bundle_set_archive,
+        staged_name="payload.ttca",
+        token=token,
         allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
     )
-    token = _validate_token(token)
-    timeout = _validate_timeout(timeout)
-    destination_path = Path(destination).expanduser().resolve()
-    if destination_path.exists():
-        raise FileExistsError(
-            f"attested bundle registry destination already exists: {destination_path}"
-        )
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = Path(
-        tempfile.mkdtemp(
-            prefix=f".{destination_path.name}.attested-",
-            dir=destination_path.parent,
-        )
+
+
+def fetch_attested_dynamic_linearization_bundle_set_archive(
+    registry_url: str,
+    digest: str,
+    publisher_id: str,
+    destination: str | os.PathLike[str],
+    trust_policy: PublisherTrustPolicy,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = 512 * 1024 * 1024,
+) -> Path:
+    """Fetch retained-linearization bytes only after digest and publisher verification."""
+    return _fetch_attested_archive(
+        registry_url,
+        digest,
+        publisher_id,
+        destination,
+        trust_policy,
+        fetch_archive=fetch_dynamic_linearization_bundle_set_archive,
+        staged_name="payload.ttcla",
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
     )
-    staged_archive = staging_root / "payload.ttca"
-    try:
-        fetch_dynamic_bundle_set_archive(
-            base_url,
-            digest,
-            staged_archive,
-            token=token,
-            allow_insecure_http=allow_insecure_http,
-            timeout=timeout,
-            max_bytes=max_bytes,
-        )
-        attestation = _download_attestation(
-            _attestation_url(base_url, normalized_publisher, digest),
-            token=token,
-            timeout=timeout,
-        )
-        verify_archive_attestation(
-            attestation,
-            digest,
-            trust_policy,
-            expected_publisher=normalized_publisher,
-        )
-        if destination_path.exists():
-            raise FileExistsError(
-                f"attested bundle registry destination already exists: {destination_path}"
-            )
-        os.replace(staged_archive, destination_path)
-        return destination_path
-    finally:
-        shutil.rmtree(staging_root, ignore_errors=True)
 
 
 def load_attested_dynamic_bundle_set_registry(
@@ -270,6 +340,155 @@ def load_attested_dynamic_bundle_set_registry(
     except Exception:
         shutil.rmtree(download_root, ignore_errors=True)
         raise
+
+
+def load_attested_dynamic_linearization_bundle_set_registry(
+    registry_url: str,
+    digest: str,
+    publisher_id: str,
+    trust_policy: PublisherTrustPolicy,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = 512 * 1024 * 1024,
+) -> AttestedNativeLinearizationBundleRegistryExecutable:
+    """Load retained linearizations only after digest and publisher authorization checks."""
+    download_root = Path(
+        tempfile.mkdtemp(prefix="ttc-attested-linearization-registry-")
+    )
+    archive_path = download_root / "payload.ttcla"
+    try:
+        fetch_attested_dynamic_linearization_bundle_set_archive(
+            registry_url,
+            digest,
+            publisher_id,
+            archive_path,
+            trust_policy,
+            token=token,
+            allow_insecure_http=allow_insecure_http,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        executable = load_dynamic_linearization_bundle_set_archive(archive_path)
+        return AttestedNativeLinearizationBundleRegistryExecutable(
+            executable,
+            download_root,
+            digest,
+            normalize_publisher_id(publisher_id),
+        )
+    except Exception:
+        shutil.rmtree(download_root, ignore_errors=True)
+        raise
+
+
+def _publish_attestation_for_digest(
+    digest: str,
+    registry_url: str,
+    private_key: bytes,
+    *,
+    token: str | None,
+    allow_insecure_http: bool,
+    timeout: float,
+) -> tuple[str, str]:
+    public_key = publisher_public_key_from_private_key(private_key)
+    publisher_id = publisher_id_from_public_key(public_key)
+    attestation = create_archive_attestation(private_key, digest)
+    base_url = _normalize_registry_url(
+        registry_url,
+        allow_insecure_http=allow_insecure_http,
+    )
+    token = _validate_token(token)
+    timeout = _validate_timeout(timeout)
+    object_url = _attestation_url(base_url, publisher_id, digest)
+    _publish_immutable_attestation(
+        object_url,
+        attestation,
+        token=token,
+        timeout=timeout,
+    )
+    remote = _download_attestation(object_url, token=token, timeout=timeout)
+    policy = PublisherTrustPolicy((public_key,))
+    try:
+        verify_archive_attestation(
+            remote,
+            digest,
+            policy,
+            expected_publisher=publisher_id,
+        )
+    except Exception as exc:
+        raise NativeBundleRegistryError(
+            "registry publisher attestation failed post-publication verification"
+        ) from exc
+    return digest, publisher_id
+
+
+def _fetch_attested_archive(
+    registry_url: str,
+    digest: str,
+    publisher_id: str,
+    destination: str | os.PathLike[str],
+    trust_policy: PublisherTrustPolicy,
+    *,
+    fetch_archive: Any,
+    staged_name: str,
+    token: str | None,
+    allow_insecure_http: bool,
+    timeout: float,
+    max_bytes: int,
+) -> Path:
+    normalized_publisher = normalize_publisher_id(publisher_id)
+    if not isinstance(trust_policy, PublisherTrustPolicy):
+        raise TypeError("trust_policy must be a PublisherTrustPolicy")
+    trust_policy.public_key_for(normalized_publisher)
+    base_url = _normalize_registry_url(
+        registry_url,
+        allow_insecure_http=allow_insecure_http,
+    )
+    token = _validate_token(token)
+    timeout = _validate_timeout(timeout)
+    destination_path = Path(destination).expanduser().resolve()
+    if destination_path.exists():
+        raise FileExistsError(
+            f"attested bundle registry destination already exists: {destination_path}"
+        )
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination_path.name}.attested-",
+            dir=destination_path.parent,
+        )
+    )
+    staged_archive = staging_root / staged_name
+    try:
+        fetch_archive(
+            base_url,
+            digest,
+            staged_archive,
+            token=token,
+            allow_insecure_http=allow_insecure_http,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        attestation = _download_attestation(
+            _attestation_url(base_url, normalized_publisher, digest),
+            token=token,
+            timeout=timeout,
+        )
+        verify_archive_attestation(
+            attestation,
+            digest,
+            trust_policy,
+            expected_publisher=normalized_publisher,
+        )
+        if destination_path.exists():
+            raise FileExistsError(
+                f"attested bundle registry destination already exists: {destination_path}"
+            )
+        os.replace(staged_archive, destination_path)
+        return destination_path
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
 
 
 def _publish_immutable_attestation(
