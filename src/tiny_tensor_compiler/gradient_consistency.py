@@ -192,6 +192,35 @@ def _generate_input(rng: _SplitMix64, side: int) -> np.ndarray:
     return _freeze_array(np.asarray(values, dtype=np.float64).reshape((side, side)))
 
 
+def _materialize_tensor(
+    spec: _GradientCaseSpec,
+    *,
+    function_name: str = "gradient_consistency_tensor",
+) -> tuple[Module, tuple[np.ndarray, np.ndarray]]:
+    builder = GraphBuilder(function_name)
+    value = builder.input((spec.side, spec.side), DType.FLOAT64)
+    rhs = builder.input((spec.side, spec.side), DType.FLOAT64)
+    current = value
+
+    for opcode in spec.operations:
+        if opcode == "add_rhs":
+            current = current + rhs
+        elif opcode == "mul_rhs":
+            current = current * rhs
+        elif opcode == "square":
+            current = current * current
+        elif opcode == "transpose":
+            current = current.transpose((1, 0))
+        elif opcode == "reverse0":
+            current = current.reverse(0)
+        elif opcode == "reverse1":
+            current = current.reverse(1)
+        else:
+            raise RuntimeError(f"unsupported gradient consistency opcode: {opcode}")
+
+    return builder.finish(current), spec.inputs
+
+
 def _materialize(
     spec: _GradientCaseSpec,
 ) -> tuple[Module, tuple[np.ndarray, np.ndarray]]:
