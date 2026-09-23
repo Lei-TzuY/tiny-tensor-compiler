@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 import threading
-
-import numpy as np
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
+
+import numpy as np
 
 from .admission import (
     CompileBudget,
@@ -24,8 +24,8 @@ from .backends.cpu import execute_loop
 from .compiler_control import normalize_compile_deadline, normalize_compiler_timeout
 from .fusion_planner import fuse_elementwise
 from .input_binding import BorrowedLoopProgram
-from .input_validation import prepare_runtime_inputs
 from .input_binding import borrow_inputs as bind_borrowed_inputs
+from .input_validation import prepare_runtime_inputs
 from .ir import Module, SymbolicDim
 from .loop_ir import LoopProgram, lower_to_loops
 from .lowering import lower_to_cpu
