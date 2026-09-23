@@ -17,8 +17,11 @@ from .ir import SymbolicDim
 from .native_bundle import NativeBundleExecutable
 from .native_bundle_archive import (
     NativeBundleSetArchiveExecutable,
+    NativeLinearizationBundleSetArchiveExecutable,
     load_dynamic_bundle_set_archive,
+    load_dynamic_linearization_bundle_set_archive,
 )
+from .native_linearization_bundle_set import NativeLinearizationBundleExecutable
 
 _REGISTRY_PATH = "v1/archives/sha256"
 _ARCHIVE_MEDIA_TYPE = "application/vnd.tiny-tensor-compiler.bundle-archive"
@@ -100,12 +103,77 @@ class NativeBundleRegistryExecutable:
         return self.execute(inputs=inputs, out=out)
 
 
+class NativeLinearizationBundleRegistryExecutable:
+    """Compiler-free retained linearizations backed by one verified registry download."""
+
+    def __init__(
+        self,
+        executable: NativeLinearizationBundleSetArchiveExecutable,
+        download_root: Path,
+        digest: str,
+    ) -> None:
+        self._executable = executable
+        self._download_root = download_root
+        self._digest = digest
+        self._finalizer = weakref.finalize(
+            self,
+            _close_registry_executable,
+            executable,
+            download_root,
+        )
+
+    @property
+    def digest(self) -> str:
+        return self._digest
+
+    @property
+    def symbolic_dims(self) -> tuple[str, ...]:
+        return self._executable.symbolic_dims
+
+    @property
+    def available_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        return self._executable.available_bindings
+
+    @property
+    def loaded_bindings(self) -> tuple[tuple[tuple[str, int], ...], ...]:
+        return self._executable.loaded_bindings
+
+    @property
+    def closed(self) -> bool:
+        return not self._finalizer.alive
+
+    def close(self) -> None:
+        """Close loaded components and remove the private downloaded archive."""
+        if self._finalizer.alive:
+            self._finalizer()
+
+    def specialize(
+        self,
+        bindings: Mapping[SymbolicDim | str, int],
+    ) -> NativeLinearizationBundleExecutable:
+        if self.closed:
+            raise RuntimeError("native linearization registry executable is closed")
+        return self._executable.specialize(bindings)
+
+    def linearize(self, inputs: Sequence[Any]):
+        if self.closed:
+            raise RuntimeError("native linearization registry executable is closed")
+        return self._executable.linearize(inputs)
+
+    def __call__(self, inputs: Sequence[Any] = ()):
+        return self.linearize(inputs)
+
+
 def digest_dynamic_bundle_set_archive(archive: str | os.PathLike[str]) -> str:
     """Return the canonical SHA-256 content address for one archive file."""
-    archive_path = Path(archive).expanduser().resolve()
-    if not archive_path.is_file():
-        raise FileNotFoundError(f"native bundle archive does not exist: {archive_path}")
-    return f"sha256:{_sha256_file(archive_path)}"
+    return _digest_archive(archive)
+
+
+def digest_dynamic_linearization_bundle_set_archive(
+    archive: str | os.PathLike[str],
+) -> str:
+    """Return the canonical SHA-256 content address for retained linearizations."""
+    return _digest_archive(archive)
 
 
 def publish_dynamic_bundle_set_archive(
@@ -117,73 +185,37 @@ def publish_dynamic_bundle_set_archive(
     timeout: float = 30.0,
     max_bytes: int = _DEFAULT_MAX_BYTES,
 ) -> str:
-    """Publish one verified archive to its immutable content-addressed registry URL."""
-    archive_path = Path(archive).expanduser().resolve()
-    if not archive_path.is_file():
-        raise FileNotFoundError(f"native bundle archive does not exist: {archive_path}")
-    max_bytes = _validate_max_bytes(max_bytes)
-    timeout = _validate_timeout(timeout)
-    base_url = _normalize_registry_url(registry_url, allow_insecure_http=allow_insecure_http)
-    token = _validate_token(token)
-
-    size = archive_path.stat().st_size
-    if size > max_bytes:
-        raise NativeBundleRegistryError(
-            f"native bundle archive exceeds registry transfer limit of {max_bytes} bytes"
-        )
-
-    verified = load_dynamic_bundle_set_archive(archive_path)
-    verified.close()
-    digest = digest_dynamic_bundle_set_archive(archive_path)
-    object_url = _object_url(base_url, digest)
-    payload = archive_path.read_bytes()
-
-    headers = _request_headers(token)
-    headers.update(
-        {
-            "Content-Length": str(len(payload)),
-            "Content-Type": _ARCHIVE_MEDIA_TYPE,
-            "If-None-Match": "*",
-            "X-TTC-Content-SHA256": digest.removeprefix("sha256:"),
-        }
+    """Publish one verified dynamic bundle archive by immutable digest."""
+    return _publish_verified_archive(
+        archive,
+        registry_url,
+        verify_archive=load_dynamic_bundle_set_archive,
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
     )
-    request = urllib.request.Request(object_url, data=payload, headers=headers, method="PUT")
-    opener = _registry_opener()
-    already_exists = False
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            if response.status not in {200, 201, 204}:
-                raise NativeBundleRegistryError(
-                    f"registry publish returned unexpected HTTP status {response.status}"
-                )
-    except urllib.error.HTTPError as exc:
-        if exc.code in {409, 412}:
-            already_exists = True
-        else:
-            raise NativeBundleRegistryError(
-                f"registry publish failed with HTTP status {exc.code}"
-            ) from exc
-    except urllib.error.URLError as exc:
-        raise NativeBundleRegistryError("registry publish transport failed") from exc
 
-    # Never trust the upload response alone. Read the immutable object back, verify the
-    # caller-derived digest, and run the existing archive/child-ABI verifier over the
-    # exact remote bytes before declaring publication successful. This also makes an
-    # idempotent 409/412 safe only when the pre-existing object is coherent.
-    try:
-        _verify_remote_object(
-            object_url,
-            digest,
-            token=token,
-            timeout=timeout,
-            max_bytes=max_bytes,
-        )
-    except Exception as exc:
-        state = "pre-existing" if already_exists else "published"
-        raise NativeBundleRegistryError(
-            f"registry {state} object failed post-publication verification"
-        ) from exc
-    return digest
+
+def publish_dynamic_linearization_bundle_set_archive(
+    archive: str | os.PathLike[str],
+    registry_url: str,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+) -> str:
+    """Publish verified retained-linearization archive bytes by immutable digest."""
+    return _publish_verified_archive(
+        archive,
+        registry_url,
+        verify_archive=load_dynamic_linearization_bundle_set_archive,
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
 
 
 def fetch_dynamic_bundle_set_archive(
@@ -196,48 +228,40 @@ def fetch_dynamic_bundle_set_archive(
     timeout: float = 30.0,
     max_bytes: int = _DEFAULT_MAX_BYTES,
 ) -> Path:
-    """Fetch, digest-check, fully verify, and atomically publish one archive locally."""
-    normalized_digest = _normalize_digest(digest)
-    base_url = _normalize_registry_url(registry_url, allow_insecure_http=allow_insecure_http)
-    token = _validate_token(token)
-    timeout = _validate_timeout(timeout)
-    max_bytes = _validate_max_bytes(max_bytes)
-    destination_path = Path(destination).expanduser().resolve()
-    if destination_path.exists():
-        raise FileExistsError(
-            f"native bundle registry destination already exists: {destination_path}"
-        )
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
-
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{destination_path.name}.download-",
-        suffix=".tmp",
-        dir=destination_path.parent,
+    """Fetch, digest-check, fully verify, and atomically publish a bundle archive."""
+    return _fetch_verified_archive(
+        registry_url,
+        digest,
+        destination,
+        verify_archive=load_dynamic_bundle_set_archive,
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
     )
-    os.close(descriptor)
-    temporary_path = Path(temporary_name)
-    published = False
-    try:
-        _download_registry_object(
-            _object_url(base_url, normalized_digest),
-            normalized_digest,
-            temporary_path,
-            token=token,
-            timeout=timeout,
-            max_bytes=max_bytes,
-        )
-        verified = load_dynamic_bundle_set_archive(temporary_path)
-        verified.close()
-        if destination_path.exists():
-            raise FileExistsError(
-                f"native bundle registry destination already exists: {destination_path}"
-            )
-        os.replace(temporary_path, destination_path)
-        published = True
-        return destination_path
-    finally:
-        if not published:
-            temporary_path.unlink(missing_ok=True)
+
+
+def fetch_dynamic_linearization_bundle_set_archive(
+    registry_url: str,
+    digest: str,
+    destination: str | os.PathLike[str],
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+) -> Path:
+    """Fetch and atomically publish one verified retained-linearization archive."""
+    return _fetch_verified_archive(
+        registry_url,
+        digest,
+        destination,
+        verify_archive=load_dynamic_linearization_bundle_set_archive,
+        token=token,
+        allow_insecure_http=allow_insecure_http,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
 
 
 def load_dynamic_bundle_set_registry(
@@ -273,10 +297,198 @@ def load_dynamic_bundle_set_registry(
         raise
 
 
+def load_dynamic_linearization_bundle_set_registry(
+    registry_url: str,
+    digest: str,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+) -> NativeLinearizationBundleRegistryExecutable:
+    """Download and load compiler-free retained linearizations by content address."""
+    normalized_digest = _normalize_digest(digest)
+    base_url = _normalize_registry_url(
+        registry_url,
+        allow_insecure_http=allow_insecure_http,
+    )
+    token = _validate_token(token)
+    timeout = _validate_timeout(timeout)
+    max_bytes = _validate_max_bytes(max_bytes)
+    download_root = Path(tempfile.mkdtemp(prefix="ttc-linearization-registry-"))
+    archive_path = download_root / "payload.ttcla"
+    try:
+        _download_registry_object(
+            _object_url(base_url, normalized_digest),
+            normalized_digest,
+            archive_path,
+            token=token,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        executable = load_dynamic_linearization_bundle_set_archive(archive_path)
+        return NativeLinearizationBundleRegistryExecutable(
+            executable,
+            download_root,
+            normalized_digest,
+        )
+    except Exception:
+        shutil.rmtree(download_root, ignore_errors=True)
+        raise
+
+
+def _digest_archive(archive: str | os.PathLike[str]) -> str:
+    archive_path = Path(archive).expanduser().resolve()
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"native bundle archive does not exist: {archive_path}")
+    return f"sha256:{_sha256_file(archive_path)}"
+
+
+def _publish_verified_archive(
+    archive: str | os.PathLike[str],
+    registry_url: str,
+    *,
+    verify_archive: Any,
+    token: str | None,
+    allow_insecure_http: bool,
+    timeout: float,
+    max_bytes: int,
+) -> str:
+    archive_path = Path(archive).expanduser().resolve()
+    if not archive_path.is_file():
+        raise FileNotFoundError(f"native bundle archive does not exist: {archive_path}")
+    max_bytes = _validate_max_bytes(max_bytes)
+    timeout = _validate_timeout(timeout)
+    base_url = _normalize_registry_url(
+        registry_url,
+        allow_insecure_http=allow_insecure_http,
+    )
+    token = _validate_token(token)
+
+    size = archive_path.stat().st_size
+    if size > max_bytes:
+        raise NativeBundleRegistryError(
+            f"native bundle archive exceeds registry transfer limit of {max_bytes} bytes"
+        )
+
+    verified = verify_archive(archive_path)
+    verified.close()
+    digest = _digest_archive(archive_path)
+    object_url = _object_url(base_url, digest)
+    payload = archive_path.read_bytes()
+
+    headers = _request_headers(token)
+    headers.update(
+        {
+            "Content-Length": str(len(payload)),
+            "Content-Type": _ARCHIVE_MEDIA_TYPE,
+            "If-None-Match": "*",
+            "X-TTC-Content-SHA256": digest.removeprefix("sha256:"),
+        }
+    )
+    request = urllib.request.Request(
+        object_url,
+        data=payload,
+        headers=headers,
+        method="PUT",
+    )
+    opener = _registry_opener()
+    already_exists = False
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            if response.status not in {200, 201, 204}:
+                raise NativeBundleRegistryError(
+                    f"registry publish returned unexpected HTTP status {response.status}"
+                )
+    except urllib.error.HTTPError as exc:
+        if exc.code in {409, 412}:
+            already_exists = True
+        else:
+            raise NativeBundleRegistryError(
+                f"registry publish failed with HTTP status {exc.code}"
+            ) from exc
+    except urllib.error.URLError as exc:
+        raise NativeBundleRegistryError("registry publish transport failed") from exc
+
+    try:
+        _verify_remote_object(
+            object_url,
+            digest,
+            verify_archive=verify_archive,
+            token=token,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+    except Exception as exc:
+        state = "pre-existing" if already_exists else "published"
+        raise NativeBundleRegistryError(
+            f"registry {state} object failed post-publication verification"
+        ) from exc
+    return digest
+
+
+def _fetch_verified_archive(
+    registry_url: str,
+    digest: str,
+    destination: str | os.PathLike[str],
+    *,
+    verify_archive: Any,
+    token: str | None,
+    allow_insecure_http: bool,
+    timeout: float,
+    max_bytes: int,
+) -> Path:
+    normalized_digest = _normalize_digest(digest)
+    base_url = _normalize_registry_url(
+        registry_url,
+        allow_insecure_http=allow_insecure_http,
+    )
+    token = _validate_token(token)
+    timeout = _validate_timeout(timeout)
+    max_bytes = _validate_max_bytes(max_bytes)
+    destination_path = Path(destination).expanduser().resolve()
+    if destination_path.exists():
+        raise FileExistsError(
+            f"native bundle registry destination already exists: {destination_path}"
+        )
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination_path.name}.download-",
+        suffix=".tmp",
+        dir=destination_path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    published = False
+    try:
+        _download_registry_object(
+            _object_url(base_url, normalized_digest),
+            normalized_digest,
+            temporary_path,
+            token=token,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        verified = verify_archive(temporary_path)
+        verified.close()
+        if destination_path.exists():
+            raise FileExistsError(
+                f"native bundle registry destination already exists: {destination_path}"
+            )
+        os.replace(temporary_path, destination_path)
+        published = True
+        return destination_path
+    finally:
+        if not published:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _verify_remote_object(
     object_url: str,
     digest: str,
     *,
+    verify_archive: Any,
     token: str | None,
     timeout: float,
     max_bytes: int,
@@ -292,7 +504,7 @@ def _verify_remote_object(
             timeout=timeout,
             max_bytes=max_bytes,
         )
-        executable = load_dynamic_bundle_set_archive(archive_path)
+        executable = verify_archive(archive_path)
         executable.close()
     finally:
         shutil.rmtree(root, ignore_errors=True)
