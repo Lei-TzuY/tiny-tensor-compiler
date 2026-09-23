@@ -18,7 +18,7 @@ def _dynamic_quartic_module():
     builder = GraphBuilder("packaged-linearization")
     x = builder.input((batch, 3), dtype="float64")
     squared = x * x
-    return batch, builder.finish(squared * squared)
+    return batch, builder.finish((squared * squared).sum())
 
 
 def _input(batch: int) -> np.ndarray:
@@ -60,14 +60,19 @@ def test_linearization_bundle_set_executes_compiler_free_retained_state(
         frozen = values.copy()
         state = executable.linearize((values,))
         assert executable.loaded_bindings == ((("B", 2),),)
-        np.testing.assert_allclose(state.primal, frozen**4, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(
+            state.primal,
+            np.array(np.sum(frozen**4), dtype=np.float64),
+            rtol=0.0,
+            atol=0.0,
+        )
 
         values[:] = 1234.0
         tangent = np.arange(6, dtype=np.float64).reshape(2, 3) * -0.5 + 2.0
-        cotangent = np.arange(6, dtype=np.float64).reshape(2, 3) * 0.125 + 0.75
+        cotangent = np.array(0.75, dtype=np.float64)
         np.testing.assert_allclose(
             state.pushforward((tangent,)),
-            4.0 * frozen**3 * tangent,
+            np.array(np.sum(4.0 * frozen**3 * tangent), dtype=np.float64),
             rtol=0.0,
             atol=0.0,
         )
@@ -81,8 +86,14 @@ def test_linearization_bundle_set_executes_compiler_free_retained_state(
         assert state.pullback_query_count == 1
 
         second = executable.specialize({"B": 5})
-        state5 = second.linearize((_input(5),))
-        np.testing.assert_allclose(state5.primal, _input(5) ** 4, rtol=0.0, atol=0.0)
+        values5 = _input(5)
+        state5 = second.linearize((values5,))
+        np.testing.assert_allclose(
+            state5.primal,
+            np.array(np.sum(values5**4), dtype=np.float64),
+            rtol=0.0,
+            atol=0.0,
+        )
         assert executable.loaded_bindings == ((("B", 2),), (("B", 5),))
     finally:
         executable.close()
