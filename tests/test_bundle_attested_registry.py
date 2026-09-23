@@ -443,7 +443,7 @@ def test_attested_retained_loader_rejects_ordinary_bundle_payload_kind(
         )
         with pytest.raises(
             NativeBundleArchiveError,
-            match="retained-linearization archive payload kind is invalid",
+            match="unsupported native bundle archive payload kind",
         ):
             load_attested_dynamic_linearization_bundle_set_registry(
                 registry,
