@@ -621,10 +621,6 @@ def _decode_components(
             "linearization bundle components are malformed"
         )
 
-    canonical_paths = {
-        f"{_VARIANTS_DIRECTORY}/{index:04d}/{role}"
-        for role in _COMPONENT_ROLES
-    }
     seen_paths: set[str] = set()
     paths: list[Path] = []
     abis: dict[str, tuple[tuple[TensorType, ...], tuple[TensorType, ...]]] = {}
@@ -640,7 +636,10 @@ def _decode_components(
                 f"linearization {role} component descriptor is malformed"
             )
         relative_path = descriptor["path"]
-        if not isinstance(relative_path, str) or relative_path not in canonical_paths:
+        expected_relative_path = (
+            f"{_VARIANTS_DIRECTORY}/{index:04d}/{role}"
+        )
+        if relative_path != expected_relative_path:
             raise NativeLinearizationBundleSetError(
                 f"linearization {role} component path is not canonical"
             )
@@ -697,10 +696,6 @@ def _decode_components(
         paths.append(component_path)
         abis[role] = (inputs, outputs)
 
-    if seen_paths != canonical_paths:
-        raise NativeLinearizationBundleSetError(
-            "linearization component path set is incomplete"
-        )
     return (paths[0], paths[1], paths[2]), abis
 
 
