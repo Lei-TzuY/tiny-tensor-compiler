@@ -148,15 +148,34 @@ def test_reusable_pushforward_replays_binary_into_add_generation():
     assert state.query_count == 2
 
 
-def test_reusable_pushforward_keeps_binary_inplace_fail_closed():
-    builder = GraphBuilder("reusable-pushforward-binary-inplace")
+def test_reusable_pushforward_replays_binary_inplace_add_generation():
+    builder = GraphBuilder("reusable-pushforward-binary-inplace-add")
     base = builder.input((4,), DType.FLOAT64)
     source = builder.input((4,), DType.FLOAT64)
     root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
     module = builder.finish(root.binary_inplace(source, operator="add"))
 
-    with pytest.raises(
-        AutodiffError,
-        match="reusable pushforward linearization.*arithmetic write effects",
-    ):
-        compile_pushforward_linearization(module, wrt=(0, 1))
+    executable = compile_pushforward_linearization(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    source_value = np.array([5.0, 6.0, -7.0, 8.0], dtype=np.float64)
+    state = executable.linearize((base_value, source_value))
+
+    base_value[...] = 1000.0
+    source_value[...] = -1000.0
+
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0], dtype=np.float64)
+    source_tangent = np.array([4.0, -5.0, 6.0, -7.0], dtype=np.float64)
+    expected = base_tangent + source_tangent
+    np.testing.assert_allclose(
+        state.pushforward((base_tangent, source_tangent)),
+        expected,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        state.pushforward((-base_tangent, 2.0 * source_tangent)),
+        -base_tangent + 2.0 * source_tangent,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert state.query_count == 2
