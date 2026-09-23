@@ -178,7 +178,7 @@ def _pushforward_linearization_modules(
             result in ancestors for result in op.results
         )
         if include:
-            if op.opcode in {"copy_into", "binary_into"}:
+            if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
                 _capture_reusable_prewrite_tape_values(
                     primal_function,
                     op,
@@ -303,6 +303,31 @@ def _pushforward_linearization_modules(
             ).results[0]
             continue
 
+        if op.opcode == "binary_inplace":
+            root, source = op.operands
+            if op.attrs["operator"] == "add":
+                tangents[result] = _add(
+                    push_function,
+                    tangents[root],
+                    tangents[source],
+                )
+                continue
+
+            try:
+                root_primal = primal_values[root]
+                source_primal = primal_values[source]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal autodiff error: reusable pushforward is missing "
+                    "a binary_inplace primal tape value"
+                ) from exc
+            tangents[result] = _add(
+                push_function,
+                _multiply(push_function, tangents[root], source_primal),
+                _multiply(push_function, root_primal, tangents[source]),
+            )
+            continue
+
         if op.opcode == "binary_into":
             root, target, source = op.operands
             if op.attrs["operator"] == "add":
@@ -357,10 +382,6 @@ def _validate_reusable_linearization_slice(
 ) -> None:
     producers = {value.producer for value in ancestors if value.producer is not None}
     for op in producers:
-        if op.opcode == "binary_inplace":
-            raise AutodiffError(
-                f"reusable {context} linearization does not yet support full-root arithmetic write effects"
-            )
         if op.opcode in {"copy_into", "binary_into"}:
             _direct_slice_write_attrs(
                 op,
@@ -379,6 +400,7 @@ def _validate_reusable_linearization_slice(
             "transpose",
             "copy_into",
             "binary_into",
+            "binary_inplace",
         }:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on reusable {context} slice"
@@ -405,9 +427,9 @@ def _capture_reusable_prewrite_tape_values(
     tape_values: tuple[Value, ...],
     retained_tape: dict[Value, Value],
 ) -> None:
-    if op.opcode not in {"copy_into", "binary_into"}:
+    if op.opcode not in {"copy_into", "binary_into", "binary_inplace"}:
         raise RuntimeError(
-            "internal autodiff error: expected partial write for reusable tape snapshot"
+            "internal autodiff error: expected write effect for reusable tape snapshot"
         )
     root = op.operands[0]
     for value in tape_values:
@@ -437,6 +459,9 @@ def _collect_reusable_linearization_tape_values(
         elif op.opcode == "binary_into" and op.attrs["operator"] == "mul":
             _root, target, source = op.operands
             candidates = (target, source)
+        elif op.opcode == "binary_inplace" and op.attrs["operator"] == "mul":
+            root, source = op.operands
+            candidates = (root, source)
         else:
             continue
         for operand in candidates:
@@ -492,7 +517,7 @@ def _pullback_linearization_modules(
             result in ancestors for result in op.results
         )
         if include:
-            if op.opcode in {"copy_into", "binary_into"}:
+            if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
                 _capture_reusable_prewrite_tape_values(
                     primal_function,
                     op,
@@ -739,6 +764,26 @@ def _propagate_reusable_pullback_adjoint(
             _scatter_slice(function, upstream, operand.type, op.attrs),
         )
         return
+    if op.opcode == "binary_inplace":
+        root, source = op.operands
+        if op.attrs["operator"] == "add":
+            root_contribution = upstream
+            source_contribution = upstream
+        else:
+            try:
+                root_primal = primal_values[root]
+                source_primal = primal_values[source]
+            except KeyError as exc:
+                raise RuntimeError(
+                    "internal autodiff error: reusable pullback is missing "
+                    "a binary_inplace primal tape value"
+                ) from exc
+            root_contribution = _multiply(function, upstream, source_primal)
+            source_contribution = _multiply(function, upstream, root_primal)
+        _accumulate(function, gradients, root, root_contribution)
+        _accumulate(function, gradients, source, source_contribution)
+        return
+
     if op.opcode == "copy_into":
         root, target, source = op.operands
         attrs = _direct_slice_write_attrs(
