@@ -54,7 +54,7 @@ def test_reusable_pullback_freezes_primal_and_reuses_reverse_tape():
     assert state.query_count == 2
 
 
-def test_reusable_pullback_rejects_writable_effects_until_generation_tape_is_first_class():
+def test_reusable_pullback_replays_direct_copy_cotangent_generation():
     builder = GraphBuilder("reusable-pullback-write")
     base = builder.input((6,), DType.FLOAT64)
     patch = builder.input((3,), DType.FLOAT64)
@@ -62,8 +62,41 @@ def test_reusable_pullback_rejects_writable_effects_until_generation_tape_is_fir
     target = root.slice(axis=0, start=1, stop=6, step=2)
     module = builder.finish(root.copy_into(target, patch))
 
+    executable = compile_pullback_linearization(module, wrt=(0, 1))
+    state = executable.linearize(
+        (
+            np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64),
+            np.array([7.0, 8.0, 9.0], dtype=np.float64),
+        )
+    )
+
+    cotangent = np.array([0.5, -2.0, 3.0, 4.0, -1.5, 6.0], dtype=np.float64)
+    expected_base = np.array(cotangent, copy=True)
+    expected_base[1:6:2] = 0.0
+    expected_patch = cotangent[1:6:2]
+
+    actual = state.pullback(cotangent)
+    assert isinstance(actual, tuple)
+    np.testing.assert_allclose(actual[0], expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(actual[1], expected_patch, rtol=0.0, atol=0.0)
+
+    second = state.pullback(-cotangent)
+    assert isinstance(second, tuple)
+    np.testing.assert_allclose(second[0], -expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(second[1], -expected_patch, rtol=0.0, atol=0.0)
+    assert state.query_count == 2
+
+
+def test_reusable_pullback_keeps_arithmetic_writes_fail_closed():
+    builder = GraphBuilder("reusable-pullback-binary-write")
+    base = builder.input((6,), DType.FLOAT64)
+    patch = builder.input((3,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    module = builder.finish(root.binary_into(target, patch, operator="add"))
+
     with pytest.raises(
         AutodiffError,
-        match="reusable pullback linearization.*write effects",
+        match="reusable pullback linearization.*arithmetic write effects",
     ):
         compile_pullback_linearization(module, wrt=(0, 1))

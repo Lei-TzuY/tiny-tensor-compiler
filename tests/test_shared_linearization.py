@@ -90,7 +90,7 @@ def test_shared_linearization_reuses_one_frozen_tape_for_pushforward_and_pullbac
     assert state.pullback_query_count == 2
 
 
-def test_shared_linearization_rejects_writable_effects_until_retained_generation_tape_is_shared():
+def test_shared_linearization_retains_copy_generation_for_repeated_queries():
     builder = GraphBuilder("shared-linearization-write")
     base = builder.input((6,), DType.FLOAT64)
     patch = builder.input((3,), DType.FLOAT64)
@@ -98,8 +98,135 @@ def test_shared_linearization_rejects_writable_effects_until_retained_generation
     target = root.slice(axis=0, start=1, stop=6, step=2)
     module = builder.finish(root.copy_into(target, patch))
 
+    executable = compile_linearization(module, wrt=(0, 1))
+
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    patch_value = np.array([7.0, 8.0, 9.0], dtype=np.float64)
+    frozen_base = np.array(base_value, copy=True)
+    frozen_patch = np.array(patch_value, copy=True)
+
+    expected_primal = np.array(frozen_base, copy=True)
+    expected_primal[1:6:2] = frozen_patch
+
+    state = executable.linearize((base_value, patch_value))
+    np.testing.assert_allclose(state.primal, expected_primal, rtol=0.0, atol=0.0)
+
+    base_value[...] = 1000.0
+    patch_value[...] = -1000.0
+
+    base_tangent = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+    patch_tangent = np.array([11.0, -13.0, 17.0], dtype=np.float64)
+    expected_pushforward = np.array(base_tangent, copy=True)
+    expected_pushforward[1:6:2] = patch_tangent
+
+    actual_pushforward = state.pushforward((base_tangent, patch_tangent))
+    np.testing.assert_allclose(
+        actual_pushforward,
+        expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    cotangent = np.array([0.5, -2.0, 3.0, 4.0, -1.5, 6.0], dtype=np.float64)
+    expected_base = np.array(cotangent, copy=True)
+    expected_base[1:6:2] = 0.0
+    expected_patch = cotangent[1:6:2]
+
+    actual_pullback = state.pullback(cotangent)
+    assert isinstance(actual_pullback, tuple)
+    np.testing.assert_allclose(actual_pullback[0], expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(actual_pullback[1], expected_patch, rtol=0.0, atol=0.0)
+
+    second_pushforward = state.pushforward((-base_tangent, 2.0 * patch_tangent))
+    expected_second_pushforward = -np.array(base_tangent, copy=True)
+    expected_second_pushforward[1:6:2] = 2.0 * patch_tangent
+    np.testing.assert_allclose(
+        second_pushforward,
+        expected_second_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    second_pullback = state.pullback(-cotangent)
+    np.testing.assert_allclose(second_pullback[0], -expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(second_pullback[1], -expected_patch, rtol=0.0, atol=0.0)
+
+    assert state.pushforward_query_count == 2
+    assert state.pullback_query_count == 2
+
+
+
+def test_shared_linearization_retains_prewrite_copy_primal_generation():
+    builder = GraphBuilder("shared-linearization-prewrite-copy")
+    base = builder.input((6,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    source = target * target
+    module = builder.finish(root.copy_into(target, source))
+
+    executable = compile_linearization(module, wrt=(0,))
+    assert executable.tape_value_count == 1
+
+    base_value = np.array([1.0, -2.0, 3.0, -4.0, 5.0, -6.0], dtype=np.float64)
+    frozen_base = np.array(base_value, copy=True)
+    expected_primal = np.array(frozen_base, copy=True)
+    expected_primal[1:6:2] = frozen_base[1:6:2] ** 2
+
+    state = executable.linearize((base_value,))
+    np.testing.assert_allclose(state.primal, expected_primal, rtol=0.0, atol=0.0)
+
+    base_value[...] = 1000.0
+
+    tangent = np.array([2.0, 3.0, -4.0, 0.25, 7.0, -5.0], dtype=np.float64)
+    expected_pushforward = np.array(tangent, copy=True)
+    expected_pushforward[1:6:2] = (
+        2.0 * frozen_base[1:6:2] * tangent[1:6:2]
+    )
+    np.testing.assert_allclose(
+        state.pushforward((tangent,)),
+        expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    cotangent = np.array([0.5, -2.0, 3.0, 4.0, -1.5, 6.0], dtype=np.float64)
+    expected_pullback = np.array(cotangent, copy=True)
+    expected_pullback[1:6:2] = (
+        2.0 * frozen_base[1:6:2] * cotangent[1:6:2]
+    )
+    np.testing.assert_allclose(
+        state.pullback(cotangent),
+        expected_pullback,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    np.testing.assert_allclose(
+        state.pushforward((-tangent,)),
+        -expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        state.pullback(-cotangent),
+        -expected_pullback,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert state.pushforward_query_count == 2
+    assert state.pullback_query_count == 2
+
+
+def test_shared_linearization_keeps_arithmetic_writes_fail_closed():
+    builder = GraphBuilder("shared-linearization-binary-write")
+    base = builder.input((6,), DType.FLOAT64)
+    patch = builder.input((3,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    target = root.slice(axis=0, start=1, stop=6, step=2)
+    module = builder.finish(root.binary_into(target, patch, operator="add"))
+
     with pytest.raises(
         AutodiffError,
-        match="reusable shared linearization.*write effects",
+        match="reusable shared linearization.*arithmetic write effects",
     ):
         compile_linearization(module, wrt=(0, 1))

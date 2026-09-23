@@ -144,7 +144,7 @@ def _pushforward_linearization_modules(
     output_index: int = 0,
     wrt: Sequence[int] = (0,),
 ) -> tuple[Module, Module, int]:
-    """Split one static pure JVP into a one-shot primal tape and reusable pushforward."""
+    """Split one bounded static JVP into a one-shot retained tape and reusable pushforward."""
     if not isinstance(module, Module):
         raise TypeError("reusable pushforward linearization requires a Module")
     verify(module)
@@ -170,6 +170,7 @@ def _pushforward_linearization_modules(
 
     primal_function = Function(f"{module.function.name}_linearize_primal")
     primal_map: dict[Value, Value] = {}
+    retained_tape: dict[Value, Value] = {}
     for op in module.function.ops:
         if op.opcode == "return":
             continue
@@ -177,6 +178,14 @@ def _pushforward_linearization_modules(
             result in ancestors for result in op.results
         )
         if include:
+            if op.opcode == "copy_into":
+                _capture_reusable_prewrite_tape_values(
+                    primal_function,
+                    op,
+                    primal_map,
+                    tape_values,
+                    retained_tape,
+                )
             _clone_op(primal_function, op, primal_map)
 
     primal_output = primal_map.get(selected_output)
@@ -187,7 +196,7 @@ def _pushforward_linearization_modules(
     primal_tape_outputs = [primal_output]
     for value in tape_values:
         try:
-            primal_tape_outputs.append(primal_map[value])
+            primal_tape_outputs.append(retained_tape.get(value, primal_map[value]))
         except KeyError as exc:
             raise RuntimeError(
                 "internal autodiff error: reusable linearization tape value was not cloned"
@@ -285,6 +294,15 @@ def _pushforward_linearization_modules(
             ).results[0]
             continue
 
+        if op.opcode == "copy_into":
+            root, target, source = op.operands
+            tangents[result] = push_function.add_op(
+                "copy_into",
+                operands=(tangents[root], tangents[target], tangents[source]),
+                result_types=(result.type,),
+            ).results[0]
+            continue
+
         raise RuntimeError(
             f"internal autodiff error: unsupported reusable pushforward opcode {op.opcode!r}"
         )
@@ -308,9 +326,14 @@ def _validate_reusable_linearization_slice(
 ) -> None:
     producers = {value.producer for value in ancestors if value.producer is not None}
     for op in producers:
-        if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
+        if op.opcode in {"binary_into", "binary_inplace"}:
             raise AutodiffError(
-                f"reusable {context} linearization does not yet support write effects"
+                f"reusable {context} linearization does not yet support arithmetic write effects"
+            )
+        if op.opcode == "copy_into":
+            _direct_slice_write_attrs(
+                op,
+                context=f"reusable {context} linearization",
             )
         if op.opcode not in {
             "input",
@@ -323,6 +346,7 @@ def _validate_reusable_linearization_slice(
             "slice",
             "reverse",
             "transpose",
+            "copy_into",
         }:
             raise AutodiffError(
                 f"unsupported {op.opcode!r} operation on reusable {context} slice"
@@ -340,6 +364,31 @@ def _validate_reusable_linearization_slice(
             raise AutodiffError(
                 f"mixed-precision reusable {context} linearization is not supported"
             )
+
+
+def _capture_reusable_prewrite_tape_values(
+    function: Function,
+    op: Operation,
+    primal_map: dict[Value, Value],
+    tape_values: tuple[Value, ...],
+    retained_tape: dict[Value, Value],
+) -> None:
+    if op.opcode != "copy_into":
+        raise RuntimeError(
+            "internal autodiff error: expected copy_into for reusable tape snapshot"
+        )
+    root = op.operands[0]
+    for value in tape_values:
+        if value in retained_tape or value not in primal_map:
+            continue
+        if not _aliases_exact_root(value, root):
+            continue
+        cloned = primal_map[value]
+        retained_tape[value] = _multiply(
+            function,
+            cloned,
+            _ones(function, cloned.type),
+        )
 
 
 def _collect_reusable_linearization_tape_values(
@@ -371,7 +420,7 @@ def _pullback_linearization_modules(
     output_index: int = 0,
     wrt: Sequence[int] = (0,),
 ) -> tuple[Module, Module, int]:
-    """Split one static pure VJP into a one-shot primal tape and reusable pullback."""
+    """Split one bounded static VJP into a one-shot retained tape and reusable pullback."""
     if not isinstance(module, Module):
         raise TypeError("reusable pullback linearization requires a Module")
     verify(module)
@@ -396,6 +445,7 @@ def _pullback_linearization_modules(
 
     primal_function = Function(f"{module.function.name}_linearize_primal")
     primal_map: dict[Value, Value] = {}
+    retained_tape: dict[Value, Value] = {}
     for op in module.function.ops:
         if op.opcode == "return":
             continue
@@ -403,6 +453,14 @@ def _pullback_linearization_modules(
             result in ancestors for result in op.results
         )
         if include:
+            if op.opcode == "copy_into":
+                _capture_reusable_prewrite_tape_values(
+                    primal_function,
+                    op,
+                    primal_map,
+                    tape_values,
+                    retained_tape,
+                )
             _clone_op(primal_function, op, primal_map)
 
     primal_output = primal_map.get(selected_output)
@@ -413,7 +471,7 @@ def _pullback_linearization_modules(
     primal_tape_outputs = [primal_output]
     for value in tape_values:
         try:
-            primal_tape_outputs.append(primal_map[value])
+            primal_tape_outputs.append(retained_tape.get(value, primal_map[value]))
         except KeyError as exc:
             raise RuntimeError(
                 "internal autodiff error: reusable pullback tape value was not cloned"
@@ -642,6 +700,36 @@ def _propagate_reusable_pullback_adjoint(
             _scatter_slice(function, upstream, operand.type, op.attrs),
         )
         return
+    if op.opcode == "copy_into":
+        root, target, source = op.operands
+        attrs = _direct_slice_write_attrs(
+            op,
+            context="reusable pullback linearization",
+        )
+        region_upstream = _slice(
+            function,
+            upstream,
+            axis=attrs["axis"],
+            start=attrs["start"],
+            stop=attrs["stop"],
+            step=attrs["step"],
+        )
+        root_contribution = _replace_slice_region(
+            function,
+            upstream,
+            root.type,
+            attrs,
+            _zeros(function, target.type),
+        )
+        source_contribution = _unbroadcast(
+            function,
+            region_upstream,
+            source.type,
+        )
+        _accumulate(function, gradients, root, root_contribution)
+        _accumulate(function, gradients, source, source_contribution)
+        return
+
     raise RuntimeError(
         f"internal autodiff error: unsupported reusable pullback opcode {op.opcode!r}"
     )
