@@ -63,10 +63,12 @@ Admission and retention are separate policies. The ordinary `max_dynamic_special
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_gradient_module(...)`;
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_vjp_module(...)`;
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_hvp_module(...)`;
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_jvp_module(...)`;
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_module(...)`;
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_gradient_module(...)`;
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_vjp_module(...)`;
-- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_hvp_module(...)`.
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_hvp_module(...)`;
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_jvp_module(...)`.
 
 These facades add `max_cached_specializations`, a non-negative per-handle retention limit with deterministic least-recently-used ordering. A cache hit refreshes the binding to most-recently-used position. `max_cached_specializations=0` is valid: the newly created executable is returned to the caller but immediately removed from the managed handle's specialization map.
 
@@ -74,7 +76,7 @@ Managed serial native specializations coordinate ownership by the same exact pro
 
 An external reference to an evicted `NativeExecutable` remains usable but is not counted as managed retention ownership. After the final managed owner releases an identity, such a reference reacquires the same artifact on its next execution. With a persistent cache, the durable artifact is preserved and can be reloaded without another compiler invocation.
 
-Managed gradient, runtime-seeded VJP, and HVP specializations participate in the same serial native-artifact ownership registry after concrete runtime specialization and autodiff; they do not introduce another cache identity or release mechanism. Adaptive managed specialization, including adaptive gradients, VJPs, and HVPs, preserves backend truthfulness: evicting `backend="native"` releases one managed native ownership reference and unloads only if that was the final managed owner, while evicting `backend="loop"` releases only the retained specialization decision and does not increment native-release accounting. The handles expose `retained_bindings_lru`, `eviction_count`, and `released_native_artifact_count`; the release counter advances only for an actual native-cache removal/unload.
+Managed gradient, runtime-seeded VJP, HVP, and forward-mode JVP specializations participate in the same serial native-artifact ownership registry after concrete runtime specialization and autodiff; they do not introduce another cache identity or release mechanism. Adaptive managed specialization, including adaptive gradients, VJPs, HVPs, and JVPs, preserves backend truthfulness: evicting `backend="native"` releases one managed native ownership reference and unloads only if that was the final managed owner, while evicting `backend="loop"` releases only the retained specialization decision and does not increment native-release accounting. The handles expose `retained_bindings_lru`, `eviction_count`, and `released_native_artifact_count`; the release counter advances only for an actual native-cache removal/unload.
 
 `clear_native_cache()` remains an explicit process-wide override. Managed ownership does not block it. If the ordinary process cache was already cleared while owners remain, later managed eviction safely drops ownership without falsely reporting an unload that no longer exists; retained executable objects can reacquire through the existing native path.
 

@@ -10,10 +10,12 @@ The resource-managed dynamic facades add a separate `max_cached_specializations`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_gradient_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_vjp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_hvp_module(...)`
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_dynamic_jvp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_gradient_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_vjp_module(...)`
 - `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_hvp_module(...)`
+- `tiny_tensor_compiler.specialization_cache.compile_resource_managed_adaptive_dynamic_jvp_module(...)`
 
 The returned handles retain at most the configured number of specialization decisions in deterministic least-recently-used order. A cache hit refreshes that binding to most-recently-used position. `max_cached_specializations=0` is valid: a specialization may be returned to the caller while the managed handle retains no binding afterward.
 
@@ -27,9 +29,9 @@ Ownership is counted per handle and per retained specialization rather than as a
 
 An external reference to an evicted `NativeExecutable` remains valid but is deliberately not a managed-retention owner. After the final managed owner releases an identity, such a reference reacquires that artifact on its next invocation. Without a persistent cache this may compile again; with a configured persistent cache it reloads the durable artifact without invoking the compiler. Eviction never deletes the user-configured persistent cache artifact.
 
-Dynamic-gradient, dynamic-VJP, and dynamic-HVP handles use the same native artifact identity and ownership registry after runtime shape specialization and autodiff. Evicting a retained gradient, VJP, or HVP specialization therefore releases the generated transformed artifact under the same final-owner rule, while an external `NativeExecutable` reference remains usable and may reacquire the artifact later.
+Dynamic-gradient, dynamic-VJP, dynamic-HVP, and dynamic-JVP handles use the same native artifact identity and ownership registry after runtime shape specialization and autodiff. Evicting a retained gradient, VJP, HVP, or JVP specialization therefore releases the generated transformed artifact under the same final-owner rule, while an external `NativeExecutable` reference remains usable and may reacquire the artifact later.
 
-Adaptive dynamic execution, including adaptive dynamic gradients, runtime-seeded VJPs, and single-input HVPs, preserves the same distinction:
+Adaptive dynamic execution, including adaptive dynamic gradients, runtime-seeded VJPs, single-input HVPs, and forward-mode JVPs, preserves the same distinction:
 
 - an evicted `backend="native"` specialization releases one managed native ownership reference and unloads only when it was the final managed owner;
 - an evicted `backend="loop"` specialization releases only the retained backend decision because no native artifact exists.
