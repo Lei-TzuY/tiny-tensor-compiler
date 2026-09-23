@@ -146,7 +146,7 @@ def _pushforward_linearization_modules(
 ) -> tuple[Module, Module, int]:
     """Split one static pure JVP into a one-shot primal tape and reusable pushforward."""
     if not isinstance(module, Module):
-        raise TypeError("reusable {context} linearization requires a Module")
+        raise TypeError("reusable pushforward linearization requires a Module")
     verify(module)
 
     return_op = _terminal_return(module)
@@ -310,7 +310,7 @@ def _validate_reusable_linearization_slice(
     for op in producers:
         if op.opcode in {"copy_into", "binary_into", "binary_inplace"}:
             raise AutodiffError(
-                "reusable {context} linearization does not yet support write effects"
+                f"reusable {context} linearization does not yet support write effects"
             )
         if op.opcode not in {
             "input",
@@ -334,11 +334,11 @@ def _validate_reusable_linearization_slice(
         result_dtype = op.results[0].type.dtype
         if result_dtype not in _FLOAT_DTYPES:
             raise AutodiffError(
-                "reusable {context} linearization must use floating tensor values"
+                f"reusable {context} linearization must use floating tensor values"
             )
         if result_dtype != output_dtype:
             raise AutodiffError(
-                "mixed-precision reusable {context} linearization is not supported"
+                f"mixed-precision reusable {context} linearization is not supported"
             )
 
 
