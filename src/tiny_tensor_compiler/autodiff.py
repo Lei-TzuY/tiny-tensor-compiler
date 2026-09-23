@@ -53,6 +53,7 @@ _SUPPORTED_FORWARD_OPS = frozenset(
         "transpose",
         "copy_into",
         "binary_into",
+        "binary_inplace",
     }
 )
 _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
@@ -156,8 +157,11 @@ def jacobian_vector_product_module(
             continue
         if not any(result in ancestors for result in op.results):
             continue
-        if op.opcode == "binary_into" and op.attrs["operator"] == "mul":
-            _capture_forward_prewrite_target(
+        if (
+            op.opcode in {"binary_into", "binary_inplace"}
+            and op.attrs["operator"] == "mul"
+        ):
+            _capture_forward_prewrite_primal(
                 function,
                 op,
                 value_map,
@@ -186,27 +190,29 @@ def jacobian_vector_product_module(
     return transformed
 
 
-def _capture_forward_prewrite_target(
+def _capture_forward_prewrite_primal(
     function: Function,
     op: Operation,
     value_map: dict[Value, Value],
     forward_primal_tape: dict[Value, Value],
 ) -> None:
-    if op.opcode != "binary_into" or op.attrs.get("operator") != "mul":
+    if op.opcode not in {"binary_into", "binary_inplace"} or op.attrs.get(
+        "operator"
+    ) != "mul":
         raise RuntimeError(
-            "internal autodiff error: expected binary_into mul for forward primal tape"
+            "internal autodiff error: expected multiplicative write for forward primal tape"
         )
-    _root, target, _source = op.operands
+    primal = op.operands[1] if op.opcode == "binary_into" else op.operands[0]
     try:
-        cloned_target = value_map[target]
+        cloned_primal = value_map[primal]
     except KeyError as exc:
         raise RuntimeError(
-            "internal autodiff error: binary_into target primal was not cloned"
+            "internal autodiff error: pre-write primal was not cloned"
         ) from exc
-    forward_primal_tape[target] = _multiply(
+    forward_primal_tape[primal] = _multiply(
         function,
-        cloned_target,
-        _ones(function, cloned_target.type),
+        cloned_primal,
+        _ones(function, cloned_primal.type),
     )
 
 
@@ -285,6 +291,22 @@ def _forward_tangent(
             result_types=(cloned_op.results[0].type,),
         )
         return tangent_op.results[0]
+
+    if original_op.opcode == "binary_inplace":
+        root, source = original_op.operands
+        if original_op.attrs["operator"] == "add":
+            return _add(function, tangents[root], tangents[source])
+
+        root_primal = forward_primal_tape.get(root)
+        if root_primal is None:
+            raise RuntimeError(
+                "internal autodiff error: binary_inplace mul requires taped root primal"
+            )
+        return _add(
+            function,
+            _multiply(function, tangents[root], value_map[source]),
+            _multiply(function, root_primal, tangents[source]),
+        )
 
     if original_op.opcode == "binary_into":
         root, target, source = original_op.operands
