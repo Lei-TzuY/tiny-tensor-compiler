@@ -589,6 +589,25 @@ class AdaptiveDynamicVJPExecutable(AdaptiveDynamicGradientExecutable):
         return self.specialize(bindings)(inputs=provided)
 
 
+class AdaptiveDynamicJVPExecutable(AdaptiveDynamicGradientExecutable):
+    """Cache per-binding native-or-Loop runtime-seeded JVP specializations."""
+
+    def _transform_concrete_forward(self, concrete_forward: Module) -> Module:
+        return jacobian_vector_product_module(
+            concrete_forward,
+            output_index=self._output_index,
+            wrt=self._wrt,
+        )
+
+    def execute(self, inputs: Sequence[Any] = ()):
+        provided, bindings = _bind_runtime_tangent_forward_shapes(
+            self._module,
+            inputs,
+            tangent_count=len(self._wrt),
+        )
+        return self.specialize(bindings)(inputs=provided)
+
+
 class AdaptiveDynamicHVPExecutable(AdaptiveDynamicVJPExecutable):
     """Cache per-binding native-or-Loop single-input HVP specializations."""
 
@@ -853,6 +872,36 @@ def compile_dynamic_vjp_module(
         borrow_inputs=borrow_inputs,
         parallel=parallel,
         budget=budget,
+        compiler_timeout=compiler_timeout,
+        compile_deadline=compile_deadline,
+    )
+
+
+def compile_adaptive_dynamic_jvp_module(
+    module: Module,
+    *,
+    budget: CompileBudget,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+    compiler: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    borrow_inputs: bool = False,
+    parallel: bool = False,
+    compiler_timeout: float | None = None,
+    compile_deadline: float | None = None,
+) -> AdaptiveDynamicJVPExecutable:
+    """Prepare per-binding adaptive runtime-seeded JVP specializations."""
+    if not isinstance(budget, CompileBudget):
+        raise TypeError("budget must be a CompileBudget")
+    return AdaptiveDynamicJVPExecutable(
+        module,
+        budget,
+        compiler=compiler,
+        cache_dir=cache_dir,
+        output_index=output_index,
+        wrt=wrt,
+        borrow_inputs=borrow_inputs,
+        parallel=parallel,
         compiler_timeout=compiler_timeout,
         compile_deadline=compile_deadline,
     )
