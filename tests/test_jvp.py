@@ -266,3 +266,71 @@ def test_jvp_rejects_non_direct_binary_into_target():
         match="binary_into forward-mode JVP currently requires a direct slice target",
     ):
         jacobian_vector_product_module(module, wrt=(0, 1))
+
+
+
+def test_jvp_differentiates_binary_inplace_add_across_backends():
+    builder = GraphBuilder("jvp-binary-inplace-add")
+    base = builder.input((4,), DType.FLOAT64)
+    source = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.binary_inplace(source, operator="add"))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    source_value = np.array([5.0, 6.0, -7.0, 8.0], dtype=np.float64)
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0], dtype=np.float64)
+    source_tangent = np.array([2.0, -3.0, 4.0, 0.25], dtype=np.float64)
+    expected = base_tangent + source_tangent
+
+    for actual in _execute_all_backends(
+        jvp,
+        (base_value, source_value, base_tangent, source_tangent),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_jvp_differentiates_binary_inplace_mul_across_backends():
+    builder = GraphBuilder("jvp-binary-inplace-mul")
+    base = builder.input((4,), DType.FLOAT64)
+    source = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    module = builder.finish(root.binary_inplace(source, operator="mul"))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    source_value = np.array([5.0, 6.0, -7.0, 8.0], dtype=np.float64)
+    base_tangent = np.array([0.5, -1.0, 1.5, -2.0], dtype=np.float64)
+    source_tangent = np.array([2.0, -3.0, 4.0, 0.25], dtype=np.float64)
+    expected = base_tangent * source_value + base_value * source_tangent
+
+    for actual in _execute_all_backends(
+        jvp,
+        (base_value, source_value, base_tangent, source_tangent),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_jvp_tapes_prewrite_root_for_binary_inplace_source_path():
+    builder = GraphBuilder("jvp-binary-inplace-prewrite-source")
+    base = builder.input((4,), DType.FLOAT64)
+    factor = builder.input((4,), DType.FLOAT64)
+    root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
+    source = root * factor
+    module = builder.finish(root.binary_inplace(source, operator="mul"))
+
+    jvp = jacobian_vector_product_module(module, wrt=(0, 1))
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    factor_value = np.array([0.5, -1.5, 2.0, 3.0], dtype=np.float64)
+    base_tangent = np.array([0.25, -0.5, 1.0, -1.5], dtype=np.float64)
+    factor_tangent = np.array([2.0, 0.5, -0.25, 1.25], dtype=np.float64)
+    expected = (
+        2.0 * base_value * factor_value * base_tangent
+        + base_value * base_value * factor_tangent
+    )
+
+    for actual in _execute_all_backends(
+        jvp,
+        (base_value, factor_value, base_tangent, factor_tangent),
+    ):
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
