@@ -283,15 +283,60 @@ def test_shared_linearization_retains_binary_into_mul_primals():
     assert state.pullback_query_count == 2
 
 
-def test_shared_linearization_keeps_binary_inplace_fail_closed():
-    builder = GraphBuilder("shared-linearization-binary-inplace")
+def test_shared_linearization_retains_binary_inplace_mul_primals():
+    builder = GraphBuilder("shared-linearization-binary-inplace-mul")
     base = builder.input((4,), DType.FLOAT64)
-    source = builder.input((4,), DType.FLOAT64)
+    factor = builder.input((4,), DType.FLOAT64)
     root = base + builder.tensor(0.0, dtype=DType.FLOAT64)
-    module = builder.finish(root.binary_inplace(source, operator="add"))
+    source = factor * factor
+    module = builder.finish(root.binary_inplace(source, operator="mul"))
 
-    with pytest.raises(
-        AutodiffError,
-        match="reusable shared linearization.*arithmetic write effects",
-    ):
-        compile_linearization(module, wrt=(0, 1))
+    executable = compile_linearization(module, wrt=(0, 1))
+    assert executable.tape_value_count == 2
+
+    base_value = np.array([1.0, -2.0, 3.0, -4.0], dtype=np.float64)
+    factor_value = np.array([0.5, -1.5, 2.0, 3.0], dtype=np.float64)
+    frozen_base = np.array(base_value, copy=True)
+    frozen_factor = np.array(factor_value, copy=True)
+    frozen_source = frozen_factor * frozen_factor
+    expected_primal = frozen_base * frozen_source
+
+    state = executable.linearize((base_value, factor_value))
+    np.testing.assert_allclose(state.primal, expected_primal, rtol=0.0, atol=0.0)
+
+    base_value[...] = 1000.0
+    factor_value[...] = -1000.0
+
+    base_tangent = np.array([0.25, -0.5, 0.75, -1.0], dtype=np.float64)
+    factor_tangent = np.array([1.5, -2.0, 0.5, 0.25], dtype=np.float64)
+    expected_pushforward = (
+        base_tangent * frozen_source
+        + frozen_base * (2.0 * frozen_factor * factor_tangent)
+    )
+    np.testing.assert_allclose(
+        state.pushforward((base_tangent, factor_tangent)),
+        expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    cotangent = np.array([2.0, -3.0, 4.0, 0.25], dtype=np.float64)
+    expected_base = cotangent * frozen_source
+    expected_factor = cotangent * frozen_base * (2.0 * frozen_factor)
+    actual_pullback = state.pullback(cotangent)
+    assert isinstance(actual_pullback, tuple)
+    np.testing.assert_allclose(actual_pullback[0], expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(actual_pullback[1], expected_factor, rtol=0.0, atol=0.0)
+
+    np.testing.assert_allclose(
+        state.pushforward((-base_tangent, -factor_tangent)),
+        -expected_pushforward,
+        rtol=0.0,
+        atol=0.0,
+    )
+    second_pullback = state.pullback(-cotangent)
+    assert isinstance(second_pullback, tuple)
+    np.testing.assert_allclose(second_pullback[0], -expected_base, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(second_pullback[1], -expected_factor, rtol=0.0, atol=0.0)
+    assert state.pushforward_query_count == 2
+    assert state.pullback_query_count == 2
