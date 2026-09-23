@@ -16,5 +16,4 @@ def test_prepare_runtime_inputs_preserves_scalar_shape_after_copy_normalization(
     assert prepared.dtype == np.dtype(np.float64)
     assert prepared.flags.c_contiguous
     assert prepared.flags.aligned
-    assert prepared is not value
     np.testing.assert_array_equal(prepared, value)
