@@ -111,6 +111,40 @@ def jacobian_vector_product_module(
     exact-type tangent input for each requested wrt input in wrt order, and returns
     the tangent of the selected output.
     """
+    return _forward_mode_module(
+        module,
+        output_index=output_index,
+        wrt=wrt,
+        return_primal=False,
+    )
+
+
+def value_and_jacobian_vector_product_module(
+    module: Module,
+    *,
+    output_index: int = 0,
+    wrt: Sequence[int] = (0,),
+) -> Module:
+    """Build one joint primal-plus-JVP program for a static floating output.
+
+    The transformed verified module preserves the JVP runtime ABI but returns the
+    selected primal output and its tangent from one shared forward clone.
+    """
+    return _forward_mode_module(
+        module,
+        output_index=output_index,
+        wrt=wrt,
+        return_primal=True,
+    )
+
+
+def _forward_mode_module(
+    module: Module,
+    *,
+    output_index: int,
+    wrt: Sequence[int],
+    return_primal: bool,
+) -> Module:
     if not isinstance(module, Module):
         raise TypeError("forward-mode JVP requires a Module")
     verify(module)
@@ -128,7 +162,8 @@ def jacobian_vector_product_module(
     _validate_static_floating_contract(selected_output, requested, input_ops, ancestors)
     _validate_forward_slice(ancestors, selected_output.type.dtype)
 
-    function = Function(f"{module.function.name}_jvp")
+    suffix = "value_and_jvp" if return_primal else "jvp"
+    function = Function(f"{module.function.name}_{suffix}")
     value_map: dict[Value, Value] = {}
     tangents: dict[Value, Value] = {}
     forward_primal_tape: dict[Value, Value] = {}
@@ -184,11 +219,19 @@ def jacobian_vector_product_module(
     if tangent_output.type != selected_output.type:
         raise RuntimeError("internal autodiff error: JVP output type does not match primal output")
 
-    function.add_op("return", operands=(tangent_output,))
+    if return_primal:
+        primal_output = value_map.get(selected_output)
+        if primal_output is None:
+            raise RuntimeError(
+                "internal autodiff error: selected JVP primal output was not cloned"
+            )
+        function.add_op("return", operands=(primal_output, tangent_output))
+    else:
+        function.add_op("return", operands=(tangent_output,))
+
     transformed = Module(function)
     verify(transformed)
     return transformed
-
 
 def _capture_forward_prewrite_primal(
     function: Function,
