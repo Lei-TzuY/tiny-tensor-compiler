@@ -65,6 +65,27 @@ The state file is intentionally not self-authenticating. A caller relying on rol
 
 `load_release_channel_registry()` then loads the already verified archive through the existing compiler-free bundle-set executable. Release metadata does not bypass archive SHA-256 verification, archive structure verification, target/ABI checks, or publisher attestation.
 
+## Retained linearization releases
+
+`publish_linearization_release_channel()`, `fetch_linearization_release_channel_archive()`,
+and `load_linearization_release_channel_registry()` apply the same signed-head and rollback
+protocol to `retained-linearization-bundle-set` archives. They reuse the publisher-attested
+retained archive verifier and the same `ReleaseStateStore`, keyed by publisher and channel.
+There is no separate sequence space for retained payloads. A payload of the wrong kind or an
+invalid attestation cannot advance the floor or publish the destination.
+
+The loaded `LinearizationReleaseChannelRegistryExecutable` exposes its accepted `checkpoint`,
+`sequence`, `channel`, `publisher_id`, `digest`, and finite symbolic bindings. Calling
+`linearize(inputs)` returns the existing retained `LinearizationState`: its frozen primal and
+repeated `pushforward(tangents)` / `pullback(cotangent)` queries require no compiler lookup and
+preserve the retained bundle's coordinated component ABI. `close()` releases the loaded components
+and private download directory and prevents further linearization requests.
+
+Rollback replay is rejected before either an archive or attestation request. The floor is checked
+again after payload verification, under the same cross-process lock, before publication. The
+security boundary below also applies to retained releases; threshold and transparency policy
+integration is not implied by this API.
+
 ## Security boundary
 
 This phase proves a narrow rollback property. It does **not** claim:
