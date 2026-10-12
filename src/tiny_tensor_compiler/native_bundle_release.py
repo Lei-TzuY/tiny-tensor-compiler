@@ -18,7 +18,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 from .ir import SymbolicDim
 from .native_bundle import NativeBundleExecutable
-from .native_bundle_archive import NativeBundleSetArchiveExecutable, load_dynamic_bundle_set_archive
+from .native_bundle_archive import (
+    NativeBundleSetArchiveExecutable,
+    NativeLinearizationBundleSetArchiveExecutable,
+    load_dynamic_bundle_set_archive,
+    load_dynamic_linearization_bundle_set_archive,
+)
 from .native_bundle_attestation import (
     NativeBundleTrustError,
     PublisherTrustPolicy,
@@ -34,10 +39,14 @@ from .native_bundle_registry import (
     _validate_timeout,
     _validate_token,
     digest_dynamic_bundle_set_archive,
+    digest_dynamic_linearization_bundle_set_archive,
 )
 from .native_bundle_trust import (
+    AttestedNativeLinearizationBundleRegistryExecutable,
     fetch_attested_dynamic_bundle_set_archive,
+    fetch_attested_dynamic_linearization_bundle_set_archive,
     publish_attested_dynamic_bundle_set_archive,
+    publish_attested_dynamic_linearization_bundle_set_archive,
 )
 from .native_cache_lock import _lock_stream, _unlock_stream
 
@@ -195,6 +204,35 @@ class ReleaseChannelRegistryExecutable:
         return self.execute(inputs=inputs, out=out)
 
 
+class LinearizationReleaseChannelRegistryExecutable(
+    AttestedNativeLinearizationBundleRegistryExecutable
+):
+    """Retained primal/derivative state from one rollback-checked publisher release."""
+
+    def __init__(
+        self,
+        executable: NativeLinearizationBundleSetArchiveExecutable,
+        download_root: Path,
+        checkpoint: ReleaseCheckpoint,
+    ) -> None:
+        super().__init__(
+            executable, download_root, checkpoint.archive_digest, checkpoint.publisher_id
+        )
+        self._checkpoint = checkpoint
+
+    @property
+    def checkpoint(self) -> ReleaseCheckpoint:
+        return self._checkpoint
+
+    @property
+    def channel(self) -> str:
+        return self._checkpoint.channel
+
+    @property
+    def sequence(self) -> int:
+        return self._checkpoint.sequence
+
+
 def create_release_checkpoint(
     private_key: bytes,
     channel: str,
@@ -280,9 +318,53 @@ def publish_release_channel(
     max_bytes: int = 512 * 1024 * 1024,
 ) -> ReleaseCheckpoint:
     """Advance a publisher channel to a higher signed sequence and verified archive."""
+    return _publish_release_channel(
+        archive, registry_url, private_key, channel, sequence,
+        linearization=False, token=token, allow_insecure_http=allow_insecure_http,
+        timeout=timeout, max_bytes=max_bytes,
+    )
+
+
+def publish_linearization_release_channel(
+    archive: str | os.PathLike[str],
+    registry_url: str,
+    private_key: bytes,
+    channel: str,
+    sequence: int,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = 512 * 1024 * 1024,
+) -> ReleaseCheckpoint:
+    """Publish an attested retained-linearization archive under a signed channel head."""
+    return _publish_release_channel(
+        archive, registry_url, private_key, channel, sequence,
+        linearization=True, token=token, allow_insecure_http=allow_insecure_http,
+        timeout=timeout, max_bytes=max_bytes,
+    )
+
+
+def _publish_release_channel(
+    archive: str | os.PathLike[str],
+    registry_url: str,
+    private_key: bytes,
+    channel: str,
+    sequence: int,
+    *,
+    linearization: bool,
+    token: str | None,
+    allow_insecure_http: bool,
+    timeout: float,
+    max_bytes: int,
+) -> ReleaseCheckpoint:
     normalized_channel = _normalize_channel(channel)
     normalized_sequence = _validate_sequence(sequence)
-    digest = digest_dynamic_bundle_set_archive(archive)
+    digest_archive = (
+        digest_dynamic_linearization_bundle_set_archive
+        if linearization else digest_dynamic_bundle_set_archive
+    )
+    digest = digest_archive(archive)
     public_key = publisher_public_key_from_private_key(private_key)
     publisher_id = publisher_id_from_public_key(public_key)
     policy = PublisherTrustPolicy((public_key,))
@@ -321,7 +403,11 @@ def publish_release_channel(
                 "release channel cannot bind the same sequence to a different digest"
             )
 
-    published_digest, published_id = publish_attested_dynamic_bundle_set_archive(
+    publish_archive = (
+        publish_attested_dynamic_linearization_bundle_set_archive
+        if linearization else publish_attested_dynamic_bundle_set_archive
+    )
+    published_digest, published_id = publish_archive(
         archive,
         base_url,
         private_key,
@@ -388,6 +474,48 @@ def fetch_release_channel_archive(
     max_bytes: int = 512 * 1024 * 1024,
 ) -> ReleaseCheckpoint:
     """Fetch a signed channel head and archive without accepting a local rollback."""
+    return _fetch_release_channel_archive(
+        registry_url, publisher_id, channel, destination, trust_policy, state_store,
+        linearization=False, token=token, allow_insecure_http=allow_insecure_http,
+        timeout=timeout, max_bytes=max_bytes,
+    )
+
+
+def fetch_linearization_release_channel_archive(
+    registry_url: str,
+    publisher_id: str,
+    channel: str,
+    destination: str | os.PathLike[str],
+    trust_policy: PublisherTrustPolicy,
+    state_store: ReleaseStateStore,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = 512 * 1024 * 1024,
+) -> ReleaseCheckpoint:
+    """Fetch an attested retained release after checking the persistent rollback floor."""
+    return _fetch_release_channel_archive(
+        registry_url, publisher_id, channel, destination, trust_policy, state_store,
+        linearization=True, token=token, allow_insecure_http=allow_insecure_http,
+        timeout=timeout, max_bytes=max_bytes,
+    )
+
+
+def _fetch_release_channel_archive(
+    registry_url: str,
+    publisher_id: str,
+    channel: str,
+    destination: str | os.PathLike[str],
+    trust_policy: PublisherTrustPolicy,
+    state_store: ReleaseStateStore,
+    *,
+    linearization: bool,
+    token: str | None,
+    allow_insecure_http: bool,
+    timeout: float,
+    max_bytes: int,
+) -> ReleaseCheckpoint:
     if not isinstance(trust_policy, PublisherTrustPolicy):
         raise TypeError("trust_policy must be a PublisherTrustPolicy")
     if not isinstance(state_store, ReleaseStateStore):
@@ -425,9 +553,13 @@ def fetch_release_channel_archive(
     staging_root = Path(
         tempfile.mkdtemp(prefix=f".{destination_path.name}.release-", dir=destination_path.parent)
     )
-    staged_archive = staging_root / "payload.ttca"
+    staged_archive = staging_root / ("payload.ttcla" if linearization else "payload.ttca")
     try:
-        fetch_attested_dynamic_bundle_set_archive(
+        fetch_archive = (
+            fetch_attested_dynamic_linearization_bundle_set_archive
+            if linearization else fetch_attested_dynamic_bundle_set_archive
+        )
+        fetch_archive(
             base_url,
             checkpoint.archive_digest,
             checkpoint.publisher_id,
@@ -481,6 +613,34 @@ def load_release_channel_registry(
         )
         executable = load_dynamic_bundle_set_archive(archive)
         return ReleaseChannelRegistryExecutable(executable, root, checkpoint)
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
+def load_linearization_release_channel_registry(
+    registry_url: str,
+    publisher_id: str,
+    channel: str,
+    trust_policy: PublisherTrustPolicy,
+    state_store: ReleaseStateStore,
+    *,
+    token: str | None = None,
+    allow_insecure_http: bool = False,
+    timeout: float = 30.0,
+    max_bytes: int = 512 * 1024 * 1024,
+) -> LinearizationReleaseChannelRegistryExecutable:
+    """Load compiler-free retained primal/derivative state from an accepted release."""
+    root = Path(tempfile.mkdtemp(prefix="ttc-linearization-release-channel-"))
+    archive = root / "payload.ttcla"
+    try:
+        checkpoint = fetch_linearization_release_channel_archive(
+            registry_url, publisher_id, channel, archive, trust_policy, state_store,
+            token=token, allow_insecure_http=allow_insecure_http, timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        executable = load_dynamic_linearization_bundle_set_archive(archive)
+        return LinearizationReleaseChannelRegistryExecutable(executable, root, checkpoint)
     except Exception:
         shutil.rmtree(root, ignore_errors=True)
         raise
