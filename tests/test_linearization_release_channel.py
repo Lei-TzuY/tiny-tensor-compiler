@@ -4,10 +4,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-
-import tiny_tensor_compiler as ttc
 from test_bundle_attested_registry import _key, _linearization_archive
 from test_bundle_release_channel import _archive, _server
+
+import tiny_tensor_compiler as ttc
 
 
 def publisher():
